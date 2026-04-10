@@ -1,0 +1,111 @@
+import { contextBridge, ipcRenderer } from 'electron'
+
+export type PtySpawnResult = { id: string; projectPath: string }
+export type FsEntry = { name: string; path: string; isDirectory: boolean }
+export type SavedSession = { claudeSessionId: string; projectPath: string; terminalTitle: string | null; savedAt: number }
+
+const api = {
+  // PTY operations
+  spawnSession: (cwd: string, command?: string, args?: string[], allowedTools?: string[]): Promise<PtySpawnResult> =>
+    ipcRenderer.invoke('pty:spawn', { cwd, command, args, allowedTools }),
+
+  resumeSession: (claudeSessionId: string, projectPath: string): Promise<PtySpawnResult> =>
+    ipcRenderer.invoke('pty:resume', { claudeSessionId, projectPath }),
+
+  writeSession: (id: string, data: string): void =>
+    ipcRenderer.send('pty:write', { id, data }),
+
+  writeWhenReady: (id: string, data: string): void =>
+    ipcRenderer.send('pty:writeWhenReady', { id, data }),
+
+  resizeSession: (id: string, cols: number, rows: number): void =>
+    ipcRenderer.send('pty:resize', { id, cols, rows }),
+
+  killSession: (id: string): void =>
+    ipcRenderer.send('pty:kill', { id }),
+
+  updateSessionTitle: (id: string, title: string): void =>
+    ipcRenderer.send('pty:title', { id, title }),
+
+  getClaudeSessionInfo: (id: string): Promise<{ claudeSessionId: string | null; isResumable: boolean } | null> =>
+    ipcRenderer.invoke('pty:claudeSessionInfo', { id }),
+
+  onPtyData: (callback: (data: { id: string; data: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; data: string }) =>
+      callback(data)
+    ipcRenderer.on('pty:data', handler)
+    return (): void => { ipcRenderer.removeListener('pty:data', handler) }
+  },
+
+  onPtyExit: (callback: (data: { id: string; exitCode: number }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; exitCode: number }) =>
+      callback(data)
+    ipcRenderer.on('pty:exit', handler)
+    return (): void => { ipcRenderer.removeListener('pty:exit', handler) }
+  },
+
+  onClaudeStatus: (callback: (data: { id: string; status: string }) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      data: { id: string; status: string }
+    ) => callback(data)
+    ipcRenderer.on('claude:status', handler)
+    return (): void => { ipcRenderer.removeListener('claude:status', handler) }
+  },
+
+  // Saved sessions
+  loadSavedSessions: (): Promise<SavedSession[]> =>
+    ipcRenderer.invoke('sessions:loadSaved'),
+
+  clearSavedSessions: (): Promise<void> =>
+    ipcRenderer.invoke('sessions:clearSaved'),
+
+  // Settings
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string> }> =>
+    ipcRenderer.invoke('settings:load'),
+
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string> }): Promise<void> =>
+    ipcRenderer.invoke('settings:save', settings),
+
+  // File system operations
+  readFile: (path: string): Promise<string> =>
+    ipcRenderer.invoke('fs:readFile', path),
+
+  readDirectory: (path: string): Promise<FsEntry[]> =>
+    ipcRenderer.invoke('fs:readdir', path),
+
+  getHomeDir: (): Promise<string> =>
+    ipcRenderer.invoke('fs:homedir'),
+
+  isDirectory: (path: string): Promise<boolean> =>
+    ipcRenderer.invoke('fs:isDirectory', path),
+
+  getResourcesPath: (): Promise<string> =>
+    ipcRenderer.invoke('fs:resourcesPath'),
+
+  onGlobalEscape: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('global:escape', handler)
+    return (): void => { ipcRenderer.removeListener('global:escape', handler) }
+  },
+
+  onGlobalHotkey: (callback: (key: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, key: string) => callback(key)
+    ipcRenderer.on('global:hotkey', handler)
+    return (): void => { ipcRenderer.removeListener('global:hotkey', handler) }
+  },
+
+  // Skill commands — dynamically install/uninstall Claude Code slash commands
+  installSkill: (skillName: string, content: string): Promise<string> =>
+    ipcRenderer.invoke('skill:install', { skillName, content }),
+
+  uninstallSkill: (skillName: string): void =>
+    ipcRenderer.send('skill:uninstall', { skillName }),
+
+  cleanupAllSkills: (): void =>
+    ipcRenderer.send('skill:cleanupAll')
+}
+
+contextBridge.exposeInMainWorld('api', api)
+
+export type Api = typeof api

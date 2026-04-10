@@ -1,0 +1,705 @@
+import { useEffect, useCallback, useRef, useState } from 'react'
+import { useStore, defaultHotkeys, type HotkeyMap } from './store'
+import { GraphView } from './components/GraphView'
+import { FileExplorer } from './components/FileExplorer'
+import { Settings } from './components/Settings'
+import { SidebarPicker } from './components/SidebarPicker'
+import { DesignGallery } from './components/DesignGallery'
+import { AgentGallery } from './components/AgentGallery'
+import { SkillsGallery } from './components/SkillsGallery'
+import { getTerminalCanvas, disposeTerminal, focusTerminal } from './components/Terminal'
+import { Terminal } from './components/Terminal'
+import { useDesigns } from './hooks/useDesigns'
+import { useAgents } from './hooks/useAgents'
+import { useSkills } from './hooks/useSkills'
+
+// Snapshot capture interval
+const SNAPSHOT_INTERVAL_ACTIVE = 500
+const SNAPSHOT_INTERVAL_IDLE = 3000
+const IDLE_THRESHOLD = 5000
+
+// Thumbnail dimensions (CSS pixels — canvas backing is scaled by devicePixelRatio)
+const THUMB_W = 192
+const THUMB_H = 120
+
+
+
+interface SavedSessionInfo {
+  claudeSessionId: string
+  projectPath: string
+  terminalTitle: string | null
+  savedAt: number
+}
+
+export function App(): JSX.Element {
+  const sessions = useStore((s) => s.sessions)
+  const viewMode = useStore((s) => s.viewMode)
+  const setViewMode = useStore((s) => s.setViewMode)
+  const focusedSessionId = useStore((s) => s.focusedSessionId)
+  const setFocusedSessionId = useStore((s) => s.setFocusedSessionId)
+  const addSession = useStore((s) => s.addSession)
+  const removeSession = useStore((s) => s.removeSession)
+  const updateSessionStatus = useStore((s) => s.updateSessionStatus)
+  const updateSessionSnapshot = useStore((s) => s.updateSessionSnapshot)
+  const updateSessionTitle = useStore((s) => s.updateSessionTitle)
+  const markSessionSeen = useStore((s) => s.markSessionSeen)
+  const autoFocusOnSpawn = useStore((s) => s.autoFocusOnSpawn)
+  const setAutoFocusOnSpawn = useStore((s) => s.setAutoFocusOnSpawn)
+  const baseProjectsDir = useStore((s) => s.baseProjectsDir)
+  const setBaseProjectsDir = useStore((s) => s.setBaseProjectsDir)
+  const persistExplorerPath = useStore((s) => s.persistExplorerPath)
+  const setPersistExplorerPath = useStore((s) => s.setPersistExplorerPath)
+  const explorerFollowsProject = useStore((s) => s.explorerFollowsProject)
+  const setExplorerFollowsProject = useStore((s) => s.setExplorerFollowsProject)
+  const hotkeys = useStore((s) => s.hotkeys)
+  const setHotkeys = useStore((s) => s.setHotkeys)
+  const selectedIndex = useStore((s) => s.selectedSessionIndex)
+
+  // Panel data
+  const { items: designItems } = useDesigns()
+  const { items: agentItems } = useAgents()
+  const { items: skillItems } = useSkills()
+
+  // Track last data received per session for idle detection
+  const lastDataRef = useRef<Map<string, number>>(new Map())
+  const firstSnapshotTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // Panel state
+  const activePanel = useStore((s) => s.activePanel)
+  const setActivePanel = useStore((s) => s.setActivePanel)
+  const explorerCurrentPath = useRef<string>('')
+
+  // Settings
+  const [showSettings, setShowSettings] = useState(false)
+
+  // Saved sessions restore prompt
+  const [savedSessions, setSavedSessions] = useState<SavedSessionInfo[]>([])
+  const [showRestorePrompt, setShowRestorePrompt] = useState(false)
+
+  // Load persisted settings on startup
+  const settingsLoadedRef = useRef(false)
+  useEffect(() => {
+    window.api.loadSettings().then((settings) => {
+      if (settings.baseProjectsDir) setBaseProjectsDir(settings.baseProjectsDir)
+      setAutoFocusOnSpawn(settings.autoFocusOnSpawn)
+      setPersistExplorerPath(settings.persistExplorerPath)
+      setExplorerFollowsProject(settings.explorerFollowsProject)
+      if (settings.hotkeys) setHotkeys({ ...defaultHotkeys, ...settings.hotkeys } as HotkeyMap)
+      settingsLoadedRef.current = true
+    })
+  }, [])
+
+  // Persist settings whenever they change (only after initial load to avoid overwriting)
+  useEffect(() => {
+    if (!settingsLoadedRef.current) return
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string> })
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys])
+
+  // Check for saved sessions on startup
+  useEffect(() => {
+    window.api.loadSavedSessions().then((saved) => {
+      if (saved.length > 0) {
+        setSavedSessions(saved)
+        setShowRestorePrompt(true)
+      }
+    })
+  }, [])
+
+  // Resume saved sessions
+  const restoreSessions = useCallback(async () => {
+    for (const saved of savedSessions) {
+      const result = await window.api.resumeSession(saved.claudeSessionId, saved.projectPath)
+      addSession(result.id, result.projectPath)
+      if (saved.terminalTitle) {
+        updateSessionTitle(result.id, saved.terminalTitle)
+        window.api.updateSessionTitle(result.id, saved.terminalTitle)
+      }
+    }
+    await window.api.clearSavedSessions()
+    setSavedSessions([])
+    setShowRestorePrompt(false)
+  }, [savedSessions, addSession, updateSessionTitle])
+
+  // Update title in both renderer store and main process
+  const handleTitleChange = useCallback(
+    (id: string, title: string) => {
+      const titleClean = title.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim()
+      if (titleClean === 'Claude Code') {
+        const current = sessions.find((s) => s.id === id)?.terminalTitle
+        const currentClean = current?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
+        if (currentClean !== '' && currentClean !== 'Claude Code') return
+      }
+      updateSessionTitle(id, title)
+      window.api.updateSessionTitle(id, title)
+    },
+    [sessions, updateSessionTitle]
+  )
+
+  // Dismiss saved sessions
+  const dismissSaved = useCallback(async () => {
+    await window.api.clearSavedSessions()
+    setSavedSessions([])
+    setShowRestorePrompt(false)
+  }, [])
+
+  // Resolve the best project path for spawning
+  const resolveProjectPath = useCallback(async (cwd?: string): Promise<string> => {
+    if (cwd) return cwd
+    const fromSession = sessions[selectedIndex]?.projectPath
+    if (fromSession) return fromSession
+    return baseProjectsDir || (await window.api.getHomeDir())
+  }, [sessions, selectedIndex, baseProjectsDir])
+
+  // Spawn a new claude session
+  const spawnSession = useCallback(
+    async (cwd?: string) => {
+      const projectPath = await resolveProjectPath(cwd)
+
+      console.log('[spawn] calling api.spawnSession with path:', projectPath)
+      const result = await window.api.spawnSession(projectPath, 'claude')
+      console.log('[spawn] session created:', result)
+      addSession(result.id, result.projectPath)
+
+      if (autoFocusOnSpawn) {
+        setFocusedSessionId(result.id)
+        setViewMode('focused')
+      }
+    },
+    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn]
+  )
+
+  // Spawn a plain terminal
+  const spawnTerminal = useCallback(
+    async (cwd?: string) => {
+      const projectPath = await resolveProjectPath(cwd)
+
+      // Pass 'shell' as a sentinel — main process resolves the actual shell binary
+      const result = await window.api.spawnSession(projectPath, 'shell')
+      addSession(result.id, result.projectPath)
+
+      if (autoFocusOnSpawn) {
+        setFocusedSessionId(result.id)
+        setViewMode('focused')
+      }
+    },
+    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn]
+  )
+
+  // Handle spawning from file explorer
+  const handleSpawnInDir = useCallback(
+    (dir: string) => {
+      explorerCurrentPath.current = dir
+      spawnSession(dir)
+      setActivePanel(null)
+    },
+    [spawnSession, setActivePanel]
+  )
+
+  // Spawn a new agent session (installed as slash command with --allowedTools)
+  const handleSpawnAgent = useCallback(
+    async (name: string, content: string, allowedTools?: string[]) => {
+      const projectPath = await resolveProjectPath()
+      const commandName = await window.api.installSkill(name, content)
+      const result = await window.api.spawnSession(
+        projectPath,
+        'claude',
+        [],
+        allowedTools
+      )
+      addSession(result.id, result.projectPath)
+      window.api.writeWhenReady(result.id, `/${commandName}\r`)
+      setActivePanel(null)
+    },
+    [resolveProjectPath, addSession, setActivePanel]
+  )
+
+  // Spawn a new session with a skill (installed as a Claude Code slash command)
+  const handleSpawnWithSkill = useCallback(
+    async (skillName: string, content: string) => {
+      const commandName = await window.api.installSkill(skillName, content)
+      await spawnSession()
+      const store = useStore.getState()
+      const latestSession = store.sessions[store.sessions.length - 1]
+      if (latestSession) {
+        window.api.writeWhenReady(latestSession.id, `/${commandName}\r`)
+      }
+      setActivePanel(null)
+    },
+    [spawnSession, setActivePanel]
+  )
+
+  // Inject a skill into the focused session by restarting Claude Code
+  const handleInjectSkill = useCallback(
+    async (skillName: string, content: string) => {
+      if (!focusedSessionId) return
+      const session = sessions.find((s) => s.id === focusedSessionId)
+      if (!session) return
+
+      const info = await window.api.getClaudeSessionInfo(focusedSessionId)
+      if (!info) return
+
+      // Install the skill before restarting so the new process discovers it
+      const commandName = await window.api.installSkill(skillName, content)
+
+      // Tear down the old session
+      window.api.killSession(focusedSessionId)
+      disposeTerminal(focusedSessionId)
+      removeSession(focusedSessionId)
+
+      // If the session had real conversation history, resume it; otherwise start fresh
+      let result
+      if (info.isResumable && info.claudeSessionId) {
+        result = await window.api.resumeSession(info.claudeSessionId, session.projectPath)
+      } else {
+        result = await window.api.spawnSession(session.projectPath, 'claude')
+      }
+
+      addSession(result.id, result.projectPath)
+      if (session.terminalTitle) {
+        updateSessionTitle(result.id, session.terminalTitle)
+      }
+      setFocusedSessionId(result.id)
+      window.api.writeWhenReady(result.id, `/${commandName}\r`)
+      setActivePanel(null)
+    },
+    [focusedSessionId, sessions, removeSession, addSession, updateSessionTitle, setFocusedSessionId, setActivePanel]
+  )
+
+  // Capture a single session's snapshot
+  const captureSnapshot = useCallback((sessionId: string): void => {
+    const canvas = getTerminalCanvas(sessionId)
+    if (!canvas) return
+    const dpr = window.devicePixelRatio || 1
+    const thumb = document.createElement('canvas')
+    thumb.width = THUMB_W * dpr
+    thumb.height = THUMB_H * dpr
+    const ctx = thumb.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height)
+    updateSessionSnapshot(sessionId, thumb)
+  }, [updateSessionSnapshot])
+
+  // Force-close the focused session (kills PTY, returns to graph)
+  const forceCloseSession = useCallback(
+    (sessionId: string) => {
+      captureSnapshot(sessionId)
+      window.api.killSession(sessionId)
+      disposeTerminal(sessionId)
+      removeSession(sessionId)
+      setFocusedSessionId(null)
+      setViewMode('graph')
+    },
+    [captureSnapshot, removeSession, setFocusedSessionId, setViewMode]
+  )
+
+  // Snapshot capture helper
+  const captureAllSnapshots = useCallback(() => {
+    for (const session of sessions) {
+      captureSnapshot(session.id)
+    }
+  }, [sessions, captureSnapshot])
+
+  // Global hotkeys
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      const meta = e.metaKey || e.ctrlKey
+      if (!meta) return
+
+      // Build a key string that includes shift modifier, e.g. "shift+t" or just "t"
+      const key = (e.shiftKey ? 'shift+' : '') + e.key.toLowerCase()
+
+      if (key === hotkeys.spawnSession) {
+        e.preventDefault()
+        if (activePanel === 'explorer' && explorerCurrentPath.current) {
+          spawnSession(explorerCurrentPath.current).catch((err) =>
+            console.error('[hotkey] spawn in explorer dir failed:', err)
+          )
+        } else {
+          spawnSession().catch((err) =>
+            console.error('[hotkey] spawn failed:', err)
+          )
+        }
+        return
+      }
+
+      if (key === hotkeys.spawnTerminal) {
+        e.preventDefault()
+        spawnTerminal()
+        return
+      }
+
+      if (key === hotkeys.returnToGraph) {
+        e.preventDefault()
+        captureAllSnapshots()
+        if (focusedSessionId) {
+          markSessionSeen(focusedSessionId)
+        }
+        setActivePanel(null)
+        setFocusedSessionId(null)
+        setViewMode('graph')
+        return
+      }
+
+      // Force-close focused session (kill PTY + return to graph)
+      if (key === 'shift+w' && viewMode === 'focused' && focusedSessionId) {
+        e.preventDefault()
+        forceCloseSession(focusedSessionId)
+        return
+      }
+
+      // Panel toggles — mutually exclusive
+      if (key === hotkeys.toggleExplorer) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'explorer' ? null : 'explorer')
+        return
+      }
+
+      if (key === hotkeys.toggleAgents) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'agents' ? null : 'agents')
+        return
+      }
+
+      if (key === hotkeys.toggleSkills) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'skills' ? null : 'skills')
+        return
+      }
+
+      if (key === hotkeys.toggleDesign) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'design' ? null : 'design')
+        return
+      }
+
+      if (key === hotkeys.openSettings) {
+        e.preventDefault()
+        setShowSettings((prev) => !prev)
+        return
+      }
+    }
+
+    // Use capture phase so app hotkeys fire before native browser actions (e.g. Cmd+A select-all)
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession])
+
+  // Blur terminal when a panel opens so keyboard input goes to the panel
+  useEffect(() => {
+    if (activePanel) {
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur()
+      }
+    } else if (viewMode === 'focused' && focusedSessionId) {
+      // Refocus terminal when panel closes
+      focusTerminal(focusedSessionId)
+    }
+  }, [activePanel, viewMode, focusedSessionId])
+
+  // Mark finished sessions as seen when user enters them
+  useEffect(() => {
+    if (viewMode === 'focused' && focusedSessionId) {
+      markSessionSeen(focusedSessionId)
+    }
+  }, [viewMode, focusedSessionId, markSessionSeen])
+
+  // Listen for PTY exits
+  useEffect(() => {
+    const unsubscribe = window.api.onPtyExit(({ id }) => {
+      updateSessionStatus(id, 'exited')
+
+      const store = useStore.getState()
+      const wasFocused = store.focusedSessionId === id && store.viewMode === 'focused'
+
+      if (wasFocused) {
+        // Brief pause so user can see Claude's exit/resume message
+        setTimeout(() => {
+          window.api.killSession(id)
+          removeSession(id)
+          disposeTerminal(id)
+          setFocusedSessionId(null)
+          setViewMode('graph')
+        }, 500)
+      } else {
+        // Session exited while in graph view — just remove it
+        window.api.killSession(id)
+        removeSession(id)
+        disposeTerminal(id)
+      }
+    })
+    return unsubscribe
+  }, [updateSessionStatus, removeSession, setFocusedSessionId, setViewMode])
+
+  // Listen for Claude status changes from hooks
+  useEffect(() => {
+    const unsubscribe = window.api.onClaudeStatus(({ id, status }) => {
+      const store = useStore.getState()
+      const session = store.sessions.find((s) => s.id === id)
+      if (!session) return
+
+      if (status === 'finished') {
+        // If user is currently focused on this session, mark as seen immediately
+        if (store.focusedSessionId === id && store.viewMode === 'focused') {
+          updateSessionStatus(id, 'seen')
+        } else {
+          updateSessionStatus(id, 'finished')
+        }
+        // Capture a final snapshot since the terminal won't change until user interacts
+        requestAnimationFrame(() => captureSnapshot(id))
+      } else if (status === 'permission') {
+        updateSessionStatus(id, 'permission')
+        requestAnimationFrame(() => captureSnapshot(id))
+      } else if (status === 'working') {
+        // PreToolUse / UserPromptSubmit hook fired — Claude is actively working
+        if (session.status !== 'working') {
+          updateSessionStatus(id, 'working')
+        }
+      }
+    })
+    return unsubscribe
+  }, [updateSessionStatus, captureSnapshot])
+
+  // Track last data time for idle detection + eagerly capture first snapshot
+  useEffect(() => {
+    const unsubscribe = window.api.onPtyData(({ id }) => {
+      lastDataRef.current.set(id, Date.now())
+      const session = sessions.find((s) => s.id === id)
+      if (!session) return
+
+      // Eagerly capture first snapshot: debounce so we capture after the initial
+      // data burst settles and WebGL has had time to render.
+      if (!session.snapshot) {
+        const prev = firstSnapshotTimers.current.get(id)
+        if (prev) clearTimeout(prev)
+        firstSnapshotTimers.current.set(id, setTimeout(() => {
+          firstSnapshotTimers.current.delete(id)
+          captureSnapshot(id)
+        }, 500))
+      }
+
+      // Status transitions are driven by hook events (PreToolUse, UserPromptSubmit,
+      // Stop, Notification), not PTY data. This avoids race conditions where terminal
+      // output from permission prompts would override the 'permission' status.
+
+    })
+    return unsubscribe
+  }, [sessions, updateSessionStatus, updateSessionSnapshot])
+
+  // Snapshot capture loop (only in graph view)
+  useEffect(() => {
+    if (viewMode !== 'graph') return
+
+    const interval = setInterval(() => {
+      const now = Date.now()
+      for (const session of sessions) {
+        // Skip idle sessions that already have a snapshot (hooks capture final snapshots on state change).
+        // Keep capturing for sessions without a snapshot yet (waiting for WebGL to render).
+        if (session.snapshot && (session.status === 'finished' || session.status === 'seen' || session.status === 'permission')) continue
+
+        const lastData = lastDataRef.current.get(session.id) ?? 0
+        const isIdle = now - lastData > IDLE_THRESHOLD
+        const shouldCapture = !isIdle
+
+        if (shouldCapture || now % SNAPSHOT_INTERVAL_IDLE < SNAPSHOT_INTERVAL_ACTIVE) {
+          captureSnapshot(session.id)
+        }
+      }
+    }, SNAPSHOT_INTERVAL_ACTIVE)
+
+    return () => clearInterval(interval)
+  }, [viewMode, sessions, captureSnapshot])
+
+  const focusedSession = sessions.find((s) => s.id === focusedSessionId)
+
+  return (
+    <div className="h-full w-full relative bg-[#0a0a0a]">
+      {/* Off-screen terminals — in-viewport so WebGL renders, hidden behind opaque UI layers */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
+        {sessions
+          .filter((s) => s.id !== focusedSessionId || viewMode !== 'focused')
+          .map((session) => (
+            <Terminal
+              key={session.id}
+              sessionId={session.id}
+              visible={false}
+              onTitleChange={(title) => handleTitleChange(session.id, title)}
+            />
+          ))}
+      </div>
+
+      {/* Graph View — opaque bg to cover the hidden terminal layer beneath */}
+      {viewMode === 'graph' && (
+        <div className="absolute inset-0 bg-[#0a0a0a]" style={{ zIndex: 1 }}>
+          <GraphView />
+        </div>
+      )}
+
+      {/* Focused View — titlebar + terminal */}
+      {viewMode === 'focused' && focusedSession && (
+        <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]">
+          <div className="h-10 flex items-center px-4 border-b border-zinc-800/50 titlebar-drag shrink-0">
+            <div className="titlebar-no-drag flex items-center gap-2">
+              {focusedSession.terminalTitle && (
+                <>
+                  <span className="text-xs text-zinc-300 font-medium">{focusedSession.terminalTitle}</span>
+                  <span className="text-zinc-700">·</span>
+                </>
+              )}
+              <span className="text-xs text-zinc-500 font-mono">{focusedSession.projectName}</span>
+              <span className="text-zinc-700">·</span>
+              <span className="text-xs text-zinc-600 font-mono truncate max-w-[300px]">
+                {focusedSession.projectPath}
+              </span>
+            </div>
+            <div className="ml-auto titlebar-no-drag flex items-center gap-3">
+              <span className="text-[10px] text-zinc-600">⌘W to return</span>
+              <button
+                onClick={() => forceCloseSession(focusedSessionId!)}
+                className="text-zinc-600 hover:text-zinc-400 transition-colors"
+                title="Close session (⌘⇧W)"
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                  <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 min-h-0">
+            <Terminal
+              key={`focused-${focusedSessionId}`}
+              sessionId={focusedSessionId!}
+              visible={true}
+              onTitleChange={(title) => handleTitleChange(focusedSessionId!, title)}
+            />
+          </div>
+        </div>
+      )}
+
+
+      {/* Click-away backdrop — closes sidebar panels when clicking outside */}
+      {activePanel && viewMode === 'focused' && (
+        <div
+          className="absolute inset-0 z-[25]"
+          onClick={() => setActivePanel(null)}
+        />
+      )}
+
+      {/* File explorer overlay */}
+      <FileExplorer
+        visible={activePanel === 'explorer'}
+        initialPath={
+          explorerFollowsProject && viewMode === 'focused' && focusedSession
+            ? focusedSession.projectPath
+            : undefined
+        }
+        persistPath={persistExplorerPath}
+        onSpawnInDir={handleSpawnInDir}
+        onClose={() => setActivePanel(null)}
+        onPathChange={(path) => { explorerCurrentPath.current = path }}
+      />
+
+      {/* Design panel */}
+      {activePanel === 'design' && viewMode === 'graph' && (
+        <DesignGallery
+          visible={true}
+          items={designItems}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
+      {activePanel === 'design' && viewMode === 'focused' && (
+        <SidebarPicker
+          visible={true}
+          items={designItems}
+          title="Design Systems"
+          onSelect={(item) => item.content && handleInjectSkill(item.name, item.content)}
+          onClose={() => setActivePanel(null)}
+          renderItem={(item) => (
+            <div className="flex items-center gap-2">
+              <div
+                className="w-2.5 h-2.5 rounded-full shrink-0"
+                style={{ backgroundColor: item.brandColor }}
+              />
+              <span className="truncate">{item.name}</span>
+            </div>
+          )}
+        />
+      )}
+
+      {/* Agents panel — always spawns a new independent session */}
+      {activePanel === 'agents' && (
+        <AgentGallery
+          visible={true}
+          items={agentItems}
+          onSpawn={handleSpawnAgent}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
+
+      {/* Skills panel */}
+      {activePanel === 'skills' && viewMode === 'graph' && (
+        <SkillsGallery
+          visible={true}
+          items={skillItems}
+          onSpawn={(name, content) => handleSpawnWithSkill(name, content)}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
+      {activePanel === 'skills' && viewMode === 'focused' && (
+        <SidebarPicker
+          visible={true}
+          items={skillItems}
+          title="Skills"
+          onSelect={(item) => item.content && handleInjectSkill(item.name, item.content)}
+          onClose={() => setActivePanel(null)}
+        />
+      )}
+
+      {/* Settings overlay */}
+      <Settings visible={showSettings} onClose={() => setShowSettings(false)} />
+
+      {/* Restore sessions prompt */}
+      {showRestorePrompt && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl">
+            <h2 className="text-sm font-medium text-zinc-200 mb-3">
+              Restore previous sessions?
+            </h2>
+            <p className="text-xs text-zinc-500 mb-4">
+              {savedSessions.length} Claude session{savedSessions.length !== 1 ? 's' : ''} from
+              your last run can be resumed.
+            </p>
+            <div className="mb-4 max-h-40 overflow-y-auto">
+              {savedSessions.map((s) => (
+                <div
+                  key={s.claudeSessionId}
+                  className="flex items-center gap-2 py-1.5 text-xs"
+                >
+                  <span className="text-zinc-400 truncate">
+                    {s.terminalTitle || s.projectPath.split('/').pop()}
+                  </span>
+                  <span className="text-zinc-600 ml-auto">
+                    {new Date(s.savedAt).toLocaleTimeString()}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={restoreSessions}
+                className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors"
+              >
+                Resume all
+              </button>
+              <button
+                onClick={dismissSaved}
+                className="flex-1 px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium rounded-lg transition-colors"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
