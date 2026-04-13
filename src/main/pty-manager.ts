@@ -163,6 +163,14 @@ export function writeWhenReady(id: string, data: string): void {
   }
 }
 
+export function updateClaudeSessionId(id: string, claudeSessionId: string): void {
+  const session = sessions.get(id)
+  if (session && session.claudeSessionId !== claudeSessionId) {
+    console.log(`[pty] session ${id} claude session changed: ${session.claudeSessionId} → ${claudeSessionId}`)
+    session.claudeSessionId = claudeSessionId
+  }
+}
+
 export function updateSessionTitle(id: string, title: string): void {
   const session = sessions.get(id)
   if (session) {

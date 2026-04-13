@@ -5,7 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID } from 'crypto'
-import { spawnSession, writeWhenReady, writeToSession, getSession, getAllSessions } from './pty-manager'
+import { spawnSession, writeWhenReady, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 
 let server: Server | null = null
@@ -22,6 +22,10 @@ interface QueuedMessage {
 const messageQueues = new Map<string, QueuedMessage[]>()
 // Track which sessions are idle (at the prompt)
 const sessionStatus = new Map<string, 'working' | 'idle'>()
+// Fallback timers for message flushing — cancelled when idle_prompt or PTY prompt detection arrives first
+const stopFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>()
+// Sessions waiting for PTY prompt detection after Stop fires
+const awaitingPromptReady = new Set<string>()
 
 // Callback for attaching PTY listeners — set by ipc.ts to avoid circular deps
 let attachListenersFn: ((id: string, session: ReturnType<typeof spawnSession>) => void) | null = null
@@ -50,11 +54,25 @@ export function getHookServerPort(): number {
 
 
 /** Called from IPC when PTY outputs data.
- *  Detects permission rejection via terminal output. */
+ *  Detects permission rejection and input prompt readiness via terminal output. */
 export function onPtyData(appSessionId: string, data: string): void {
-  if (!awaitingPermission.has(appSessionId)) return
-  // Strip ANSI escape codes before matching — PTY data contains color/formatting sequences
+  // Strip ANSI escape codes for matching
   const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+
+  // Detect input prompt readiness — the "? for shortcuts" status bar text
+  // appears in the TUI only when Claude is idle and the input prompt is rendered.
+  if (awaitingPromptReady.has(appSessionId) && clean.includes('forshortcuts')) {
+    awaitingPromptReady.delete(appSessionId)
+    // Cancel the fallback timer
+    const fallback = stopFallbackTimers.get(appSessionId)
+    if (fallback) { clearTimeout(fallback); stopFallbackTimers.delete(appSessionId) }
+    // Flush immediately — the prompt is ready
+    console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] PTY prompt detected for ${appSessionId}`)
+    flushMessages(appSessionId)
+  }
+
+  // Permission rejection detection
+  if (!awaitingPermission.has(appSessionId)) return
   if (!clean.includes('What should Claude do instead')) return
 
   awaitingPermission.delete(appSessionId)
@@ -131,7 +149,7 @@ export function startHookServer(): Promise<number> {
           if (!appSessionId) return
 
           const payload: HookPayload = JSON.parse(body)
-          console.log(`[hook-server] event: ${payload.hook_event_name}`, payload.notification_type ? `(${payload.notification_type})` : '', `sid: ${appSessionId}`)
+          console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] event: ${payload.hook_event_name}`, payload.notification_type ? `(${payload.notification_type})` : '', `sid: ${appSessionId}`)
           handleHookEvent(appSessionId, payload)
         } catch (err) {
           console.error('[hook-server] parse error:', err)
@@ -262,7 +280,7 @@ function handleSendMessage(body: string, res: import('http').ServerResponse): vo
       // Session is at the prompt — deliver immediately using bracketed paste
       writeToSession(targetSessionId, `\x1b[200~${formatted}\x1b[201~`)
       setTimeout(() => writeToSession(targetSessionId, '\r'), 150)
-      console.log(`[hook-server] delivered message to ${targetSessionId}`)
+      console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] delivered message to ${targetSessionId}`)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ delivered: true }))
     } else {
@@ -405,12 +423,17 @@ function flushMessages(appSessionId: string): void {
   // Send the paste first, then \r separately to submit.
   writeToSession(appSessionId, `\x1b[200~${combined}\x1b[201~`)
   setTimeout(() => writeToSession(appSessionId, '\r'), 150)
-  console.log(`[hook-server] flushed ${queue.length} queued message(s) to ${appSessionId}`)
+  console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] flushed ${queue.length} queued message(s) to ${appSessionId}`)
 }
 
 function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   const win = BrowserWindow.getAllWindows()[0]
   if (!win || win.isDestroyed()) return
+
+  // Detect session ID changes (e.g. user did /resume inside the session)
+  if (payload.session_id) {
+    updateClaudeSessionId(appSessionId, payload.session_id)
+  }
 
   const event = payload.hook_event_name
 
@@ -423,9 +446,13 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
         break
       case 'idle_prompt':
         awaitingPermission.delete(appSessionId)
+        awaitingPromptReady.delete(appSessionId)
         sessionStatus.set(appSessionId, 'idle')
         win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
-        // Flush queued messages now that session is idle
+        // Cancel fallback timer — idle_prompt is the definitive signal
+        const fallback = stopFallbackTimers.get(appSessionId)
+        if (fallback) { clearTimeout(fallback); stopFallbackTimers.delete(appSessionId) }
+        // Flush queued messages now that the input prompt is ready
         flushMessages(appSessionId)
         break
     }
@@ -433,11 +460,17 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'idle')
     win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
-    // Flush queued messages after a delay — the TUI needs time to render
-    // the input prompt after Stop fires. The bracketed paste handles the
-    // multi-line text correctly, but the prompt must be ready to accept input.
+    // Enable PTY prompt detection — watches for the status bar text that
+    // indicates the TUI input prompt is rendered and ready for input.
+    // Falls back to a timer if the PTY signal isn't detected.
     if (messageQueues.has(appSessionId)) {
-      setTimeout(() => flushMessages(appSessionId), 2000)
+      awaitingPromptReady.add(appSessionId)
+      const timer = setTimeout(() => {
+        awaitingPromptReady.delete(appSessionId)
+        stopFallbackTimers.delete(appSessionId)
+        flushMessages(appSessionId)
+      }, 2000)
+      stopFallbackTimers.set(appSessionId, timer)
     }
   } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'UserPromptSubmit') {
     awaitingPermission.delete(appSessionId)
@@ -489,10 +522,11 @@ function installHooks(port: number): void {
     if ((hooks[eventName] as unknown[]).length === 0) delete hooks[eventName]
   }
 
-  // Notification — permission_prompt for awaiting permission, idle_prompt for finished
+  // Notification — separate matchers for each notification type
   hooks.Notification = [
     ...((hooks.Notification ?? []) as Array<Record<string, unknown>>),
-    { matcher: 'permission_prompt|idle_prompt', hooks: [hookEntry] }
+    { matcher: 'permission_prompt', hooks: [hookEntry] },
+    { matcher: 'idle_prompt', hooks: [hookEntry] },
   ]
 
   // Stop — Claude finished responding

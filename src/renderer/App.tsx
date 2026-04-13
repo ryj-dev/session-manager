@@ -1,8 +1,10 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
 import { useStore, defaultHotkeys, type HotkeyMap } from './store'
+import { formatHotkey, comboFromEvent } from './lib/hotkeys'
 import { GraphView } from './components/GraphView'
 import { FileExplorer } from './components/FileExplorer'
 import { Settings } from './components/Settings'
+import { KeyboardShortcuts } from './components/KeyboardShortcuts'
 import { SidebarPicker } from './components/SidebarPicker'
 import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
@@ -76,6 +78,7 @@ export function App(): JSX.Element {
 
   // Settings
   const [showSettings, setShowSettings] = useState(false)
+  const [showShortcuts, setShowShortcuts] = useState(false)
 
   // Saved sessions restore prompt
   const [savedSessions, setSavedSessions] = useState<SavedSessionInfo[]>([])
@@ -314,8 +317,10 @@ export function App(): JSX.Element {
       const meta = isMac ? e.metaKey : e.altKey
       if (!meta) return
 
-      // Build a key string that includes shift modifier, e.g. "shift+t" or just "t"
-      const key = (e.shiftKey ? 'shift+' : '') + e.key.toLowerCase()
+      // Build a normalized combo string using physical key codes
+      // This avoids Opt+key producing special chars (e.g. opt+o → ø)
+      const key = comboFromEvent(e)
+      if (!key) return
 
       if (key === hotkeys.spawnSession) {
         e.preventDefault()
@@ -584,11 +589,11 @@ export function App(): JSX.Element {
               </span>
             </div>
             <div className="ml-auto titlebar-no-drag flex items-center gap-3">
-              <span className="text-[10px] text-zinc-600">⌘W to return</span>
+              <span className="text-[10px] text-zinc-600">{formatHotkey(hotkeys.returnToGraph)} to return</span>
               <button
                 onClick={() => forceCloseSession(focusedSessionId!)}
                 className="text-zinc-600 hover:text-zinc-400 transition-colors"
-                title="Close session (⌘⇧W)"
+                title={`Close session (⌘⇧W)`}
               >
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                   <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
@@ -693,7 +698,10 @@ export function App(): JSX.Element {
       />
 
       {/* Settings overlay */}
-      <Settings visible={showSettings} onClose={() => setShowSettings(false)} />
+      <Settings visible={showSettings} onClose={() => setShowSettings(false)} onOpenShortcuts={() => setShowShortcuts(true)} />
+
+      {/* Keyboard shortcuts page */}
+      <KeyboardShortcuts visible={showShortcuts} onClose={() => setShowShortcuts(false)} />
 
       {/* Restore sessions prompt */}
       {showRestorePrompt && (

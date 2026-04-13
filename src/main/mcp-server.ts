@@ -840,23 +840,29 @@ async function callHookServer(endpoint: string, body: unknown): Promise<unknown>
   return JSON.parse(text)
 }
 
+function buildParentContext(reportBack: boolean): string {
+  const parentId = process.env.APP_SESSION_ID || null
+  if (!parentId) return ''
+
+  const reportLine = reportBack
+    ? `Report back your findings and results using the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
+    : `If you need to report back results or issues, use the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
+
+  return `\n\n---\nYou were spawned by session ${parentId}. ${reportLine}`
+}
+
 server.tool(
   'spawn-session',
-  'Spawn a new Claude Code session in the session manager with an initial prompt. The session appears in the graph view and starts working immediately. Use this to delegate implementation tasks to a sub-session. The parent session ID and messaging instructions are automatically appended — NEVER include your own session ID in the prompt (it may be stale). You CAN tell the child to report back, just don\'t specify the target ID.',
+  'Spawn a new Claude Code session in the session manager with an initial prompt. The session appears in the graph view and starts working immediately. Use this to delegate implementation tasks to a sub-session. The parent session ID and messaging instructions are automatically appended — NEVER include your own session ID in the prompt (it may be stale). Set reportBack=true to instruct the child to report back findings, or leave false for optional reporting. Do NOT manually write "report back" in the prompt — use the flag instead.',
   {
     prompt: z.string().describe('The initial prompt to send to the new session. Include full context — the new session has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the new session. Defaults to the current working directory.'),
     allowedTools: z.array(z.string()).optional().describe('Restrict the session to specific tools (e.g. ["Read", "Write", "Edit", "Bash"])'),
+    reportBack: z.boolean().optional().default(true).describe('When true (default), the child session is instructed to report back its findings to the parent. When false, it only mentions reporting as optional.'),
   },
-  async ({ prompt, projectPath, allowedTools }) => {
+  async ({ prompt, projectPath, allowedTools, reportBack }) => {
     try {
-      // Discover the calling session's ID so we can include it in the child prompt
-      const parentId = process.env.APP_SESSION_ID || null
-
-      const parentContext = parentId
-        ? `\n\n---\nYou were spawned by session ${parentId}. If you need to report back results or issues, use the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}". Other available session-manager MCP tools: \`mcp__session-manager__list-sessions\`, \`mcp__session-manager__spawn-session\`.`
-        : ''
-
+      const parentContext = buildParentContext(reportBack)
       const cwd = projectPath || process.cwd()
       const result = await callHookServer('/spawn', {
         prompt: prompt + parentContext,
@@ -974,19 +980,16 @@ server.tool(
 
 server.tool(
   'spawn-agent',
-  'Spawn a specialised agent in a new session. The agent is activated with its predefined tools and system prompt, then receives your task prompt. The send-message tool is auto-allowed so the agent can report back. Use list-agents to see available agents. NEVER include your own session ID in the prompt — it is appended automatically and your ID may be stale. You CAN tell the agent to report back, just don\'t specify the target ID.',
+  'Spawn a specialised agent in a new session. The agent is activated with its predefined tools and system prompt, then receives your task prompt. The send-message tool is auto-allowed so the agent can report back. Use list-agents to see available agents. NEVER include your own session ID in the prompt — it is appended automatically and your ID may be stale. Set reportBack=true to instruct the agent to report back findings, or leave false for optional reporting. Do NOT manually write "report back" in the prompt — use the flag instead.',
   {
     agentName: z.string().describe('Name of the agent to spawn (from list-agents)'),
     prompt: z.string().describe('The task prompt for the agent. Include full context — the agent has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the session. Defaults to the current working directory.'),
+    reportBack: z.boolean().optional().default(true).describe('When true (default), the agent is instructed to report back its findings to the parent. When false, it only mentions reporting as optional.'),
   },
-  async ({ agentName, prompt, projectPath }) => {
+  async ({ agentName, prompt, projectPath, reportBack }) => {
     try {
-      const parentId = process.env.APP_SESSION_ID || null
-      const parentContext = parentId
-        ? `\n\n---\nYou were spawned by session ${parentId}. When you have results or need to report issues, use the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
-        : ''
-
+      const parentContext = buildParentContext(reportBack)
       const cwd = projectPath || process.cwd()
       const result = await callHookServer('/spawn-agent', {
         agentName,

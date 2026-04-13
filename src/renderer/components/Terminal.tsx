@@ -78,6 +78,33 @@ function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAdd
 const MIN_COLS = 80
 const MIN_ROWS = 24
 
+/**
+ * Force the xterm viewport to the bottom after fit(). Direct scrollToBottom()
+ * doesn't stick on the first entry because fit()'s reflow hasn't finished
+ * updating the viewport's scrollable dimensions yet. Driving scrollTop on the
+ * DOM element after a frame lets the layout settle first, then the final
+ * scrollToBottom() syncs xterm's internal state (clears isUserScrolling).
+ */
+function forceScrollToBottom(term: XTerm, onDone?: () => void): void {
+  const viewport = term.element?.querySelector('.xterm-viewport') as HTMLElement | null
+  if (!viewport) {
+    term.scrollToBottom()
+    onDone?.()
+    return
+  }
+
+  // fit() schedules an internal syncScrollArea in a rAF that updates the scroll
+  // area height. We need to wait for that to finish before our scrollTop assignment
+  // will stick. Double rAF: first lets xterm's refresh run, second drives scrollTop.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight
+      term.scrollToBottom()
+      onDone?.()
+    })
+  })
+}
+
 export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   // Ref so the title change listener always calls the latest callback
@@ -190,21 +217,43 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
     const instance = terminalInstances.get(sessionId)
     if (!el || !instance) return
 
+    // fit() → resize() triggers a viewport reflow that can fire a DOM scroll event,
+    // which xterm interprets as user-initiated scrolling. This sets the internal
+    // isUserScrolling flag, which prevents auto-scroll on subsequent output — so
+    // commands like /resume dump everything but the viewport stays stuck at the top.
+    // After fit(), we scrollToBottom to reset isUserScrolling, then again on the next
+    // frame to catch the async DOM scroll event from the reflow.
+    let isInitialFit = true
+
     const fit = (): void => {
       // Only fit if the container has real dimensions (not the off-screen placeholder)
       if (el.offsetWidth > 100 && el.offsetHeight > 100) {
+        const buf = instance.term.buffer.active
+        const wasInitial = isInitialFit
+        isInitialFit = false
+
         instance.fitAddon.fit()
         // Guard against fitting to tiny sizes
         if (instance.term.cols >= MIN_COLS) {
           window.api.resizeSession(sessionId, instance.term.cols, instance.term.rows)
         }
-        // After reparenting, xterm's viewport scroll position can be stale (stuck at top
-        // even though the visual cursor is at the bottom). Defer scrollToBottom so xterm
-        // finishes its reflow from fit() before we adjust the scroll position.
-        requestAnimationFrame(() => {
+
+        if (wasInitial) {
+          // First fit after becoming visible. The viewport is desynced from
+          // being off-screen — scrollToBottom() alone doesn't stick because
+          // fit()'s reflow hasn't finished updating scroll dimensions yet.
+          // Force via the DOM element after a frame to let layout settle.
+          forceScrollToBottom(instance.term, () => {
+            instance.term.focus()
+          })
+        } else if (buf.viewportY >= buf.baseY) {
+          // Subsequent fit while already at bottom (window resize, etc.)
           instance.term.scrollToBottom()
-          instance.term.focus()
-        })
+          requestAnimationFrame(() => {
+            instance.term.scrollToBottom()
+            instance.term.focus()
+          })
+        }
       }
     }
 

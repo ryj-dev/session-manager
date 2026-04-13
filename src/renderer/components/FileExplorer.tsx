@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store'
+import { formatHotkey } from '../lib/hotkeys'
 
 interface FsEntry {
   name: string
@@ -27,6 +28,7 @@ export function FileExplorer({
 }: FileExplorerProps): JSX.Element {
   const baseProjectsDir = useStore((s) => s.baseProjectsDir)
   const setBaseProjectsDir = useStore((s) => s.setBaseProjectsDir)
+  const hotkeys = useStore((s) => s.hotkeys)
   const [currentPath, setCurrentPath] = useState<string>('')
   const [entries, setEntries] = useState<FsEntry[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -159,7 +161,7 @@ export function FileExplorer({
           {/* Breadcrumb hint */}
           <div className="px-3 py-1.5 border-b border-zinc-800/30">
             <span className="text-[10px] text-zinc-600">
-              ← back · → enter · ⌘T spawn here · ⌘⌥C copy path
+              ← back · → enter · {formatHotkey(hotkeys.spawnSession)} spawn here · ⌘⌥C copy path
             </span>
           </div>
 
@@ -195,7 +197,7 @@ export function FileExplorer({
           {/* Footer */}
           <div className="px-3 py-2 border-t border-zinc-800/50 space-y-1.5">
             <div className="text-[10px] text-zinc-600">
-              <kbd className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">⌘T</kbd>
+              <kbd className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">{formatHotkey(hotkeys.spawnSession)}</kbd>
               {' '}spawn session here ·{' '}
               <kbd className="px-1 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">Esc</kbd>
               {' '}close

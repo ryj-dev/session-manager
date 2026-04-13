@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { useStore } from '../store'
+import { formatHotkey } from '../lib/hotkeys'
 import { useSimulation, type EdgeData, type ViewportTransform } from '../hooks/useSimulation'
 import { projectColor, projectColorDim, projectColorMid, projectColorGlow, rectEdgePoint } from '../lib/simulation'
 import { SessionNode } from './SessionNode'
@@ -66,6 +67,7 @@ export function GraphView(): JSX.Element {
   const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
   const viewMode = useStore((s) => s.viewMode)
   const activePanel = useStore((s) => s.activePanel)
+  const hotkeys = useStore((s) => s.hotkeys)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const { hubs, spokes, edges, contentBounds, nudge } = useSimulation(
@@ -381,9 +383,9 @@ export function GraphView(): JSX.Element {
           <div className="text-center text-zinc-500">
             <p className="text-lg font-medium mb-3">No sessions</p>
             <div className="space-y-1.5 text-sm">
-              <Hotkey keys="⌘T" label="Spawn Claude session" />
-              <Hotkey keys="⌘N" label="Spawn terminal" />
-              <Hotkey keys="⌘E" label="Open file explorer" />
+              <Hotkey keys={formatHotkey(hotkeys.spawnSession)} label="Spawn Claude session" />
+              <Hotkey keys={formatHotkey(hotkeys.spawnTerminal)} label="Spawn terminal" />
+              <Hotkey keys={formatHotkey(hotkeys.toggleExplorer)} label="Open file explorer" />
             </div>
           </div>
         </div>
@@ -392,8 +394,8 @@ export function GraphView(): JSX.Element {
       {/* Hotkey reference (outside viewport transform) */}
       {sessions.length > 0 && (
         <div className="absolute bottom-3 right-3 text-[10px] text-zinc-600 space-y-0.5">
-          <Hotkey keys="⌘T" label="New session" small />
-          <Hotkey keys="⌘E" label="Explorer" small />
+          <Hotkey keys={formatHotkey(hotkeys.spawnSession)} label="New session" small />
+          <Hotkey keys={formatHotkey(hotkeys.toggleExplorer)} label="Explorer" small />
           <Hotkey keys="←→" label="Cycle in project" small />
           <Hotkey keys="↑↓" label="Switch project" small />
           <Hotkey keys="Enter" label="Focus selected" small />

@@ -65,9 +65,20 @@ function attachSessionListeners(
     hookOnPtyData(id, data)
   })
 
+  // Capture early PTY output for debugging quick exits
+  let earlyOutput = ''
+  const earlyCapture = session.process.onData((chunk) => {
+    if (earlyOutput.length < 2000) earlyOutput += chunk
+  })
+  setTimeout(() => earlyCapture.dispose(), 5000)
+
   session.process.onExit(({ exitCode }) => {
+    const clean = earlyOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    if (exitCode !== 0) {
+      console.log(`[pty] session ${id} exited with code ${exitCode}:`, clean.slice(0, 300))
+    }
     setTimeout(() => {
-      send('pty:exit', { id, exitCode })
+      send('pty:exit', { id, exitCode, error: exitCode !== 0 ? clean.slice(0, 300) : undefined })
     }, 200)
   })
 }
