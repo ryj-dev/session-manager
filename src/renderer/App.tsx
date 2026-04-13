@@ -61,6 +61,7 @@ export function App(): JSX.Element {
   const hotkeys = useStore((s) => s.hotkeys)
   const setHotkeys = useStore((s) => s.setHotkeys)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)
+  const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
 
   // Panel data
   const { items: designItems } = useDesigns()
@@ -334,18 +335,54 @@ export function App(): JSX.Element {
     updateSessionSnapshot(sessionId, thumb)
   }, [updateSessionSnapshot])
 
+  // Compute the best next selected index after removing a session.
+  // Prefers another session in the same project; falls back to nearest neighbor.
+  const selectNextAfterRemoval = useCallback(
+    (sessionId: string) => {
+      const current = useStore.getState()
+      const { sessions: allSessions, selectedSessionIndex } = current
+      const removedIdx = allSessions.findIndex((s) => s.id === sessionId)
+      if (removedIdx === -1) return
+
+      const removedSession = allSessions[removedIdx]
+      const remaining = allSessions.filter((s) => s.id !== sessionId)
+      if (remaining.length === 0) {
+        setSelectedIndex(0)
+        return
+      }
+
+      // Prefer next session in same project
+      const sameProject = remaining.filter(
+        (s) => s.projectPath === removedSession.projectPath
+      )
+      if (sameProject.length > 0) {
+        // Pick the session that was closest after the removed one
+        const target = sameProject[0]
+        const newIdx = remaining.findIndex((s) => s.id === target.id)
+        setSelectedIndex(newIdx)
+        return
+      }
+
+      // No same-project sessions — clamp to valid range
+      const newIdx = Math.min(selectedSessionIndex, remaining.length - 1)
+      setSelectedIndex(Math.max(0, newIdx))
+    },
+    [setSelectedIndex]
+  )
+
   // Force-close the focused session (kills PTY, returns to graph)
   const forceCloseSession = useCallback(
     (sessionId: string) => {
       captureSnapshot(sessionId)
       window.api.killSession(sessionId)
       disposeTerminal(sessionId)
+      selectNextAfterRemoval(sessionId)
       removeSession(sessionId)
       snapshotCanvases.current.delete(sessionId)
       setFocusedSessionId(null)
       setViewMode('graph')
     },
-    [captureSnapshot, removeSession, setFocusedSessionId, setViewMode]
+    [captureSnapshot, selectNextAfterRemoval, removeSession, setFocusedSessionId, setViewMode]
   )
 
   // Snapshot capture helper
@@ -494,6 +531,7 @@ export function App(): JSX.Element {
           // Check focus BEFORE removeSession (which nulls focusedSessionId)
           const current = useStore.getState()
           const stillViewing = current.focusedSessionId === id
+          selectNextAfterRemoval(id)
           removeSession(id)
           disposeTerminal(id)
           snapshotCanvases.current.delete(id)
@@ -505,13 +543,14 @@ export function App(): JSX.Element {
       } else {
         // Session exited while in graph view — just remove it
         window.api.killSession(id)
+        selectNextAfterRemoval(id)
         removeSession(id)
         disposeTerminal(id)
         snapshotCanvases.current.delete(id)
       }
     })
     return unsubscribe
-  }, [updateSessionStatus, removeSession, setFocusedSessionId, setViewMode])
+  }, [updateSessionStatus, selectNextAfterRemoval, removeSession, setFocusedSessionId, setViewMode])
 
   // Listen for sessions spawned externally (via MCP)
   useEffect(() => {

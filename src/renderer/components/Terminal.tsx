@@ -102,14 +102,25 @@ function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAdd
 const MIN_COLS = 80
 const MIN_ROWS = 24
 
+// Active scroll guards keyed by sessionId — allows cleanup on re-entry
+const activeScrollGuards = new Map<string, () => void>()
+
 /**
- * Force the xterm viewport to the bottom after fit(). Direct scrollToBottom()
- * doesn't stick on the first entry because fit()'s reflow hasn't finished
- * updating the viewport's scrollable dimensions yet. Driving scrollTop on the
- * DOM element after a frame lets the layout settle first, then the final
- * scrollToBottom() syncs xterm's internal state (clears isUserScrolling).
+ * Install a reactive scroll guard that keeps the viewport pinned to the bottom.
+ *
+ * After fit(), xterm's async reflow fires DOM scroll events that set its internal
+ * _isUserScrolling flag, preventing auto-scroll on subsequent output. Instead of
+ * racing with frame-counting (which is fragile), this guard listens for scroll
+ * events and snaps back to bottom — reacting to the reflow whenever it actually
+ * happens rather than guessing when.
+ *
+ * The guard auto-expires after `duration` ms. Real user scrolls (wheel/touch)
+ * cancel it immediately so we don't fight the user.
  */
-function forceScrollToBottom(term: XTerm, onDone?: () => void): void {
+function installScrollGuard(sessionId: string, term: XTerm, duration = 300, onDone?: () => void): void {
+  // Clean up any existing guard for this session
+  activeScrollGuards.get(sessionId)?.()
+
   const viewport = term.element?.querySelector('.xterm-viewport') as HTMLElement | null
   if (!viewport) {
     term.scrollToBottom()
@@ -117,16 +128,48 @@ function forceScrollToBottom(term: XTerm, onDone?: () => void): void {
     return
   }
 
-  // fit() schedules an internal syncScrollArea in a rAF that updates the scroll
-  // area height. We need to wait for that to finish before our scrollTop assignment
-  // will stick. Double rAF: first lets xterm's refresh run, second drives scrollTop.
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight
-      term.scrollToBottom()
-      onDone?.()
-    })
-  })
+  let cancelled = false
+
+  const snapToBottom = (): void => {
+    viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight
+    term.scrollToBottom()
+  }
+
+  // Immediately snap to bottom
+  snapToBottom()
+
+  // React to any scroll-away events (caused by xterm reflow) by snapping back
+  const onScroll = (): void => {
+    if (cancelled) return
+    const gap = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
+    if (gap > 2) {
+      snapToBottom()
+    }
+  }
+
+  // Real user scroll intent — cancel the guard so we don't fight the user
+  const onUserScroll = (): void => {
+    cleanup()
+  }
+
+  const cleanup = (): void => {
+    if (cancelled) return
+    cancelled = true
+    viewport.removeEventListener('scroll', onScroll)
+    viewport.removeEventListener('wheel', onUserScroll)
+    viewport.removeEventListener('touchmove', onUserScroll)
+    clearTimeout(timer)
+    activeScrollGuards.delete(sessionId)
+    onDone?.()
+  }
+
+  viewport.addEventListener('scroll', onScroll)
+  viewport.addEventListener('wheel', onUserScroll)
+  viewport.addEventListener('touchmove', onUserScroll)
+
+  // Auto-expire — by this point xterm's reflow is long done
+  const timer = setTimeout(cleanup, duration)
+  activeScrollGuards.set(sessionId, cleanup)
 }
 
 export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): JSX.Element {
@@ -214,43 +257,29 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
     const instance = terminalInstances.get(sessionId)
     if (!el || !instance) return
 
-    // fit() → resize() triggers a viewport reflow that can fire a DOM scroll event,
-    // which xterm interprets as user-initiated scrolling. This sets the internal
-    // isUserScrolling flag, which prevents auto-scroll on subsequent output — so
-    // commands like /resume dump everything but the viewport stays stuck at the top.
-    // After fit(), we scrollToBottom to reset isUserScrolling, then again on the next
-    // frame to catch the async DOM scroll event from the reflow.
     let isInitialFit = true
 
     const fit = (): void => {
-      // Only fit if the container has real dimensions (not the off-screen placeholder)
-      if (el.offsetWidth > 100 && el.offsetHeight > 100) {
-        const buf = instance.term.buffer.active
-        const wasInitial = isInitialFit
-        isInitialFit = false
+      if (el.offsetWidth <= 100 || el.offsetHeight <= 100) return
 
-        instance.fitAddon.fit()
-        // Guard against fitting to tiny sizes
-        if (instance.term.cols >= MIN_COLS) {
-          window.api.resizeSession(sessionId, instance.term.cols, instance.term.rows)
-        }
+      const buf = instance.term.buffer.active
+      const wasAtBottom = buf.viewportY >= buf.baseY
+      const wasInitial = isInitialFit
+      isInitialFit = false
 
-        if (wasInitial) {
-          // First fit after becoming visible. The viewport is desynced from
-          // being off-screen — scrollToBottom() alone doesn't stick because
-          // fit()'s reflow hasn't finished updating scroll dimensions yet.
-          // Force via the DOM element after a frame to let layout settle.
-          forceScrollToBottom(instance.term, () => {
-            instance.term.focus()
-          })
-        } else if (buf.viewportY >= buf.baseY) {
-          // Subsequent fit while already at bottom (window resize, etc.)
-          instance.term.scrollToBottom()
-          requestAnimationFrame(() => {
-            instance.term.scrollToBottom()
-            instance.term.focus()
-          })
-        }
+      instance.fitAddon.fit()
+      if (instance.term.cols >= MIN_COLS) {
+        window.api.resizeSession(sessionId, instance.term.cols, instance.term.rows)
+      }
+
+      if (wasInitial || wasAtBottom) {
+        // Install a reactive scroll guard that snaps to bottom whenever xterm's
+        // async reflow fires scroll events. This replaces fragile frame-counting —
+        // the guard reacts to the actual reflow event rather than guessing timing.
+        // Real user scrolls (wheel/touch) cancel the guard immediately.
+        installScrollGuard(sessionId, instance.term, 300, () => {
+          if (wasInitial) instance.term.focus()
+        })
       }
     }
 
@@ -267,6 +296,7 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
     // Also fit on window resize
     window.addEventListener('resize', fit)
     return () => {
+      activeScrollGuards.get(sessionId)?.()
       observer.disconnect()
       window.removeEventListener('resize', fit)
     }
