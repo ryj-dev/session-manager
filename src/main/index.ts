@@ -1,5 +1,5 @@
 import { app, BrowserWindow, shell, protocol, net, Menu } from 'electron'
-import { join, resolve } from 'path'
+import { join, resolve, relative, isAbsolute } from 'path'
 import { pathToFileURL } from 'url'
 import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions } from './pty-manager'
@@ -114,7 +114,8 @@ app.whenReady().then(async () => {
     const designRoot = join(resourcesBase, 'design')
     const filePath = resolve(designRoot, brand, file)
     // Prevent path traversal — resolved path must stay within design directory
-    if (!filePath.startsWith(designRoot)) {
+    const rel = relative(designRoot, filePath)
+    if (rel.startsWith('..') || isAbsolute(rel)) {
       return new Response('Forbidden', { status: 403 })
     }
     return net.fetch(pathToFileURL(filePath).toString())

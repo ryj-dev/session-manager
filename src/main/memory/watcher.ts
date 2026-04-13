@@ -4,7 +4,6 @@
  */
 
 import fs from 'fs'
-import { BrowserWindow } from 'electron'
 import { getMemoriesDir } from './store'
 import { invalidate } from './index'
 

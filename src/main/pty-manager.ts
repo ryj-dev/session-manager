@@ -3,10 +3,17 @@ import { execSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 
+/** Regex to strip Claude Code's activity indicators (spinners, braille dots, etc.) from terminal titles. */
+export const TITLE_INDICATOR_RE = /[✳*\u2800-\u28FF]\s*/g
+
+// Known shells that are safe to invoke for PATH resolution
+const KNOWN_SHELLS = new Set(['/bin/bash', '/bin/zsh', '/bin/sh', '/usr/bin/bash', '/usr/bin/zsh', '/usr/bin/sh', '/usr/local/bin/bash', '/usr/local/bin/zsh', '/opt/homebrew/bin/bash', '/opt/homebrew/bin/zsh'])
+
 // Electron doesn't inherit the full shell PATH. Resolve it once at startup.
 function getShellPath(): string {
   try {
     const shell = process.env.SHELL || '/bin/zsh'
+    if (!KNOWN_SHELLS.has(shell)) return process.env.PATH || ''
     return execSync(`${shell} -ilc 'echo $PATH'`, { encoding: 'utf-8' }).trim()
   } catch {
     return process.env.PATH || ''
@@ -84,7 +91,7 @@ export function writeToSession(id: string, data: string): void {
     session.hasActivity = true
     // Set a fallback title on first input so the session passes the save gate
     // even if Claude Code never updates the terminal title from the default.
-    if (!session.terminalTitle || session.terminalTitle.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() === 'Claude Code') {
+    if (!session.terminalTitle || session.terminalTitle.replace(TITLE_INDICATOR_RE, '').trim() === 'Claude Code') {
       session.terminalTitle = 'Claude Session'
     }
     session.process.write(data)
@@ -151,7 +158,7 @@ export function getResumableSessions(): Array<{
   for (const session of sessions.values()) {
     // Only save sessions that have had real activity AND a non-default title.
     // Empty sessions (just trust prompt + no conversation) have null title or "Claude Code".
-    const titleClean = session.terminalTitle?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
+    const titleClean = session.terminalTitle?.replace(TITLE_INDICATOR_RE, '').trim() ?? ''
     const hasRealTitle = titleClean !== '' && titleClean !== 'Claude Code'
     if (session.claudeSessionId && session.hasActivity && hasRealTitle) {
       resumable.push({
@@ -174,8 +181,8 @@ export function writeWhenReady(id: string, data: string): void {
     session.hasActivity = true
     session.process.write(data)
   } else {
-    // Queue it — will be flushed when title is set
-    pendingWrites.set(id, data)
+    // Queue it — will be flushed when title is set (append to existing queue)
+    pendingWrites.set(id, (pendingWrites.get(id) || '') + data)
   }
 }
 

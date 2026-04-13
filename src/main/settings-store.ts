@@ -11,6 +11,7 @@ export interface HotkeyMap {
   toggleSkills: string
   toggleDesign: string
   openSettings: string
+  toggleMemory: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -21,7 +22,8 @@ export const defaultHotkeys: HotkeyMap = {
   toggleAgents: 'a',
   toggleSkills: 's',
   toggleDesign: 'd',
-  openSettings: 'o'
+  openSettings: 'o',
+  toggleMemory: 'm'
 }
 
 export interface AppSettings {
@@ -50,7 +52,7 @@ export function loadSettings(): AppSettings {
   try {
     const data = readFileSync(getSettingsPath(), 'utf-8')
     const parsed = JSON.parse(data)
-    return { ...defaults, ...parsed }
+    return { ...defaults, ...parsed, hotkeys: { ...defaults.hotkeys, ...parsed.hotkeys } }
   } catch {
     return { ...defaults }
   }

@@ -11,7 +11,8 @@ import {
   getSession,
   getAllSessions,
   getActiveSessions,
-  updateSessionTitle
+  updateSessionTitle,
+  TITLE_INDICATOR_RE
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
 import { onPtyData as hookOnPtyData, setAttachListeners } from './hook-server'
@@ -203,7 +204,7 @@ export function registerIpcHandlers(): void {
     const session = getSession(id)
     if (!session) return null
     // A session is resumable if it has a real title (not null/empty/"Claude Code")
-    const titleClean = session.terminalTitle?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
+    const titleClean = session.terminalTitle?.replace(TITLE_INDICATOR_RE, '').trim() ?? ''
     const isResumable = !!(session.claudeSessionId && titleClean !== '' && titleClean !== 'Claude Code')
     return {
       claudeSessionId: session.claudeSessionId,

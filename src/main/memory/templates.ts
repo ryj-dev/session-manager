@@ -84,10 +84,21 @@ function shouldInclude(section: SectionName, recommended: SectionName[], content
  */
 export function touchModified(rawBody: string): string {
   const date = TODAY()
-  if (/^modified:\s*.+$/m.test(rawBody)) {
-    return rawBody.replace(/^modified:\s*.+$/m, `modified: '${date}'`)
+  // Only match `modified:` within frontmatter (between the two `---` delimiters)
+  const fmMatch = rawBody.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+  if (!fmMatch) return rawBody
+
+  const fmContent = fmMatch[1]
+  const fmStart = 4 // length of '---\n'
+  const fmEnd = fmStart + fmContent.length
+
+  if (/^modified:\s*.+$/m.test(fmContent)) {
+    const updatedFm = fmContent.replace(/^modified:\s*.+$/m, `modified: '${date}'`)
+    return rawBody.slice(0, fmStart) + updatedFm + rawBody.slice(fmEnd)
   }
-  return rawBody.replace(/^---\s*$/m, `modified: '${date}'\n---`)
+  // No modified field — insert before the closing ---
+  const closingIdx = fmStart + fmContent.length
+  return rawBody.slice(0, closingIdx) + `\nmodified: '${date}'` + rawBody.slice(closingIdx)
 }
 
 /**

@@ -387,17 +387,10 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
       win.webContents.send('session:spawned', { id, projectPath: cwd })
     }
 
-    // Send the slash command when Claude is ready
-    writeWhenReady(id, `/${commandName}\r`)
-
-    // Queue the task prompt — it will be flushed when the Stop hook fires
-    // after Claude finishes processing the slash command
-    if (!messageQueues.has(id)) messageQueues.set(id, [])
-    messageQueues.get(id)!.push({
-      fromSessionId: null,
-      text: prompt,
-      timestamp: Date.now(),
-    })
+    // Send slash command + prompt together so Claude gets both in one input.
+    // This prevents agents that auto-start (e.g. code reviewer) from missing
+    // the prompt because they're already working when it would be delivered.
+    writeWhenReady(id, `\x1b[200~/${commandName} ${prompt}\x1b[201~\r`)
 
     console.log(`[hook-server] spawned agent "${agent.name}" session ${id} in ${cwd}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })

@@ -65,6 +65,8 @@ function parseSections(body: string): { preamble: string; sections: Section[] } 
 /** Preprocess [[wikilinks]] into markdown links for react-markdown. */
 function preprocessWikilinks(body: string): string {
   return body.replace(/\[\[([^\]]+)\]\]/g, (_, link) => {
+    // Only allow safe characters in wikilinks (alphanumeric, dots, hyphens, underscores, slashes, spaces)
+    if (!/^[a-zA-Z0-9._\-/ ]+$/.test(link)) return `[[${link}]]`
     const label = link.replace(/\.md$/, '')
     return `[${label}](/memory/${link})`
   })
