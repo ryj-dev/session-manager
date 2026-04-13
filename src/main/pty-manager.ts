@@ -125,6 +125,22 @@ export function killAllSessions(): void {
   }
 }
 
+export function getActiveSessions(): Array<{
+  id: string
+  projectPath: string
+  claudeSessionId: string | null
+  terminalTitle: string | null
+  hasActivity: boolean
+}> {
+  return Array.from(sessions.values()).map((s) => ({
+    id: s.id,
+    projectPath: s.projectPath,
+    claudeSessionId: s.claudeSessionId,
+    terminalTitle: s.terminalTitle,
+    hasActivity: s.hasActivity
+  }))
+}
+
 export function getResumableSessions(): Array<{
   id: string
   projectPath: string

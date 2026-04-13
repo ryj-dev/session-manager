@@ -30,6 +30,11 @@ const api = {
   getClaudeSessionInfo: (id: string): Promise<{ claudeSessionId: string | null; isResumable: boolean } | null> =>
     ipcRenderer.invoke('pty:claudeSessionInfo', { id }),
 
+  listActiveSessions: (): Promise<Array<{
+    id: string; projectPath: string; claudeSessionId: string | null
+    terminalTitle: string | null; hasActivity: boolean
+  }>> => ipcRenderer.invoke('pty:listActive'),
+
   onPtyData: (callback: (data: { id: string; data: string }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { id: string; data: string }) =>
       callback(data)

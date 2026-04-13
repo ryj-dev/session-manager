@@ -9,6 +9,8 @@ import {
   resizeSession,
   killSession,
   getSession,
+  getAllSessions,
+  getActiveSessions,
   updateSessionTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
@@ -36,14 +38,6 @@ import { syncBacklinks, getInboundLinks, cleanupRefsBeforeDelete, addToRelatedSe
 import { validateNote, slugify } from './memory/validate'
 import { generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/templates'
 
-function isSenderAlive(sender: Electron.WebContents): boolean {
-  try {
-    return !sender.isDestroyed()
-  } catch {
-    return false
-  }
-}
-
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
   if (win && !win.isDestroyed()) {
@@ -51,17 +45,21 @@ function sendToRenderer(channel: string, ...args: unknown[]): void {
   }
 }
 
+// Track which sessions already have listeners attached (prevent double-attach on reconnect)
+const attachedSessions = new Set<string>()
+
 function attachSessionListeners(
   id: string,
-  session: ReturnType<typeof spawnSession>,
-  sender?: Electron.WebContents
+  session: ReturnType<typeof spawnSession>
 ): void {
-  const send = sender
-    ? (channel: string, data: unknown) => { if (isSenderAlive(sender)) sender.send(channel, data) }
-    : (channel: string, data: unknown) => sendToRenderer(channel, data)
+  if (attachedSessions.has(id)) return
+  attachedSessions.add(id)
 
+  // Always use sendToRenderer — never capture a specific sender reference.
+  // This ensures data flows to whatever renderer is currently alive,
+  // surviving renderer crashes/reloads (e.g. from GPU process death on screen lock).
   session.process.onData((data) => {
-    send('pty:data', { id, data })
+    sendToRenderer('pty:data', { id, data })
     hookOnPtyData(id, data)
   })
 
@@ -73,12 +71,13 @@ function attachSessionListeners(
   setTimeout(() => earlyCapture.dispose(), 5000)
 
   session.process.onExit(({ exitCode }) => {
+    attachedSessions.delete(id)
     const clean = earlyOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
     if (exitCode !== 0) {
       console.log(`[pty] session ${id} exited with code ${exitCode}:`, clean.slice(0, 300))
     }
     setTimeout(() => {
-      send('pty:exit', { id, exitCode, error: exitCode !== 0 ? clean.slice(0, 300) : undefined })
+      sendToRenderer('pty:exit', { id, exitCode, error: exitCode !== 0 ? clean.slice(0, 300) : undefined })
     }, 200)
   })
 }
@@ -103,7 +102,7 @@ export function registerIpcHandlers(): void {
       try {
         const session = spawnSession(id, cwd, command, finalArgs)
         console.log('[main] session spawned:', id)
-        attachSessionListeners(id, session, event.sender)
+        attachSessionListeners(id, session)
         return { id, projectPath: cwd }
       } catch (err) {
         console.error('[main] spawn failed:', err)
@@ -120,10 +119,15 @@ export function registerIpcHandlers(): void {
       const session = spawnSession(id, projectPath, 'claude', ['--resume', claudeSessionId])
       // Pre-set the claude session ID since we already know it
       session.claudeSessionId = claudeSessionId
-      attachSessionListeners(id, session, event.sender)
+      attachSessionListeners(id, session)
       return { id, projectPath }
     }
   )
+
+  // List active PTY sessions (for renderer reconnection after crash/reload)
+  ipcMain.handle('pty:listActive', () => {
+    return getActiveSessions()
+  })
 
   // Write input to a session
   ipcMain.on('pty:write', (_event, { id, data }: { id: string; data: string }) => {

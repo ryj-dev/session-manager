@@ -103,13 +103,30 @@ export function App(): JSX.Element {
     window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string> })
   }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys])
 
-  // Check for saved sessions on startup
+  // On startup: reconnect to active PTY sessions (renderer crash recovery),
+  // then check for saved sessions from a previous clean quit.
   useEffect(() => {
-    window.api.loadSavedSessions().then((saved) => {
-      if (saved.length > 0) {
-        setSavedSessions(saved)
-        setShowRestorePrompt(true)
+    // First, check if the main process has live PTY sessions we lost track of
+    window.api.listActiveSessions().then((active) => {
+      if (active.length > 0) {
+        console.log(`[recovery] reconnecting to ${active.length} active PTY sessions`)
+        for (const s of active) {
+          addSession(s.id, s.projectPath)
+          if (s.terminalTitle) {
+            updateSessionTitle(s.id, s.terminalTitle)
+          }
+        }
+        // Active sessions found — skip the saved-sessions restore prompt
+        return
       }
+
+      // No active sessions — check for saved sessions from a previous clean quit
+      window.api.loadSavedSessions().then((saved) => {
+        if (saved.length > 0) {
+          setSavedSessions(saved)
+          setShowRestorePrompt(true)
+        }
+      })
     })
   }, [])
 

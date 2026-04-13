@@ -67,6 +67,20 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
+  // Detect renderer crash (e.g. GPU process death on screen lock) and reload
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.warn(`[main] renderer process gone: ${details.reason}`, details)
+    // Don't reload if the app is shutting down
+    if (didSave) return
+    // Reload the renderer — it will reconnect to existing PTY sessions via pty:listActive
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        console.log('[main] reloading renderer after crash')
+        mainWindow.reload()
+      }
+    }, 500)
+  })
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
