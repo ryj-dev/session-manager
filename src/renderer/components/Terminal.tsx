@@ -33,6 +33,30 @@ export function getTerminalCanvas(sessionId: string): HTMLCanvasElement | null {
   return textCanvas ?? (canvases[canvases.length - 1] as HTMLCanvasElement)
 }
 
+/**
+ * Load (or reload) the WebGL addon for a terminal instance.
+ * After context loss, schedules automatic re-creation so off-screen
+ * terminals (graph view) recover their canvas for snapshot capture.
+ */
+function loadWebGL(instance: { term: XTerm; webglAddon: WebglAddon | null }): void {
+  if (instance.webglAddon) return
+  try {
+    const addon = new WebglAddon(true)
+    addon.onContextLoss(() => {
+      console.warn('[Terminal] WebGL context lost, will recreate in 1s')
+      try { addon.dispose() } catch { /* already disposed */ }
+      instance.webglAddon = null
+      // Auto-recreate after GPU stabilizes — needed for off-screen terminals
+      // that never get visible=true (graph view snapshots)
+      setTimeout(() => loadWebGL(instance), 1000)
+    })
+    instance.term.loadAddon(addon)
+    instance.webglAddon = addon
+  } catch {
+    // WebGL not available — canvas renderer fallback
+  }
+}
+
 function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAddon; webglAddon: WebglAddon | null; initialized: boolean; cleanup?: () => void } {
   let instance = terminalInstances.get(sessionId)
   if (instance) return instance
@@ -125,30 +149,16 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       instance.initialized = true
 
       // Load WebGL addon (preserveDrawingBuffer needed for snapshot capture)
-      try {
-        const addon = new WebglAddon(true)
-        addon.onContextLoss(() => {
-          // WebGL context lost — dispose and let it be recreated when visible
-          console.warn(`[Terminal] WebGL context lost for ${sessionId}`)
-          try { addon.dispose() } catch { /* already disposed */ }
-          instance.webglAddon = null
-        })
-        term.loadAddon(addon)
-        instance.webglAddon = addon
-      } catch {
-        // WebGL not available — canvas renderer fallback
-      }
+      loadWebGL(instance)
 
       // Forward keyboard input to PTY
       term.onData((data) => {
         window.api.writeSession(sessionId, data)
       })
 
-      // Listen for PTY data — store unsubscribe so disposeTerminal can clean up
-      const unsubPtyData = window.api.onPtyData(({ id, data }) => {
-        if (id === sessionId) {
-          term.write(data)
-        }
+      // Listen for PTY data on session-specific channel — no filtering needed
+      const unsubPtyData = window.api.onPtyData(sessionId, (data) => {
+        term.write(data)
       })
       instance.cleanup = unsubPtyData
 
@@ -193,20 +203,7 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
     if (!visible) return
     const instance = terminalInstances.get(sessionId)
     if (!instance || instance.webglAddon) return
-
-    // WebGL context was previously lost — try to re-create
-    try {
-      const addon = new WebglAddon(true)
-      addon.onContextLoss(() => {
-        console.warn(`[Terminal] WebGL context lost for ${sessionId}`)
-        try { addon.dispose() } catch { /* already disposed */ }
-        instance.webglAddon = null
-      })
-      instance.term.loadAddon(addon)
-      instance.webglAddon = addon
-    } catch {
-      // Still can't get a context — stay on canvas renderer
-    }
+    loadWebGL(instance)
   }, [sessionId, visible])
 
   // Refit ONLY when visible — never resize the PTY when off-screen

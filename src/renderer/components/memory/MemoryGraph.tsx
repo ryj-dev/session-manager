@@ -145,6 +145,7 @@ export default function MemoryGraph({
 
     let sigma: import('sigma').default | null = null
     let worker: Worker | null = null
+    let wheelCleanup: (() => void) | null = null
 
     async function init() {
       console.log('[MemoryGraph] init start, nodes:', graphData!.nodes.length, 'edges:', graphData!.edges.length)
@@ -368,12 +369,15 @@ export default function MemoryGraph({
           requestAnimationFrame(tick)
         }
 
-        si.getContainer().addEventListener('wheel', (e) => {
+        const onWheel = (e: WheelEvent) => {
           e.preventDefault(); e.stopPropagation()
           velocity += e.deltaY * SENSITIVITY
           cursorVX = e.offsetX; cursorVY = e.offsetY
           if (!animating) { animating = true; requestAnimationFrame(tick) }
-        }, { passive: false, capture: true })
+        }
+        const wheelContainer = si.getContainer()
+        wheelContainer.addEventListener('wheel', onWheel, { passive: false, capture: true })
+        wheelCleanup = () => wheelContainer.removeEventListener('wheel', onWheel, { capture: true })
       }
 
       // Drag
@@ -441,6 +445,7 @@ export default function MemoryGraph({
     init().catch((err) => console.error('[MemoryGraph] init failed:', err))
 
     return () => {
+      if (wheelCleanup) wheelCleanup()
       if (worker) { worker.postMessage({ type: 'stop' }); worker.terminate() }
       workerRef.current = null; simRef.current = null
       if (sigma) sigma.kill()

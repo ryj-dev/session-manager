@@ -27,6 +27,9 @@ export default defineConfig({
         '@': resolve('src/renderer')
       }
     },
+    server: {
+      hmr: false
+    },
     plugins: [react()],
     build: {
       outDir: 'out/renderer'

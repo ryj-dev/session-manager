@@ -193,7 +193,7 @@ export function computeSpokeOffsets(
 
   while (placed < count) {
     const radius = BASE_RADIUS + ring * RING_GAP
-    const capacity = ring === 0 ? spokeCapacity(radius) : spokeCapacity(radius)
+    const capacity = spokeCapacity(radius)
     const onThisRing = Math.min(capacity, count - placed)
 
     for (let i = 0; i < onThisRing; i++) {

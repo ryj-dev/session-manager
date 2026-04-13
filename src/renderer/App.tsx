@@ -118,6 +118,29 @@ export function App(): JSX.Element {
             updateSessionTitle(s.id, s.terminalTitle)
           }
         }
+
+        // Force screen redraws so recovered terminals aren't blank.
+        // After renderer crash, new xterm instances have no scrollback.
+        // Nudging the PTY size triggers SIGWINCH → the running process redraws.
+        // Timeline: 500ms (terminals mount) → resize → 50ms → restore → 1500ms (data arrives + WebGL renders) → snapshot
+        setTimeout(() => {
+          for (const s of active) {
+            window.api.resizeSession(s.id, 119, 30)
+          }
+          setTimeout(() => {
+            for (const s of active) {
+              window.api.resizeSession(s.id, 120, 30)
+            }
+            // Capture snapshots after data has arrived and WebGL has rendered.
+            // This is the only snapshot these idle/seen sessions need.
+            setTimeout(() => {
+              for (const s of active) {
+                captureSnapshot(s.id)
+              }
+            }, 1500)
+          }, 50)
+        }, 500)
+
         // Active sessions found — skip the saved-sessions restore prompt
         return
       }
@@ -152,14 +175,14 @@ export function App(): JSX.Element {
     (id: string, title: string) => {
       const titleClean = title.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim()
       if (titleClean === 'Claude Code') {
-        const current = sessions.find((s) => s.id === id)?.terminalTitle
+        const current = useStore.getState().sessions.find((s) => s.id === id)?.terminalTitle
         const currentClean = current?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
         if (currentClean !== '' && currentClean !== 'Claude Code') return
       }
       updateSessionTitle(id, title)
       window.api.updateSessionTitle(id, title)
     },
-    [sessions, updateSessionTitle]
+    [updateSessionTitle]
   )
 
   // Dismiss saved sessions
@@ -292,10 +315,25 @@ export function App(): JSX.Element {
     [focusedSessionId, sessions, removeSession, addSession, updateSessionTitle, setFocusedSessionId, setActivePanel]
   )
 
-  // Capture a single session's snapshot (reuses canvas to avoid GC churn)
+  // Capture a single session's snapshot (reuses canvas to avoid GC churn).
+  // Rejects blank canvases so recovery doesn't lock in an empty thumbnail.
   const captureSnapshot = useCallback((sessionId: string): void => {
     const canvas = getTerminalCanvas(sessionId)
     if (!canvas) return
+
+    // Quick blank-canvas check: sample a few pixels for any non-background content.
+    // Avoids storing an all-black snapshot that would prevent future captures.
+    const probe = canvas.getContext('webgl2') || canvas.getContext('webgl')
+    if (probe) {
+      const px = new Uint8Array(4)
+      // Sample center and a point in the upper-third where text usually appears
+      for (const [x, y] of [[canvas.width >> 1, canvas.height >> 1], [canvas.width >> 1, canvas.height / 3 | 0]]) {
+        probe.readPixels(x, y, 1, 1, probe.RGBA, probe.UNSIGNED_BYTE, px)
+        if (px[0] > 15 || px[1] > 15 || px[2] > 15) break // found non-black content
+        if (x === (canvas.width >> 1) && y === (canvas.height / 3 | 0)) return // both samples blank
+      }
+    }
+
     let thumb = snapshotCanvases.current.get(sessionId)
     if (!thumb) {
       thumb = document.createElement('canvas')
@@ -468,12 +506,13 @@ export function App(): JSX.Element {
         // Brief pause so user can see Claude's exit/resume message
         setTimeout(() => {
           window.api.killSession(id)
+          // Check focus BEFORE removeSession (which nulls focusedSessionId)
+          const current = useStore.getState()
+          const stillViewing = current.focusedSessionId === id
           removeSession(id)
           disposeTerminal(id)
           snapshotCanvases.current.delete(id)
-          // Only change focus/viewMode if user is still viewing the dead session
-          const current = useStore.getState()
-          if (current.focusedSessionId === id) {
+          if (stillViewing) {
             setFocusedSessionId(null)
             setViewMode('graph')
           }
@@ -528,9 +567,9 @@ export function App(): JSX.Element {
 
   // Track last data time for idle detection + eagerly capture first snapshot
   useEffect(() => {
-    const unsubscribe = window.api.onPtyData(({ id }) => {
+    const unsubscribe = window.api.onPtyActivity((id) => {
       lastDataRef.current.set(id, Date.now())
-      const session = sessions.find((s) => s.id === id)
+      const session = useStore.getState().sessions.find((s) => s.id === id)
       if (!session) return
 
       // Eagerly capture first snapshot: debounce so we capture after the initial
@@ -543,26 +582,31 @@ export function App(): JSX.Element {
           captureSnapshot(id)
         }, 500))
       }
-
-      // Status transitions are driven by hook events (PreToolUse, UserPromptSubmit,
-      // Stop, Notification), not PTY data. This avoids race conditions where terminal
-      // output from permission prompts would override the 'permission' status.
-
     })
     return unsubscribe
-  }, [sessions, updateSessionStatus, updateSessionSnapshot])
+  }, [captureSnapshot])
 
-  // Snapshot capture loop (only in graph view)
+  // Snapshot capture loop (only in graph view, only when sessions are active)
   useEffect(() => {
     if (viewMode !== 'graph') return
 
+    const currentSessions = useStore.getState().sessions
+    const hasActive = currentSessions.some(
+      (s) => s.status !== 'finished' && s.status !== 'seen' && s.status !== 'exited'
+    )
+    if (!hasActive && currentSessions.every((s) => s.snapshot)) return
+
     const interval = setInterval(() => {
       const now = Date.now()
-      for (const session of sessions) {
+      const liveSessions = useStore.getState().sessions
+      let anyActive = false
+
+      for (const session of liveSessions) {
         // Skip idle sessions that already have a snapshot (hooks capture final snapshots on state change).
         // Keep capturing for sessions without a snapshot yet (waiting for WebGL to render).
         if (session.snapshot && (session.status === 'finished' || session.status === 'seen' || session.status === 'permission')) continue
 
+        anyActive = true
         const lastData = lastDataRef.current.get(session.id) ?? 0
         const isIdle = now - lastData > IDLE_THRESHOLD
         const shouldCapture = !isIdle
@@ -571,6 +615,9 @@ export function App(): JSX.Element {
           captureSnapshot(session.id)
         }
       }
+
+      // Stop polling when all sessions are idle with snapshots
+      if (!anyActive) clearInterval(interval)
     }, SNAPSHOT_INTERVAL_ACTIVE)
 
     return () => clearInterval(interval)

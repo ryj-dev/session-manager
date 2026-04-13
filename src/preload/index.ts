@@ -57,11 +57,17 @@ const api = {
     terminalTitle: string | null; hasActivity: boolean
   }>> => ipcRenderer.invoke('pty:listActive'),
 
-  onPtyData: (callback: (data: { id: string; data: string }) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; data: string }) =>
-      callback(data)
-    ipcRenderer.on('pty:data', handler)
-    return (): void => { ipcRenderer.removeListener('pty:data', handler) }
+  onPtyData: (id: string, callback: (data: string) => void) => {
+    const channel = `pty:data:${id}`
+    const handler = (_event: Electron.IpcRendererEvent, data: string) => callback(data)
+    ipcRenderer.on(channel, handler)
+    return (): void => { ipcRenderer.removeListener(channel, handler) }
+  },
+
+  onPtyActivity: (callback: (id: string) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, id: string) => callback(id)
+    ipcRenderer.on('pty:activity', handler)
+    return (): void => { ipcRenderer.removeListener('pty:activity', handler) }
   },
 
   onPtyExit: (callback: (data: { id: string; exitCode: number }) => void) => {

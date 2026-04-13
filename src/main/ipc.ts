@@ -36,8 +36,7 @@ import {
   endBatch
 } from './memory/index'
 import { syncBacklinks, getInboundLinks, cleanupRefsBeforeDelete, addToRelatedSection, filenameToWikilink } from './memory/backlinks'
-import { validateNote, slugify } from './memory/validate'
-import { generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/templates'
+import { validateNote, slugify, generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/core'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -60,7 +59,8 @@ function attachSessionListeners(
   // This ensures data flows to whatever renderer is currently alive,
   // surviving renderer crashes/reloads (e.g. from GPU process death on screen lock).
   session.process.onData((data) => {
-    sendToRenderer('pty:data', { id, data })
+    sendToRenderer(`pty:data:${id}`, data)
+    sendToRenderer('pty:activity', id)
     hookOnPtyData(id, data)
   })
 

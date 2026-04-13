@@ -33,6 +33,7 @@ export interface PtySession {
 
 const sessions = new Map<string, PtySession>()
 const pendingWrites = new Map<string, string>()
+const pendingSubmits = new Set<string>()
 
 export function spawnSession(
   id: string,
@@ -85,6 +86,8 @@ export function spawnSession(
   return session
 }
 
+/** Raw write to a session's PTY — used for terminal keystrokes.
+ *  Does NOT submit. For prompt/message delivery, use submitToSession. */
 export function writeToSession(id: string, data: string): void {
   const session = sessions.get(id)
   if (session) {
@@ -95,6 +98,19 @@ export function writeToSession(id: string, data: string): void {
       session.terminalTitle = 'Claude Session'
     }
     session.process.write(data)
+  }
+}
+
+/** Write content to a session then send \r after 150ms to submit.
+ *  Large writes trigger auto-bracketed paste in the PTY, which swallows
+ *  an inline \r. Sending \r as a separate small write ensures submission. */
+export function submitToSession(id: string, content: string): void {
+  writeToSession(id, content)
+  const session = sessions.get(id)
+  if (session) {
+    setTimeout(() => {
+      if (sessions.has(id)) session.process.write('\r')
+    }, 150)
   }
 }
 
@@ -114,6 +130,8 @@ export function killSession(id: string): void {
   if (session) {
     session.process.kill()
     sessions.delete(id)
+    pendingWrites.delete(id)
+    pendingSubmits.delete(id)
   }
 }
 
@@ -130,6 +148,8 @@ export function killAllSessions(): void {
     session.process.kill()
     sessions.delete(id)
   }
+  pendingWrites.clear()
+  pendingSubmits.clear()
 }
 
 export function getActiveSessions(): Array<{
@@ -172,17 +192,37 @@ export function getResumableSessions(): Array<{
   return resumable
 }
 
+/** Queue content for writing once Claude is ready (title set).
+ *  Writes immediately if session already has a title.
+ *  Used by preload bridge for raw writes — for prompt submission use submitWhenReady. */
 export function writeWhenReady(id: string, data: string): void {
   const session = sessions.get(id)
   if (!session) return
 
-  // If session already has a title, Claude is ready — write immediately
   if (session.terminalTitle) {
     session.hasActivity = true
     session.process.write(data)
   } else {
-    // Queue it — will be flushed when title is set (append to existing queue)
     pendingWrites.set(id, (pendingWrites.get(id) || '') + data)
+  }
+}
+
+/** Queue content for submission once Claude is ready (title set).
+ *  Sends \r as a separate write after 150ms — large PTY writes trigger
+ *  auto-bracketed paste, which swallows an inline \r. */
+export function submitWhenReady(id: string, content: string): void {
+  const session = sessions.get(id)
+  if (!session) return
+
+  if (session.terminalTitle) {
+    session.hasActivity = true
+    session.process.write(content)
+    setTimeout(() => {
+      if (sessions.has(id)) session.process.write('\r')
+    }, 150)
+  } else {
+    pendingWrites.set(id, (pendingWrites.get(id) || '') + content)
+    pendingSubmits.add(id)
   }
 }
 
@@ -206,6 +246,13 @@ export function updateSessionTitle(id: string, title: string): void {
       pendingWrites.delete(id)
       session.hasActivity = true
       session.process.write(pending)
+      // If a delayed submit was queued, send \r after content is written
+      if (pendingSubmits.has(id)) {
+        pendingSubmits.delete(id)
+        setTimeout(() => {
+          if (sessions.has(id)) session.process.write('\r')
+        }, 150)
+      }
     }
   }
 }

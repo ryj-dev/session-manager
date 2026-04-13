@@ -5,7 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID } from 'crypto'
-import { spawnSession, writeWhenReady, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
+import { spawnSession, submitWhenReady, submitToSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
 
@@ -233,8 +233,8 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       win.webContents.send('session:spawned', { id, projectPath: cwd })
     }
 
-    // Queue the prompt to be sent once Claude is ready
-    writeWhenReady(id, payload.prompt + '\r')
+    // Queue the prompt to be submitted once Claude is ready
+    submitWhenReady(id, payload.prompt)
 
     console.log(`[hook-server] spawned session ${id} in ${cwd}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -288,9 +288,8 @@ function handleSendMessage(body: string, res: import('http').ServerResponse): vo
 
     const status = sessionStatus.get(targetSessionId)
     if (status === 'idle') {
-      // Session is at the prompt — deliver immediately using bracketed paste
-      writeToSession(targetSessionId, `\x1b[200~${formatted}\x1b[201~`)
-      setTimeout(() => writeToSession(targetSessionId, '\r'), 150)
+      // Session is at the prompt — deliver immediately
+      submitToSession(targetSessionId, formatted)
       console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] delivered message to ${targetSessionId}`)
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ delivered: true }))
@@ -410,9 +409,9 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     // Send slash command + prompt together so Claude gets both in one input.
     // This prevents agents that auto-start (e.g. code reviewer) from missing
     // the prompt because they're already working when it would be delivered.
-    // No bracketed paste — Claude Code's TUI treats \r as submit but \n as
-    // newlines within the input buffer.
-    writeWhenReady(id, `/${commandName} ${prompt}\r`)
+    // Submit (\r) is sent separately after 150ms — large PTY writes can split
+    // across kernel buffer chunks, losing an inline \r.
+    submitWhenReady(id, `/${commandName} ${prompt}`)
 
     console.log(`[hook-server] spawned agent "${agent.name}" session ${id} in ${cwd}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -434,7 +433,7 @@ function flushMessages(appSessionId: string): void {
   const combined = queue.map((m) => m.text).join('\n\n---\n\n')
   messageQueues.delete(appSessionId)
 
-  writeToSession(appSessionId, `${combined}\r`)
+  submitToSession(appSessionId, combined)
   console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] flushed ${queue.length} queued message(s) to ${appSessionId}`)
 }
 

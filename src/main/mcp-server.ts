@@ -30,7 +30,7 @@ import { createNoteIO, type NoteIO } from './memory/note-io'
 
 // ─── Storage ───────────────────────────────────────────────────────────────
 
-const MEMORIES_DIR = path.join(
+const MEMORIES_DIR = process.env.SM_MEMORIES_DIR || path.join(
   process.env.HOME || process.env.USERPROFILE || '.',
   process.platform === 'darwin'
     ? 'Library/Application Support/session-manager/memories'
@@ -117,6 +117,22 @@ Use **edit-note** for simple single-section edits.
 ## Linking
 
 Use [[wikilinks]] in note content to connect related notes. Backlinks in ## Related are fully automatic — never edit them manually.
+
+## Keyword routing — IMPORTANT
+
+When the user says any of the following, ALWAYS use the session-manager MCP tools listed here — NEVER the built-in Claude Code Agent tool or native subagents:
+
+| User says | Use this tool |
+|-----------|---------------|
+| "spawn", "spin up", "start a session", "new session", "kick off", "delegate to a session" | **spawn-session** |
+| "spawn agent", "run agent", "use the [name] agent", "send to [agent]", "have [agent] look at", "get [agent] to" | **spawn-agent** |
+| "message", "tell session", "send to session", "notify session", "ping session" | **send-message** |
+| "what's running", "active sessions", "show sessions" | **list-sessions** |
+| "what agents", "available agents", "which agents" | **list-agents** |
+
+**Why:** The session manager tracks sessions in a graph view. MCP-spawned sessions are visible, manageable, and can message each other. Built-in Agent subagents are invisible and ephemeral. The user expects "spawn" and "agent" to create tracked sessions, not throwaway subprocesses.
+
+**Exception:** The built-in Agent tool is still appropriate for quick internal searches/exploration (e.g. codebase grep, file lookups) that don't need to be tracked.
 
 ## Session management
 

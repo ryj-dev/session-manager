@@ -153,7 +153,7 @@ app.whenReady().then(async () => {
   cleanupAllSkillCommands() // Remove stale skill commands from previous sessions
   await startHookServer()
   startMemoryWatcher()
-  registerMcpServer(getMcpServerScriptPath())
+  registerMcpServer(getMcpServerScriptPath(), join(app.getPath('userData'), 'memories'))
   registerIpcHandlers()
   createWindow()
 
