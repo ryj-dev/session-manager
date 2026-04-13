@@ -1,0 +1,74 @@
+/**
+ * MCP server lifecycle management.
+ * Registers/unregisters the memory MCP server in ~/.claude.json on app start/quit.
+ */
+
+import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
+
+const MCP_JSON_PATH = join(homedir(), '.claude.json')
+const MCP_ENTRY_KEY = 'session-manager'
+
+/**
+ * Register the MCP server in ~/.claude.json.
+ * The server entry points to the bundled mcp-server.js file.
+ */
+export function registerMcpServer(serverScriptPath: string): void {
+  let config: Record<string, unknown> = {}
+  try {
+    if (existsSync(MCP_JSON_PATH)) {
+      config = JSON.parse(readFileSync(MCP_JSON_PATH, 'utf-8'))
+    }
+  } catch {
+    config = {}
+  }
+
+  const mcpServers = (config.mcpServers ?? {}) as Record<string, unknown>
+  mcpServers[MCP_ENTRY_KEY] = {
+    type: 'stdio',
+    command: 'node',
+    args: [serverScriptPath]
+  }
+  config.mcpServers = mcpServers
+
+  writeFileSync(MCP_JSON_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+  console.log('[mcp-launcher] registered in', MCP_JSON_PATH)
+}
+
+/**
+ * Remove the MCP server entry from ~/.claude.json.
+ */
+export function unregisterMcpServer(): void {
+  try {
+    if (!existsSync(MCP_JSON_PATH)) return
+
+    const config = JSON.parse(readFileSync(MCP_JSON_PATH, 'utf-8')) as Record<string, unknown>
+    const mcpServers = (config.mcpServers ?? {}) as Record<string, unknown>
+
+    if (!(MCP_ENTRY_KEY in mcpServers)) return
+
+    delete mcpServers[MCP_ENTRY_KEY]
+
+    // Remove mcpServers key entirely if empty
+    if (Object.keys(mcpServers).length === 0) {
+      delete config.mcpServers
+    } else {
+      config.mcpServers = mcpServers
+    }
+
+    writeFileSync(MCP_JSON_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+    console.log('[mcp-launcher] unregistered from', MCP_JSON_PATH)
+  } catch (err) {
+    console.error('[mcp-launcher] failed to unregister:', err)
+  }
+}
+
+/**
+ * Get the path to the bundled MCP server script.
+ */
+export function getMcpServerScriptPath(): string {
+  // In dev: out/main/mcp-server.js relative to app root
+  // In production: next to the main process bundle
+  return join(__dirname, 'mcp-server.js')
+}

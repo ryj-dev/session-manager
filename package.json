@@ -11,14 +11,21 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "d3-force": "^3.0.0",
     "framer-motion": "^11.0.0",
+    "graphology": "^0.26.0",
+    "graphology-types": "^0.24.8",
+    "gray-matter": "^4.0.3",
     "node-pty": "^1.0.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "sigma": "^3.0.2",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

@@ -13,21 +13,27 @@ interface TerminalProps {
 // Global xterm instances — persist across React renders and remounts
 const terminalInstances = new Map<
   string,
-  { term: XTerm; fitAddon: FitAddon; initialized: boolean; cleanup?: () => void }
+  { term: XTerm; fitAddon: FitAddon; webglAddon: WebglAddon | null; initialized: boolean; cleanup?: () => void }
 >()
 
 export function getTerminalCanvas(sessionId: string): HTMLCanvasElement | null {
   const instance = terminalInstances.get(sessionId)
   if (!instance) return null
-  // WebGL addon creates multiple canvases: the link layer (xterm-link-layer class)
-  // comes first in DOM order, but the actual rendered text is on the WebGL canvas
-  // which has no xterm-*-layer class. Grab the last canvas as that's the WebGL one.
+
   const canvases = instance.term.element?.querySelectorAll('canvas')
   if (!canvases || canvases.length === 0) return null
-  return canvases[canvases.length - 1] as HTMLCanvasElement
+
+  if (instance.webglAddon) {
+    // WebGL active: the rendered text is on the last canvas (no xterm-*-layer class)
+    return canvases[canvases.length - 1] as HTMLCanvasElement
+  }
+
+  // Canvas renderer: the text canvas has the xterm-text-layer class, or fallback to last canvas
+  const textCanvas = instance.term.element?.querySelector('canvas.xterm-text-layer') as HTMLCanvasElement | null
+  return textCanvas ?? (canvases[canvases.length - 1] as HTMLCanvasElement)
 }
 
-function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAddon; initialized: boolean; cleanup?: () => void } {
+function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAddon; webglAddon: WebglAddon | null; initialized: boolean; cleanup?: () => void } {
   let instance = terminalInstances.get(sessionId)
   if (instance) return instance
 
@@ -63,7 +69,7 @@ function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAdd
   const fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
 
-  instance = { term, fitAddon, initialized: false }
+  instance = { term, fitAddon, webglAddon: null, initialized: false }
   terminalInstances.set(sessionId, instance)
   return instance
 }
@@ -91,11 +97,19 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       term.open(el)
       instance.initialized = true
 
-      // Try WebGL addon (preserveDrawingBuffer needed for snapshot capture)
+      // Load WebGL addon (preserveDrawingBuffer needed for snapshot capture)
       try {
-        term.loadAddon(new WebglAddon(true))
+        const addon = new WebglAddon(true)
+        addon.onContextLoss(() => {
+          // WebGL context lost — dispose and let it be recreated when visible
+          console.warn(`[Terminal] WebGL context lost for ${sessionId}`)
+          try { addon.dispose() } catch { /* already disposed */ }
+          instance.webglAddon = null
+        })
+        term.loadAddon(addon)
+        instance.webglAddon = addon
       } catch {
-        // Canvas renderer fallback
+        // WebGL not available — canvas renderer fallback
       }
 
       // Forward keyboard input to PTY
@@ -140,8 +154,33 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
     } else if (term.element && term.element.parentElement !== el) {
       // Already initialized but container changed (remount) — reparent the DOM element
       el.appendChild(term.element)
+      // Force WebGL to re-render after DOM reparent so snapshots stay sharp
+      requestAnimationFrame(() => {
+        term.refresh(0, term.rows - 1)
+      })
     }
   }, [sessionId])
+
+  // Re-create WebGL addon if context was lost and terminal becomes visible
+  useEffect(() => {
+    if (!visible) return
+    const instance = terminalInstances.get(sessionId)
+    if (!instance || instance.webglAddon) return
+
+    // WebGL context was previously lost — try to re-create
+    try {
+      const addon = new WebglAddon(true)
+      addon.onContextLoss(() => {
+        console.warn(`[Terminal] WebGL context lost for ${sessionId}`)
+        try { addon.dispose() } catch { /* already disposed */ }
+        instance.webglAddon = null
+      })
+      instance.term.loadAddon(addon)
+      instance.webglAddon = addon
+    } catch {
+      // Still can't get a context — stay on canvas renderer
+    }
+  }, [sessionId, visible])
 
   // Refit ONLY when visible — never resize the PTY when off-screen
   useEffect(() => {
@@ -168,6 +207,10 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
         })
       }
     }
+
+    // Immediate fit when becoming visible — ResizeObserver alone won't fire
+    // if the container is already the right size (e.g. resuming a session).
+    fit()
 
     // ResizeObserver fires when the container gets its real size
     const observer = new ResizeObserver(() => {
@@ -221,6 +264,9 @@ export function disposeTerminal(sessionId: string): void {
   const instance = terminalInstances.get(sessionId)
   if (instance) {
     instance.cleanup?.()
+    if (instance.webglAddon) {
+      try { instance.webglAddon.dispose() } catch { /* ignore */ }
+    }
     instance.term.dispose()
     terminalInstances.delete(sessionId)
   }

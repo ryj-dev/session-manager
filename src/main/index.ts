@@ -6,6 +6,8 @@ import { getResumableSessions, killAllSessions } from './pty-manager'
 import { saveSessions } from './session-store'
 import { startHookServer, stopHookServer } from './hook-server'
 import { cleanupAllSkillCommands } from './fs-service'
+import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
+import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
 
 // Register design:// as a privileged scheme (must be done before app ready)
 protocol.registerSchemesAsPrivileged([
@@ -42,6 +44,8 @@ function saveAndCleanup(): void {
   killAllSessions()
   cleanupAllSkillCommands()
   stopHookServer()
+  stopMemoryWatcher()
+  unregisterMcpServer()
 }
 
 function createWindow(): void {
@@ -125,14 +129,16 @@ app.whenReady().then(async () => {
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },
-        { role: 'paste' },
-        { role: 'selectAll' }
+        { role: 'paste' }
+        // selectAll intentionally omitted — Cmd+A is used for the agents panel
       ]
     }
   ]))
 
   cleanupAllSkillCommands() // Remove stale skill commands from previous sessions
   await startHookServer()
+  startMemoryWatcher()
+  registerMcpServer(getMcpServerScriptPath())
   registerIpcHandlers()
   createWindow()
 

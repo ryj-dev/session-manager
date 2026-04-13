@@ -11,6 +11,7 @@ export interface HotkeyMap {
   toggleSkills: string
   toggleDesign: string
   openSettings: string
+  toggleMemory: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -21,10 +22,11 @@ export const defaultHotkeys: HotkeyMap = {
   toggleAgents: 'a',
   toggleSkills: 's',
   toggleDesign: 'd',
-  openSettings: 'o'
+  openSettings: 'o',
+  toggleMemory: 'm'
 }
 
-export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | null
+export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | null
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
 

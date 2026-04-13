@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
+import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
@@ -11,9 +12,29 @@ import {
   updateSessionTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSettings, saveSettings, type AppSettings } from './settings-store'
+import {
+  readNote,
+  writeNote,
+  deleteNoteFile,
+  extractWikilinks,
+  buildRawBody,
+  type MemoryNote
+} from './memory/store'
+import {
+  getIndex,
+  invalidate,
+  searchNotes,
+  getGraphData,
+  resolveWikilink,
+  beginBatch,
+  endBatch
+} from './memory/index'
+import { syncBacklinks, getInboundLinks, cleanupRefsBeforeDelete, addToRelatedSection, filenameToWikilink } from './memory/backlinks'
+import { validateNote, slugify } from './memory/validate'
+import { generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/templates'
 
 function isSenderAlive(sender: Electron.WebContents): boolean {
   try {
@@ -23,28 +44,38 @@ function isSenderAlive(sender: Electron.WebContents): boolean {
   }
 }
 
+function sendToRenderer(channel: string, ...args: unknown[]): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send(channel, ...args)
+  }
+}
+
 function attachSessionListeners(
   id: string,
   session: ReturnType<typeof spawnSession>,
-  sender: Electron.WebContents
+  sender?: Electron.WebContents
 ): void {
+  const send = sender
+    ? (channel: string, data: unknown) => { if (isSenderAlive(sender)) sender.send(channel, data) }
+    : (channel: string, data: unknown) => sendToRenderer(channel, data)
+
   session.process.onData((data) => {
-    if (isSenderAlive(sender)) {
-      sender.send('pty:data', { id, data })
-    }
+    send('pty:data', { id, data })
     hookOnPtyData(id, data)
   })
 
   session.process.onExit(({ exitCode }) => {
     setTimeout(() => {
-      if (isSenderAlive(sender)) {
-        sender.send('pty:exit', { id, exitCode })
-      }
+      send('pty:exit', { id, exitCode })
     }, 200)
   })
 }
 
 export function registerIpcHandlers(): void {
+  // Register the attach-listeners callback for hook-server spawned sessions
+  setAttachListeners((id, session) => attachSessionListeners(id, session))
+
   // Spawn a new PTY session
   ipcMain.handle(
     'pty:spawn',
@@ -180,5 +211,225 @@ export function registerIpcHandlers(): void {
 
   ipcMain.on('skill:cleanupAll', () => {
     cleanupAllSkillCommands()
+  })
+
+  // ── Memory notes ────────────────────────────────────────────────────────
+
+  ipcMain.handle('memory:list', (_event, filter?: { tag?: string; type?: string }) => {
+    const idx = getIndex()
+    let notes = [...idx.values()]
+    if (filter?.tag) notes = notes.filter((n) => n.tags.includes(filter.tag!))
+    if (filter?.type) notes = notes.filter((n) => n.type === filter.type!)
+    return notes
+  })
+
+  ipcMain.handle('memory:read', (_event, filename: string) => {
+    return readNote(filename)
+  })
+
+  ipcMain.handle(
+    'memory:create',
+    (
+      _event,
+      {
+        filename,
+        title,
+        type,
+        tags,
+        summary,
+        context,
+        details,
+        outcome,
+      }: {
+        filename?: string; title: string; type?: string; tags?: string[]
+        summary?: string; context?: string; details?: string; outcome?: string
+      }
+    ) => {
+      const fn = filename || slugify(title)
+
+      if (readNote(fn)) {
+        throw new Error(`Note "${fn}" already exists`)
+      }
+
+      const rawBody = generateNote({ title, type: type as any, tags, summary, context, details, outcome })
+      const validation = validateNote(rawBody)
+      if (!validation.valid) {
+        throw new Error(`Validation failed: ${validation.errors.join(', ')}`)
+      }
+
+      writeNote(fn, rawBody)
+      invalidate(fn)
+
+      let note = readNote(fn)!
+      syncBacklinks(fn, [], note.wikilinks)
+
+      // Sync inbound links — existing notes that already reference this new note
+      const inbound = getInboundLinks(fn)
+      if (inbound.length > 0) {
+        let updatedRaw = note.rawBody
+        for (const refFn of inbound) {
+          updatedRaw = addToRelatedSection(updatedRaw, filenameToWikilink(refFn))
+        }
+        if (updatedRaw !== note.rawBody) {
+          writeNote(fn, updatedRaw)
+          invalidate(fn)
+          note = readNote(fn)!
+        }
+      }
+
+      return note
+    }
+  )
+
+  ipcMain.handle(
+    'memory:update',
+    (
+      _event,
+      {
+        filename,
+        frontmatter,
+        body
+      }: { filename: string; frontmatter?: Record<string, unknown>; body?: string }
+    ) => {
+      const existing = readNote(filename)
+      if (!existing) throw new Error(`Note "${filename}" not found`)
+
+      const oldWikilinks = existing.wikilinks
+      let rawBody: string
+
+      if (frontmatter && body !== undefined) {
+        // Full replacement
+        rawBody = buildRawBody(frontmatter, body)
+      } else if (body !== undefined) {
+        // Body-only update — preserve existing frontmatter
+        rawBody = buildRawBody(
+          { title: existing.title, type: existing.type, tags: existing.tags, date: existing.date, modified: existing.modified },
+          body
+        )
+      } else if (frontmatter) {
+        // Frontmatter-only update — preserve existing body
+        rawBody = buildRawBody(frontmatter, existing.body)
+      } else {
+        return existing
+      }
+
+      rawBody = touchModified(rawBody)
+
+      const validation = validateNote(rawBody)
+      if (!validation.valid) {
+        throw new Error(`Validation failed: ${validation.errors.join(', ')}`)
+      }
+
+      writeNote(filename, rawBody)
+      invalidate(filename)
+
+      const updated = readNote(filename)!
+      syncBacklinks(filename, oldWikilinks, updated.wikilinks)
+
+      return updated
+    }
+  )
+
+  ipcMain.handle(
+    'memory:editSection',
+    (
+      _event,
+      { filename, heading, operation, content }: {
+        filename: string; heading: string; operation: 'append' | 'prepend' | 'replace'; content: string
+      }
+    ) => {
+      const existing = readNote(filename)
+      if (!existing) throw new Error(`Note "${filename}" not found`)
+
+      if (heading === 'Related') {
+        throw new Error('## Related is auto-managed and cannot be edited directly')
+      }
+
+      const oldWikilinks = existing.wikilinks
+      let rawBody: string
+
+      if (operation === 'replace') rawBody = replaceSectionContent(existing.rawBody, heading, content)
+      else if (operation === 'append') rawBody = appendToSection(existing.rawBody, heading, content)
+      else rawBody = prependToSection(existing.rawBody, heading, content)
+
+      rawBody = touchModified(rawBody)
+
+      writeNote(filename, rawBody)
+      invalidate(filename)
+
+      const updated = readNote(filename)!
+      syncBacklinks(filename, oldWikilinks, updated.wikilinks)
+
+      return updated
+    }
+  )
+
+  ipcMain.handle(
+    'memory:delete',
+    (_event, { filename, force }: { filename: string; force?: boolean }) => {
+      const existing = readNote(filename)
+      if (!existing) throw new Error(`Note "${filename}" not found`)
+
+      const inbound = getInboundLinks(filename)
+      if (inbound.length > 0 && !force) {
+        return {
+          error: 'Cannot delete: note is referenced by other notes',
+          referencedBy: inbound
+        }
+      }
+
+      if (inbound.length > 0 || existing.wikilinks.length > 0) {
+        cleanupRefsBeforeDelete(filename)
+      }
+
+      deleteNoteFile(filename)
+      invalidate(filename)
+
+      return { ok: true, cleaned: inbound.length }
+    }
+  )
+
+  ipcMain.handle(
+    'memory:search',
+    (
+      _event,
+      { query, searchType, tag, type }: { query: string; searchType?: 'content' | 'filename' | 'both'; tag?: string; type?: string }
+    ) => {
+      return searchNotes(query, searchType, tag, type)
+    }
+  )
+
+  ipcMain.handle('memory:graph', () => {
+    return getGraphData()
+  })
+
+  ipcMain.handle('memory:resolveLink', (_event, link: string) => {
+    return resolveWikilink(link)
+  })
+
+  // Claude Code settings — read/write ~/.claude/settings.json
+  const claudeSettingsPath = join(app.getPath('home'), '.claude', 'settings.json')
+
+  ipcMain.handle('claude:getIdleThreshold', () => {
+    try {
+      const settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf-8'))
+      return settings.messageIdleNotifThresholdMs ?? 60000
+    } catch {
+      return 60000
+    }
+  })
+
+  ipcMain.handle('claude:setIdleThreshold', (_event, ms: number) => {
+    try {
+      let settings: Record<string, unknown> = {}
+      try {
+        settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf-8'))
+      } catch { /* file doesn't exist */ }
+      settings.messageIdleNotifThresholdMs = ms
+      writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
+      return true
+    } catch {
+      return false
+    }
   })
 }

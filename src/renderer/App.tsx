@@ -7,6 +7,7 @@ import { SidebarPicker } from './components/SidebarPicker'
 import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
 import { SkillsGallery } from './components/SkillsGallery'
+import MemoryPanel from './components/memory/MemoryPanel'
 import { getTerminalCanvas, disposeTerminal, focusTerminal } from './components/Terminal'
 import { Terminal } from './components/Terminal'
 import { useDesigns } from './hooks/useDesigns'
@@ -18,9 +19,13 @@ const SNAPSHOT_INTERVAL_ACTIVE = 500
 const SNAPSHOT_INTERVAL_IDLE = 3000
 const IDLE_THRESHOLD = 5000
 
-// Thumbnail dimensions (CSS pixels — canvas backing is scaled by devicePixelRatio)
+// Thumbnail CSS dimensions (must match SessionNode THUMB_WIDTH/THUMB_HEIGHT)
 const THUMB_W = 192
 const THUMB_H = 120
+// Snapshot quality multiplier — higher than dpr for extra sharpness at viewport zoom.
+// 3x gives crisp text at up to 1.5x viewport zoom on Retina displays.
+// Memory per snapshot: 576×360×4 ≈ 830KB (vs ~1.5MB before).
+const SNAPSHOT_SCALE = 3
 
 
 
@@ -269,12 +274,13 @@ export function App(): JSX.Element {
   const captureSnapshot = useCallback((sessionId: string): void => {
     const canvas = getTerminalCanvas(sessionId)
     if (!canvas) return
-    const dpr = window.devicePixelRatio || 1
     const thumb = document.createElement('canvas')
-    thumb.width = THUMB_W * dpr
-    thumb.height = THUMB_H * dpr
+    thumb.width = THUMB_W * SNAPSHOT_SCALE
+    thumb.height = THUMB_H * SNAPSHOT_SCALE
     const ctx = thumb.getContext('2d')
     if (!ctx) return
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height)
     updateSessionSnapshot(sessionId, thumb)
   }, [updateSessionSnapshot])
@@ -302,7 +308,10 @@ export function App(): JSX.Element {
   // Global hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
-      const meta = e.metaKey || e.ctrlKey
+      // macOS: Cmd (metaKey) for app hotkeys — Ctrl passes through to terminal
+      // Windows/Linux: Alt for app hotkeys — Ctrl passes through to terminal
+      const isMac = navigator.platform.startsWith('Mac')
+      const meta = isMac ? e.metaKey : e.altKey
       if (!meta) return
 
       // Build a key string that includes shift modifier, e.g. "shift+t" or just "t"
@@ -340,11 +349,20 @@ export function App(): JSX.Element {
         return
       }
 
-      // Force-close focused session (kill PTY + return to graph)
-      if (key === 'shift+w' && viewMode === 'focused' && focusedSessionId) {
-        e.preventDefault()
-        forceCloseSession(focusedSessionId)
-        return
+      // Force-close session — works in focused view (closes focused) and graph view (closes selected)
+      if (key === 'shift+w') {
+        if (viewMode === 'focused' && focusedSessionId) {
+          e.preventDefault()
+          forceCloseSession(focusedSessionId)
+          return
+        }
+        if (viewMode === 'graph' && sessions.length > 0) {
+          e.preventDefault()
+          const idx = Math.min(selectedIndex, sessions.length - 1)
+          const session = sessions[idx]
+          if (session) forceCloseSession(session.id)
+          return
+        }
       }
 
       // Panel toggles — mutually exclusive
@@ -372,6 +390,12 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.toggleMemory) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'memory' ? null : 'memory')
+        return
+      }
+
       if (key === hotkeys.openSettings) {
         e.preventDefault()
         setShowSettings((prev) => !prev)
@@ -382,7 +406,7 @@ export function App(): JSX.Element {
     // Use capture phase so app hotkeys fire before native browser actions (e.g. Cmd+A select-all)
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession])
+  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession, sessions, selectedIndex])
 
   // Blur terminal when a panel opens so keyboard input goes to the panel
   useEffect(() => {
@@ -429,6 +453,14 @@ export function App(): JSX.Element {
     })
     return unsubscribe
   }, [updateSessionStatus, removeSession, setFocusedSessionId, setViewMode])
+
+  // Listen for sessions spawned externally (via MCP)
+  useEffect(() => {
+    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath }) => {
+      addSession(id, projectPath)
+    })
+    return unsubscribe
+  }, [addSession])
 
   // Listen for Claude status changes from hooks
   useEffect(() => {
@@ -537,7 +569,7 @@ export function App(): JSX.Element {
       {/* Focused View — titlebar + terminal */}
       {viewMode === 'focused' && focusedSession && (
         <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]">
-          <div className="h-10 flex items-center px-4 border-b border-zinc-800/50 titlebar-drag shrink-0">
+          <div className="h-10 flex items-center pl-20 pr-4 border-b border-zinc-800/50 titlebar-drag shrink-0">
             <div className="titlebar-no-drag flex items-center gap-2">
               {focusedSession.terminalTitle && (
                 <>
@@ -653,6 +685,12 @@ export function App(): JSX.Element {
           onClose={() => setActivePanel(null)}
         />
       )}
+
+      {/* Memory panel */}
+      <MemoryPanel
+        visible={activePanel === 'memory'}
+        onClose={() => setActivePanel(null)}
+      />
 
       {/* Settings overlay */}
       <Settings visible={showSettings} onClose={() => setShowSettings(false)} />

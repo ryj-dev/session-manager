@@ -20,6 +20,17 @@ export function Settings({ visible, onClose }: SettingsProps): JSX.Element {
   const setHotkeys = useStore((s) => s.setHotkeys)
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
   const [editingHotkey, setEditingHotkey] = useState<keyof HotkeyMap | null>(null)
+  const [idleThreshold, setIdleThreshold] = useState<number>(60000)
+  const [idleInput, setIdleInput] = useState('')
+
+  // Load idle threshold on mount
+  useEffect(() => {
+    if (!visible) return
+    window.api.getIdleThreshold().then((ms) => {
+      setIdleThreshold(ms)
+      setIdleInput(String(ms / 1000))
+    })
+  }, [visible])
 
   const handleHotkeyCapture = useCallback((e: KeyboardEvent) => {
     if (!editingHotkey) return
@@ -144,6 +155,46 @@ export function Settings({ visible, onClose }: SettingsProps): JSX.Element {
               </p>
             </div>
 
+            {/* Claude Code settings */}
+            <div className="mb-6">
+              <label className="text-xs text-zinc-400 block mb-1.5">
+                Idle notification delay (seconds)
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={idleInput}
+                  onChange={(e) => setIdleInput(e.target.value)}
+                  onBlur={() => {
+                    const seconds = Math.max(1, parseInt(idleInput) || 60)
+                    const ms = seconds * 1000
+                    setIdleInput(String(seconds))
+                    setIdleThreshold(ms)
+                    window.api.setIdleThreshold(ms)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const seconds = Math.max(1, parseInt(idleInput) || 60)
+                      const ms = seconds * 1000
+                      setIdleInput(String(seconds))
+                      setIdleThreshold(ms)
+                      window.api.setIdleThreshold(ms)
+                    }
+                  }}
+                  min="1"
+                  className="w-20 px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                />
+                <span className="text-[10px] text-zinc-600">
+                  {idleThreshold === 5000 ? '✓ recommended' : idleThreshold < 5000 ? 'very aggressive' : ''}
+                </span>
+              </div>
+              <p className="text-[10px] text-zinc-600 mt-1">
+                How quickly Claude Code fires the idle notification after finishing a response.
+                Recommended: <button onClick={() => { setIdleInput('5'); setIdleThreshold(5000); window.api.setIdleThreshold(5000) }} className="text-blue-400 hover:text-blue-300">5s</button> for
+                fast inter-session messaging. Default is 60s. Requires session restart.
+              </p>
+            </div>
+
             {/* Hotkeys */}
             <div className="border-t border-zinc-800 pt-4">
               <div className="flex items-center justify-between mb-3">
@@ -204,6 +255,13 @@ export function Settings({ visible, onClose }: SettingsProps): JSX.Element {
                   hotkey={hotkeys.toggleDesign}
                   editing={editingHotkey === 'toggleDesign'}
                   onEdit={() => setEditingHotkey('toggleDesign')}
+                />
+                <EditableHotkeyRow
+                  action="toggleMemory"
+                  label="Toggle memory panel"
+                  hotkey={hotkeys.toggleMemory}
+                  editing={editingHotkey === 'toggleMemory'}
+                  onEdit={() => setEditingHotkey('toggleMemory')}
                 />
                 <EditableHotkeyRow
                   action="openSettings"

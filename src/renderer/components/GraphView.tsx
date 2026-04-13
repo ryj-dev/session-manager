@@ -1,6 +1,6 @@
-import { useRef, useEffect, useCallback, useMemo } from 'react'
+import { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import { useStore } from '../store'
-import { useSimulation, type EdgeData } from '../hooks/useSimulation'
+import { useSimulation, type EdgeData, type ViewportTransform } from '../hooks/useSimulation'
 import { projectColor, projectColorDim, projectColorMid, projectColorGlow, rectEdgePoint } from '../lib/simulation'
 import { SessionNode } from './SessionNode'
 
@@ -68,10 +68,118 @@ export function GraphView(): JSX.Element {
   const activePanel = useStore((s) => s.activePanel)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const { hubs, spokes, edges, viewport, nudge } = useSimulation(
+  const { hubs, spokes, edges, contentBounds, nudge } = useSimulation(
     containerRef.current?.clientWidth ?? 800,
     containerRef.current?.clientHeight ?? 600
   )
+
+  // ── Viewport: auto-fit from content bounds, overridable by wheel zoom ──
+
+  const [viewport, setViewport] = useState<ViewportTransform>({ scale: 1, translateX: 0, translateY: 0 })
+  const userZoomedRef = useRef(false)
+  const sessionCountRef = useRef(0)
+
+  // Auto-fit when content bounds change and user hasn't zoomed (or session count changed)
+  useEffect(() => {
+    if (!contentBounds) return
+    const el = containerRef.current
+    if (!el) return
+    const w = el.clientWidth
+    const h = el.clientHeight
+    if (w === 0 || h === 0) return
+
+    // Reset user zoom when session count changes
+    if (sessions.length !== sessionCountRef.current) {
+      userZoomedRef.current = false
+      sessionCountRef.current = sessions.length
+    }
+
+    if (userZoomedRef.current) return
+
+    const PADDING = 80
+    const contentW = contentBounds.maxX - contentBounds.minX + PADDING * 2
+    const contentH = contentBounds.maxY - contentBounds.minY + PADDING * 2
+    const scaleX = w / contentW
+    const scaleY = h / contentH
+    const scale = Math.min(scaleX, scaleY, 1)
+
+    const contentCenterX = (contentBounds.minX + contentBounds.maxX) / 2
+    const contentCenterY = (contentBounds.minY + contentBounds.maxY) / 2
+    const translateX = w / 2 - contentCenterX * scale
+    const translateY = h / 2 - contentCenterY * scale
+
+    setViewport({ scale, translateX, translateY })
+  }, [contentBounds, sessions.length])
+
+  // ── Momentum wheel zoom toward cursor (same approach as tc-sql-atlas) ──
+
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    const MIN_SCALE = 0.05
+    const MAX_SCALE = 3
+    const FRICTION = 0.92
+    const SENSITIVITY = 0.0003
+
+    let velocity = 0
+    let animating = false
+    let cursorX = 0
+    let cursorY = 0
+    let liveViewport = viewportRef.current
+
+    function tick(): void {
+      if (Math.abs(velocity) < 0.0001) {
+        velocity = 0
+        animating = false
+        return
+      }
+
+      const oldScale = liveViewport.scale
+      const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, oldScale * (1 + velocity)))
+
+      // World-space point under cursor before zoom
+      const worldX = (cursorX - liveViewport.translateX) / oldScale
+      const worldY = (cursorY - liveViewport.translateY) / oldScale
+
+      // Adjust translate so the same world point stays under the cursor
+      const newTranslateX = cursorX - worldX * newScale
+      const newTranslateY = cursorY - worldY * newScale
+
+      liveViewport = { scale: newScale, translateX: newTranslateX, translateY: newTranslateY }
+      viewportRef.current = liveViewport
+      setViewport(liveViewport)
+
+      velocity *= FRICTION
+      requestAnimationFrame(tick)
+    }
+
+    function onWheel(e: WheelEvent): void {
+      e.preventDefault()
+      e.stopPropagation()
+
+      userZoomedRef.current = true
+
+      // Cursor position relative to container
+      const rect = el!.getBoundingClientRect()
+      cursorX = e.clientX - rect.left
+      cursorY = e.clientY - rect.top
+
+      velocity += e.deltaY * SENSITIVITY
+
+      if (!animating) {
+        animating = true
+        liveViewport = viewportRef.current
+        requestAnimationFrame(tick)
+      }
+    }
+
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
 
   // Build project-aware navigation structure
   const projectNav = useMemo(() => {
@@ -199,6 +307,9 @@ export function GraphView(): JSX.Element {
 
   return (
     <div ref={containerRef} className="w-full h-full relative overflow-hidden">
+      {/* Titlebar drag region — clears traffic lights and enables window dragging */}
+      <div className="absolute top-0 left-0 right-0 h-10 titlebar-drag z-10" />
+
       {/* Viewport-transformed content */}
       <div className="absolute inset-0" style={viewportStyle}>
         {/* Edges (SVG layer) */}

@@ -43,11 +43,18 @@ export interface ViewportTransform {
   translateY: number
 }
 
+export interface ContentBounds {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
 interface SimulationResult {
   hubs: HubPosition[]
   spokes: SpokePosition[]
   edges: EdgeData[]
-  viewport: ViewportTransform
+  contentBounds: ContentBounds | null
   nudge: (sessionId: string, mouseX: number, mouseY: number) => void
 }
 
@@ -81,17 +88,16 @@ export function useSimulation(width: number, height: number): SimulationResult {
   const setHubsRef = useRef<React.Dispatch<React.SetStateAction<HubPosition[]>>>(() => {})
   const setSpokesRef = useRef<React.Dispatch<React.SetStateAction<SpokePosition[]>>>(() => {})
   const setEdgesRef = useRef<React.Dispatch<React.SetStateAction<EdgeData[]>>>(() => {})
-  const setViewportRef = useRef<React.Dispatch<React.SetStateAction<ViewportTransform>>>(() => {})
-
   const [hubs, setHubs] = useState<HubPosition[]>([])
   const [spokes, setSpokes] = useState<SpokePosition[]>([])
   const [edges, setEdges] = useState<EdgeData[]>([])
-  const [viewport, setViewport] = useState<ViewportTransform>({ scale: 1, translateX: 0, translateY: 0 })
+  const [contentBounds, setContentBounds] = useState<ContentBounds | null>(null)
 
   setHubsRef.current = setHubs
   setSpokesRef.current = setSpokes
   setEdgesRef.current = setEdges
-  setViewportRef.current = setViewport
+  const setContentBoundsRef = useRef<React.Dispatch<React.SetStateAction<ContentBounds | null>>>(() => {})
+  setContentBoundsRef.current = setContentBounds
 
   // ── Tick function (reads only from refs, never stale) ──────────────
 
@@ -163,10 +169,9 @@ export function useSimulation(width: number, height: number): SimulationResult {
       spokeSpringCache.set(s.id, { ...s })
     }
 
-    // Auto-fit viewport: compute bounding box of all nodes (spokes are larger)
+    // Emit content bounds so caller can compute viewport
     const HALF_W = 192 / 2 // THUMB_WIDTH / 2
     const HALF_H = 120 / 2 // THUMB_HEIGHT / 2
-    const PADDING = 80
 
     if (spokePositions.length > 0) {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -183,18 +188,7 @@ export function useSimulation(width: number, height: number): SimulationResult {
         maxY = Math.max(maxY, hp.y + 20)
       }
 
-      const contentW = maxX - minX + PADDING * 2
-      const contentH = maxY - minY + PADDING * 2
-      const scaleX = width / contentW
-      const scaleY = height / contentH
-      const scale = Math.min(scaleX, scaleY, 1) // never zoom in past 1x
-
-      const contentCenterX = (minX + maxX) / 2
-      const contentCenterY = (minY + maxY) / 2
-      const translateX = width / 2 - contentCenterX * scale
-      const translateY = height / 2 - contentCenterY * scale
-
-      setViewportRef.current({ scale, translateX, translateY })
+      setContentBoundsRef.current({ minX, minY, maxX, maxY })
     }
 
     setHubsRef.current(hubPositions)
@@ -369,5 +363,5 @@ export function useSimulation(width: number, height: number): SimulationResult {
     }
   }, [])
 
-  return { hubs, spokes, edges, viewport, nudge }
+  return { hubs, spokes, edges, contentBounds, nudge }
 }

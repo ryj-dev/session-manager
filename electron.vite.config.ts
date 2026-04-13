@@ -6,7 +6,13 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     build: {
-      outDir: 'out/main'
+      outDir: 'out/main',
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          'mcp-server': resolve('src/main/mcp-server.ts')
+        }
+      }
     }
   },
   preload: {

@@ -103,7 +103,58 @@ const api = {
     ipcRenderer.send('skill:uninstall', { skillName }),
 
   cleanupAllSkills: (): void =>
-    ipcRenderer.send('skill:cleanupAll')
+    ipcRenderer.send('skill:cleanupAll'),
+
+  // Claude Code settings
+  getIdleThreshold: (): Promise<number> =>
+    ipcRenderer.invoke('claude:getIdleThreshold'),
+
+  setIdleThreshold: (ms: number): Promise<boolean> =>
+    ipcRenderer.invoke('claude:setIdleThreshold', ms),
+
+  // Session spawned externally (via MCP)
+  onSessionSpawned: (callback: (data: { id: string; projectPath: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string }) => callback(data)
+    ipcRenderer.on('session:spawned', handler)
+    return (): void => { ipcRenderer.removeListener('session:spawned', handler) }
+  },
+
+  // Memory operations
+  memoryList: (filter?: { tag?: string; type?: string }): Promise<unknown[]> =>
+    ipcRenderer.invoke('memory:list', filter),
+
+  memoryRead: (filename: string): Promise<unknown> =>
+    ipcRenderer.invoke('memory:read', filename),
+
+  memoryCreate: (args: {
+    filename?: string; title: string; type?: string; tags?: string[]
+    summary?: string; context?: string; details?: string; outcome?: string
+  }): Promise<unknown> =>
+    ipcRenderer.invoke('memory:create', args),
+
+  memoryUpdate: (args: { filename: string; frontmatter?: Record<string, unknown>; body?: string }): Promise<unknown> =>
+    ipcRenderer.invoke('memory:update', args),
+
+  memoryEditSection: (args: { filename: string; heading: string; operation: 'append' | 'prepend' | 'replace'; content: string }): Promise<unknown> =>
+    ipcRenderer.invoke('memory:editSection', args),
+
+  memoryDelete: (filename: string, force?: boolean): Promise<unknown> =>
+    ipcRenderer.invoke('memory:delete', { filename, force }),
+
+  memorySearch: (query: string, searchType?: 'content' | 'filename' | 'both', tag?: string, type?: string): Promise<unknown[]> =>
+    ipcRenderer.invoke('memory:search', { query, searchType, tag, type }),
+
+  memoryGraph: (): Promise<{ nodes: unknown[]; edges: unknown[] }> =>
+    ipcRenderer.invoke('memory:graph'),
+
+  memoryResolveLink: (link: string): Promise<string | null> =>
+    ipcRenderer.invoke('memory:resolveLink', link),
+
+  onMemoryChanged: (callback: (changed: string[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, changed: string[]) => callback(changed)
+    ipcRenderer.on('memory:changed', handler)
+    return (): void => { ipcRenderer.removeListener('memory:changed', handler) }
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

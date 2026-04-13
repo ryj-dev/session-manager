@@ -36,15 +36,15 @@ export function SessionNode({
   const hasNudgedRef = useRef(false)
   const lastMousePosRef = useRef<{ x: number; y: number } | null>(null)
 
-  // Draw snapshot onto the thumbnail canvas (Retina-aware)
+  // Draw snapshot onto the thumbnail canvas
+  // Uses the same 3x multiplier as the snapshot capture so this is a 1:1 copy — no downscale.
   useEffect(() => {
     if (!session.snapshot || !canvasRef.current) return
-    const dpr = window.devicePixelRatio || 1
     const canvas = canvasRef.current
 
-    // Set backing store to Retina resolution, CSS size stays at THUMB_WIDTH×THUMB_HEIGHT
-    canvas.width = THUMB_WIDTH * dpr
-    canvas.height = THUMB_HEIGHT * dpr
+    // Match the snapshot backing resolution exactly (192×3 = 576, 120×3 = 360)
+    canvas.width = THUMB_WIDTH * 3
+    canvas.height = THUMB_HEIGHT * 3
 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
