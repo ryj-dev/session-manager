@@ -315,25 +315,10 @@ export function App(): JSX.Element {
     [focusedSessionId, sessions, removeSession, addSession, updateSessionTitle, setFocusedSessionId, setActivePanel]
   )
 
-  // Capture a single session's snapshot (reuses canvas to avoid GC churn).
-  // Rejects blank canvases so recovery doesn't lock in an empty thumbnail.
+  // Capture a single session's snapshot (reuses canvas to avoid GC churn)
   const captureSnapshot = useCallback((sessionId: string): void => {
     const canvas = getTerminalCanvas(sessionId)
     if (!canvas) return
-
-    // Quick blank-canvas check: sample a few pixels for any non-background content.
-    // Avoids storing an all-black snapshot that would prevent future captures.
-    const probe = canvas.getContext('webgl2') || canvas.getContext('webgl')
-    if (probe) {
-      const px = new Uint8Array(4)
-      // Sample center and a point in the upper-third where text usually appears
-      for (const [x, y] of [[canvas.width >> 1, canvas.height >> 1], [canvas.width >> 1, canvas.height / 3 | 0]]) {
-        probe.readPixels(x, y, 1, 1, probe.RGBA, probe.UNSIGNED_BYTE, px)
-        if (px[0] > 15 || px[1] > 15 || px[2] > 15) break // found non-black content
-        if (x === (canvas.width >> 1) && y === (canvas.height / 3 | 0)) return // both samples blank
-      }
-    }
-
     let thumb = snapshotCanvases.current.get(sessionId)
     if (!thumb) {
       thumb = document.createElement('canvas')
