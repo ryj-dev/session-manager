@@ -186,6 +186,7 @@ export function writeWhenReady(id: string, data: string): void {
   }
 }
 
+
 export function updateClaudeSessionId(id: string, claudeSessionId: string): void {
   const session = sessions.get(id)
   if (session && session.claudeSessionId !== claudeSessionId) {

@@ -7,6 +7,7 @@ import { URL } from 'url'
 import { randomUUID } from 'crypto'
 import { spawnSession, writeWhenReady, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
 import { installSkillCommand } from './fs-service'
+import { atomicWriteSync } from './atomic-write'
 
 let server: Server | null = null
 let serverPort = 0
@@ -26,6 +27,16 @@ const sessionStatus = new Map<string, 'working' | 'idle'>()
 const stopFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>()
 // Sessions waiting for PTY prompt detection after Stop fires
 const awaitingPromptReady = new Set<string>()
+
+/** Clean up all hook-server state for a session (call on PTY exit/kill). */
+export function cleanupSession(appSessionId: string): void {
+  sessionStatus.delete(appSessionId)
+  messageQueues.delete(appSessionId)
+  awaitingPromptReady.delete(appSessionId)
+  awaitingPermission.delete(appSessionId)
+  const timer = stopFallbackTimers.get(appSessionId)
+  if (timer) { clearTimeout(timer); stopFallbackTimers.delete(appSessionId) }
+}
 
 // Callback for attaching PTY listeners — set by ipc.ts to avoid circular deps
 let attachListenersFn: ((id: string, session: ReturnType<typeof spawnSession>) => void) | null = null
@@ -308,7 +319,14 @@ interface AgentDef {
   content: string
 }
 
+// Agent definition cache — avoids reading from disk on every HTTP request
+let cachedAgents: AgentDef[] | null = null
+let agentsCachedAt = 0
+const AGENTS_CACHE_TTL = 30_000
+
 function loadAgents(): AgentDef[] {
+  if (cachedAgents && Date.now() - agentsCachedAt < AGENTS_CACHE_TTL) return cachedAgents
+
   const resourcesBase = app.isPackaged
     ? join(process.resourcesPath, 'resources')
     : join(app.getAppPath(), 'resources')
@@ -316,7 +334,7 @@ function loadAgents(): AgentDef[] {
 
   try {
     const files = readdirSync(agentsDir).filter((f) => f.endsWith('.md'))
-    return files.map((f) => {
+    cachedAgents = files.map((f) => {
       const raw = readFileSync(join(agentsDir, f), 'utf-8')
       const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/)
       const fm: Record<string, string> = {}
@@ -334,6 +352,8 @@ function loadAgents(): AgentDef[] {
         content: raw,
       }
     })
+    agentsCachedAt = Date.now()
+    return cachedAgents
   } catch {
     return []
   }
@@ -390,7 +410,9 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     // Send slash command + prompt together so Claude gets both in one input.
     // This prevents agents that auto-start (e.g. code reviewer) from missing
     // the prompt because they're already working when it would be delivered.
-    writeWhenReady(id, `\x1b[200~/${commandName} ${prompt}\x1b[201~\r`)
+    // No bracketed paste — Claude Code's TUI treats \r as submit but \n as
+    // newlines within the input buffer.
+    writeWhenReady(id, `/${commandName} ${prompt}\r`)
 
     console.log(`[hook-server] spawned agent "${agent.name}" session ${id} in ${cwd}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -403,8 +425,8 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
 }
 
 /** Flush any queued messages to a session that just became idle.
- *  Uses explicit bracketed paste mode so the terminal treats multi-line
- *  text as a single paste, then submits with \r after the paste ends. */
+ *  Claude Code's TUI treats \n as newlines within the input buffer and
+ *  only \r triggers submission, so no bracketed paste is needed. */
 function flushMessages(appSessionId: string): void {
   const queue = messageQueues.get(appSessionId)
   if (!queue || queue.length === 0) return
@@ -412,10 +434,7 @@ function flushMessages(appSessionId: string): void {
   const combined = queue.map((m) => m.text).join('\n\n---\n\n')
   messageQueues.delete(appSessionId)
 
-  // Bracketed paste: \x1b[200~ starts paste mode, \x1b[201~ ends it.
-  // Send the paste first, then \r separately to submit.
-  writeToSession(appSessionId, `\x1b[200~${combined}\x1b[201~`)
-  setTimeout(() => writeToSession(appSessionId, '\r'), 150)
+  writeToSession(appSessionId, `${combined}\r`)
   console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] flushed ${queue.length} queued message(s) to ${appSessionId}`)
 }
 
@@ -483,7 +502,7 @@ function readSettings(): Record<string, unknown> {
 }
 
 function writeSettings(settings: Record<string, unknown>): void {
-  writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
+  atomicWriteSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n')
 }
 
 function makeHookCommand(port: number): string {

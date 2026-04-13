@@ -1,24 +1,25 @@
 /**
- * Memory note storage — file I/O, CRUD, wikilink extraction.
- * Adapted from tc-sql-atlas vault.ts for flat-directory storage.
+ * Memory note storage — Electron-aware wrapper around core and note-io.
+ * Provides the same API as before, backed by the shared pure logic.
  */
 
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
-import matter from 'gray-matter'
+import { createNoteIO } from './note-io'
 
-export interface MemoryNote {
-  filename: string // e.g. "architecture-decisions.md"
-  title: string
-  type: string
-  tags: string[]
-  date: string // ISO
-  modified: string // ISO
-  body: string // markdown without frontmatter
-  rawBody: string // full file content
-  wikilinks: string[] // extracted [[link]] targets
-}
+// Re-export everything from core so existing imports from './store' keep working
+export {
+  type MemoryNote,
+  type ValidationResult,
+  type NoteInput,
+  type NoteType,
+  type SectionName,
+  extractWikilinks,
+  buildRawBody,
+  parseRawNote,
+  formatDate,
+} from './core'
 
 let memoriesDir: string | null = null
 
@@ -30,67 +31,29 @@ export function getMemoriesDir(): string {
   return memoriesDir
 }
 
+// Lazy-init IO instance bound to the electron userData memories directory
+let io: ReturnType<typeof createNoteIO> | null = null
+function getIO(): ReturnType<typeof createNoteIO> {
+  if (!io) io = createNoteIO(getMemoriesDir())
+  return io
+}
+
 /** List all .md filenames in the memories directory. */
 export function getAllNoteFilenames(): string[] {
-  const dir = getMemoriesDir()
-  if (!fs.existsSync(dir)) return []
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.md'))
+  return getIO().listNotes()
 }
 
 /** Read a single note by filename. Returns null if not found. */
-export function readNote(filename: string): MemoryNote | null {
-  const fullPath = path.join(getMemoriesDir(), filename)
-  if (!fs.existsSync(fullPath)) return null
-
-  const raw = fs.readFileSync(fullPath, 'utf-8')
-  return parseRawNote(filename, raw)
-}
-
-/** Parse raw markdown string into a MemoryNote. */
-export function parseRawNote(filename: string, raw: string): MemoryNote {
-  const { data, content } = matter(raw)
-  return {
-    filename,
-    title: typeof data.title === 'string' ? data.title : filename.replace(/\.md$/, ''),
-    type: typeof data.type === 'string' ? data.type : '',
-    tags: Array.isArray(data.tags) ? (data.tags as string[]) : [],
-    date: formatDate(data.date),
-    modified: formatDate(data.modified),
-    body: content,
-    rawBody: raw,
-    wikilinks: extractWikilinks(content)
-  }
+export function readNote(filename: string) {
+  return getIO().readNote(filename)
 }
 
 /** Write a note to disk. Accepts full raw markdown (with frontmatter). */
 export function writeNote(filename: string, rawBody: string): void {
-  const fullPath = path.join(getMemoriesDir(), filename)
-  fs.writeFileSync(fullPath, rawBody, 'utf-8')
+  getIO().writeNote(filename, rawBody)
 }
 
 /** Delete a note file. */
 export function deleteNoteFile(filename: string): void {
-  const fullPath = path.join(getMemoriesDir(), filename)
-  if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath)
-}
-
-/** Extract all [[wikilink]] targets from content. Deduplicated. */
-export function extractWikilinks(content: string): string[] {
-  const matches = content.matchAll(/\[\[([^\]]+)\]\]/g)
-  return [...new Set([...matches].map((m) => m[1]))]
-}
-
-/** Build raw markdown from frontmatter object + body. */
-export function buildRawBody(
-  frontmatter: Record<string, unknown>,
-  body: string
-): string {
-  return matter.stringify(body, frontmatter)
-}
-
-/** Normalize date to ISO string. */
-function formatDate(value: unknown): string {
-  if (value instanceof Date) return value.toISOString().split('T')[0]
-  if (typeof value === 'string') return value
-  return ''
+  getIO().deleteNote(filename)
 }

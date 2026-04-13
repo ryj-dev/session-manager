@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, mkdirSync } from 'fs'
+import { atomicWriteSync } from './atomic-write'
 
 export interface HotkeyMap {
   spawnSession: string
@@ -59,5 +60,5 @@ export function loadSettings(): AppSettings {
 }
 
 export function saveSettings(settings: AppSettings): void {
-  writeFileSync(getSettingsPath(), JSON.stringify(settings, null, 2))
+  atomicWriteSync(getSettingsPath(), JSON.stringify(settings, null, 2))
 }

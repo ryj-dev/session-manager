@@ -15,7 +15,7 @@ import {
   TITLE_INDICATOR_RE
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSettings, saveSettings, type AppSettings } from './settings-store'
 import {
@@ -151,6 +151,7 @@ export function registerIpcHandlers(): void {
   // Kill a session
   ipcMain.on('pty:kill', (_event, { id }: { id: string }) => {
     killSession(id)
+    hookCleanupSession(id)
   })
 
   // Update session title (so it can be persisted across restarts)

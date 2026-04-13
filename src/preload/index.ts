@@ -4,6 +4,28 @@ export type PtySpawnResult = { id: string; projectPath: string }
 export type FsEntry = { name: string; path: string; isDirectory: boolean }
 export type SavedSession = { claudeSessionId: string; projectPath: string; terminalTitle: string | null; savedAt: number }
 
+/** Mirrors MemoryNote from memory/core.ts (preload can't import main process modules). */
+export interface MemoryNote {
+  filename: string
+  title: string
+  type: string
+  tags: string[]
+  date: string
+  modified: string
+  body: string
+  rawBody: string
+  wikilinks: string[]
+}
+
+export interface MemoryIndexEntry {
+  filename: string
+  title: string
+  type: string
+  tags: string[]
+  date: string
+  wikilinks: string[]
+}
+
 const api = {
   // PTY operations
   spawnSession: (cwd: string, command?: string, args?: string[], allowedTools?: string[]): Promise<PtySpawnResult> =>
@@ -125,31 +147,31 @@ const api = {
   },
 
   // Memory operations
-  memoryList: (filter?: { tag?: string; type?: string }): Promise<unknown[]> =>
+  memoryList: (filter?: { tag?: string; type?: string }): Promise<MemoryIndexEntry[]> =>
     ipcRenderer.invoke('memory:list', filter),
 
-  memoryRead: (filename: string): Promise<unknown> =>
+  memoryRead: (filename: string): Promise<MemoryNote | null> =>
     ipcRenderer.invoke('memory:read', filename),
 
   memoryCreate: (args: {
     filename?: string; title: string; type?: string; tags?: string[]
     summary?: string; context?: string; details?: string; outcome?: string
-  }): Promise<unknown> =>
+  }): Promise<MemoryNote> =>
     ipcRenderer.invoke('memory:create', args),
 
-  memoryUpdate: (args: { filename: string; frontmatter?: Record<string, unknown>; body?: string }): Promise<unknown> =>
+  memoryUpdate: (args: { filename: string; frontmatter?: Record<string, unknown>; body?: string }): Promise<MemoryNote> =>
     ipcRenderer.invoke('memory:update', args),
 
-  memoryEditSection: (args: { filename: string; heading: string; operation: 'append' | 'prepend' | 'replace'; content: string }): Promise<unknown> =>
+  memoryEditSection: (args: { filename: string; heading: string; operation: 'append' | 'prepend' | 'replace'; content: string }): Promise<MemoryNote> =>
     ipcRenderer.invoke('memory:editSection', args),
 
-  memoryDelete: (filename: string, force?: boolean): Promise<unknown> =>
+  memoryDelete: (filename: string, force?: boolean): Promise<{ ok?: boolean; cleaned?: number; error?: string; referencedBy?: string[] }> =>
     ipcRenderer.invoke('memory:delete', { filename, force }),
 
-  memorySearch: (query: string, searchType?: 'content' | 'filename' | 'both', tag?: string, type?: string): Promise<unknown[]> =>
+  memorySearch: (query: string, searchType?: 'content' | 'filename' | 'both', tag?: string, type?: string): Promise<MemoryIndexEntry[]> =>
     ipcRenderer.invoke('memory:search', { query, searchType, tag, type }),
 
-  memoryGraph: (): Promise<{ nodes: unknown[]; edges: unknown[] }> =>
+  memoryGraph: (): Promise<{ nodes: Array<{ id: string; label: string; type: string; tags: string[] }>; edges: Array<{ source: string; target: string }> }> =>
     ipcRenderer.invoke('memory:graph'),
 
   memoryResolveLink: (link: string): Promise<string | null> =>

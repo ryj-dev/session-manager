@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, unlinkSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 
 export function expandPath(p: string): string {
@@ -7,6 +7,16 @@ export function expandPath(p: string): string {
     return join(homedir(), p.slice(1))
   }
   return p
+}
+
+/** Paths the renderer is allowed to read from. */
+const ALLOWED_ROOTS = [homedir(), '/tmp', '/var/folders']
+
+function assertAllowedPath(target: string): void {
+  const resolved = resolve(target)
+  if (!ALLOWED_ROOTS.some((root) => resolved.startsWith(root))) {
+    throw new Error(`Access denied: ${target}`)
+  }
 }
 
 export interface FsEntry {
@@ -18,6 +28,7 @@ export interface FsEntry {
 export function readDirectory(dirPath: string): FsEntry[] {
   try {
     dirPath = expandPath(dirPath)
+    assertAllowedPath(dirPath)
     const entries = readdirSync(dirPath, { withFileTypes: true })
     return entries
       .filter(entry => !entry.name.startsWith('.'))
@@ -43,7 +54,9 @@ export function getHomeDir(): string {
 
 export function readFile(filePath: string): string {
   try {
-    return readFileSync(expandPath(filePath), 'utf-8')
+    const resolved = expandPath(filePath)
+    assertAllowedPath(resolved)
+    return readFileSync(resolved, 'utf-8')
   } catch {
     return ''
   }
@@ -51,7 +64,9 @@ export function readFile(filePath: string): string {
 
 export function isDirectory(path: string): boolean {
   try {
-    return statSync(expandPath(path)).isDirectory()
+    const resolved = expandPath(path)
+    assertAllowedPath(resolved)
+    return statSync(resolved).isDirectory()
   } catch {
     return false
   }

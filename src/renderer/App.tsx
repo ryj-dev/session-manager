@@ -70,6 +70,8 @@ export function App(): JSX.Element {
   // Track last data received per session for idle detection
   const lastDataRef = useRef<Map<string, number>>(new Map())
   const firstSnapshotTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // Reuse offscreen canvases for snapshot capture to avoid GC churn
+  const snapshotCanvases = useRef<Map<string, HTMLCanvasElement>>(new Map())
 
   // Panel state
   const activePanel = useStore((s) => s.activePanel)
@@ -290,11 +292,15 @@ export function App(): JSX.Element {
     [focusedSessionId, sessions, removeSession, addSession, updateSessionTitle, setFocusedSessionId, setActivePanel]
   )
 
-  // Capture a single session's snapshot
+  // Capture a single session's snapshot (reuses canvas to avoid GC churn)
   const captureSnapshot = useCallback((sessionId: string): void => {
     const canvas = getTerminalCanvas(sessionId)
     if (!canvas) return
-    const thumb = document.createElement('canvas')
+    let thumb = snapshotCanvases.current.get(sessionId)
+    if (!thumb) {
+      thumb = document.createElement('canvas')
+      snapshotCanvases.current.set(sessionId, thumb)
+    }
     thumb.width = THUMB_W * SNAPSHOT_SCALE
     thumb.height = THUMB_H * SNAPSHOT_SCALE
     const ctx = thumb.getContext('2d')
@@ -312,6 +318,7 @@ export function App(): JSX.Element {
       window.api.killSession(sessionId)
       disposeTerminal(sessionId)
       removeSession(sessionId)
+      snapshotCanvases.current.delete(sessionId)
       setFocusedSessionId(null)
       setViewMode('graph')
     },
@@ -463,14 +470,20 @@ export function App(): JSX.Element {
           window.api.killSession(id)
           removeSession(id)
           disposeTerminal(id)
-          setFocusedSessionId(null)
-          setViewMode('graph')
+          snapshotCanvases.current.delete(id)
+          // Only change focus/viewMode if user is still viewing the dead session
+          const current = useStore.getState()
+          if (current.focusedSessionId === id) {
+            setFocusedSessionId(null)
+            setViewMode('graph')
+          }
         }, 500)
       } else {
         // Session exited while in graph view — just remove it
         window.api.killSession(id)
         removeSession(id)
         disposeTerminal(id)
+        snapshotCanvases.current.delete(id)
       }
     })
     return unsubscribe

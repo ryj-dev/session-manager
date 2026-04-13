@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, mkdirSync } from 'fs'
+import { atomicWriteSync } from './atomic-write'
 
 export interface SavedSession {
   claudeSessionId: string
@@ -31,7 +32,7 @@ export function loadSavedSessions(): SavedSession[] {
 
 export function saveSessions(sessions: SavedSession[]): void {
   const data: SessionStoreData = { sessions }
-  writeFileSync(getStorePath(), JSON.stringify(data, null, 2))
+  atomicWriteSync(getStorePath(), JSON.stringify(data, null, 2))
 }
 
 export function clearSavedSessions(): void {

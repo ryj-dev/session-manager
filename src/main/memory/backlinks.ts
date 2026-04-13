@@ -1,71 +1,14 @@
 /**
  * Backlink synchronization — maintains bidirectional links in ## Related sections.
- * Adapted from tc-sql-atlas backlinks.ts.
+ * Pure string operations come from core.ts; compound operations use the in-memory index.
  */
 
-import { readNote, writeNote, extractWikilinks } from './store'
+import { readNote, writeNote } from './store'
 import { getIndex, invalidate, resolveWikilink, beginBatch, endBatch } from './index'
 
-/**
- * Convert a filename to its wikilink form.
- * e.g. "architecture-decisions.md" → "architecture-decisions"
- */
-export function filenameToWikilink(filename: string): string {
-  return filename.replace(/\.md$/, '')
-}
-
-/**
- * Insert a wikilink into the ## Related section of a markdown body.
- * Creates the section if it doesn't exist. Won't duplicate existing links.
- */
-export function addToRelatedSection(rawBody: string, wikilink: string): string {
-  const entry = `- [[${wikilink}]]`
-  const sectionRegex = /^## Related\s*$/m
-
-  if (sectionRegex.test(rawBody)) {
-    // Already present?
-    if (rawBody.includes(`[[${wikilink}]]`)) return rawBody
-
-    const lines = rawBody.split('\n')
-    const idx = lines.findIndex((l) => /^## Related\s*$/.test(l))
-    let insertAt = idx + 1
-    for (let i = idx + 1; i < lines.length; i++) {
-      if (lines[i].startsWith('## ')) break
-      if (lines[i].trim()) insertAt = i + 1
-    }
-    lines.splice(insertAt, 0, entry)
-    return lines.join('\n')
-  }
-
-  // No ## Related section — append at end
-  const trimmed = rawBody.trimEnd()
-  return `${trimmed}\n\n## Related\n\n${entry}\n`
-}
-
-/**
- * Remove a wikilink from the ## Related section only.
- */
-export function removeFromRelatedSection(rawBody: string, wikilink: string): string {
-  const lines = rawBody.split('\n')
-  const relatedIdx = lines.findIndex((l) => /^## Related\s*$/.test(l))
-  if (relatedIdx === -1) return rawBody
-
-  let endIdx = lines.length
-  for (let i = relatedIdx + 1; i < lines.length; i++) {
-    if (lines[i].startsWith('## ')) {
-      endIdx = i
-      break
-    }
-  }
-
-  const before = lines.slice(0, relatedIdx + 1)
-  const section = lines
-    .slice(relatedIdx + 1, endIdx)
-    .filter((line) => line.trim() !== `- [[${wikilink}]]`)
-  const after = lines.slice(endIdx)
-
-  return [...before, ...section, ...after].join('\n')
-}
+// Re-export pure string ops from core for backward compatibility
+export { filenameToWikilink, addToRelatedSection, removeFromRelatedSection } from './core'
+import { filenameToWikilink, addToRelatedSection, removeFromRelatedSection } from './core'
 
 /**
  * Synchronize backlinks after a note's wikilinks change.

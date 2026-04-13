@@ -2,6 +2,9 @@
  * Standalone MCP server for memory notes.
  * Runs as a child process with stdio transport.
  * Claude Code sessions discover it via ~/.claude/.mcp.json.
+ *
+ * Imports shared logic from memory/core.ts and memory/note-io.ts
+ * instead of duplicating it.
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -10,8 +13,22 @@ import { z } from 'zod'
 import fs from 'fs'
 import path from 'path'
 import matter from 'gray-matter'
+import {
+  NOTE_TYPES,
+  TYPE_SECTIONS,
+  slugify,
+  generateNote,
+  touchModified,
+  appendToSection,
+  replaceSectionContent,
+  prependToSection,
+  filenameToWikilink,
+  addToRelatedSection,
+  type MemoryNote,
+} from './memory/core'
+import { createNoteIO, type NoteIO } from './memory/note-io'
 
-// ─── Storage (duplicated from memory/store.ts to avoid Electron imports) ────
+// ─── Storage ───────────────────────────────────────────────────────────────
 
 const MEMORIES_DIR = path.join(
   process.env.HOME || process.env.USERPROFILE || '.',
@@ -20,306 +37,13 @@ const MEMORIES_DIR = path.join(
     : '.config/session-manager/memories'
 )
 
-fs.mkdirSync(MEMORIES_DIR, { recursive: true })
-
-interface MemoryNote {
-  filename: string
-  title: string
-  type: string
-  tags: string[]
-  date: string
-  modified: string
-  body: string
-  rawBody: string
-  wikilinks: string[]
-}
-
-function extractWikilinks(content: string): string[] {
-  const matches = content.matchAll(/\[\[([^\]]+)\]\]/g)
-  return [...new Set([...matches].map((m) => m[1]))]
-}
-
-function readNote(filename: string): MemoryNote | null {
-  const fullPath = path.join(MEMORIES_DIR, filename)
-  if (!fs.existsSync(fullPath)) return null
-  const raw = fs.readFileSync(fullPath, 'utf-8')
-  const { data, content } = matter(raw)
-  return {
-    filename,
-    title: typeof data.title === 'string' ? data.title : filename.replace(/\.md$/, ''),
-    type: typeof data.type === 'string' ? data.type : '',
-    tags: Array.isArray(data.tags) ? data.tags : [],
-    date: formatDate(data.date),
-    modified: formatDate(data.modified),
-    body: content,
-    rawBody: raw,
-    wikilinks: extractWikilinks(content)
-  }
-}
-
-function writeNoteFile(filename: string, rawBody: string): void {
-  fs.writeFileSync(path.join(MEMORIES_DIR, filename), rawBody, 'utf-8')
-}
-
-function deleteNoteFile(filename: string): void {
-  const p = path.join(MEMORIES_DIR, filename)
-  if (fs.existsSync(p)) fs.unlinkSync(p)
-}
-
-function listNotes(): string[] {
-  return fs.readdirSync(MEMORIES_DIR).filter((f) => f.endsWith('.md'))
-}
-
-function formatDate(value: unknown): string {
-  if (value instanceof Date) return value.toISOString().split('T')[0]
-  if (typeof value === 'string') return value
-  return ''
-}
+const io: NoteIO = createNoteIO(MEMORIES_DIR)
 
 function today(): string {
   return new Date().toISOString().split('T')[0]
 }
 
-function slugify(title: string): string {
-  const slug = title.toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
-  return slug ? `${slug}.md` : `note-${Date.now()}.md`
-}
-
-// ─── Note structure constants ───────────────────────────────────────────────
-
-const NOTE_TYPES = ['project', 'decision', 'context', 'reference', 'session-log', 'user', 'feedback'] as const
 const noteTypeEnum = z.enum(NOTE_TYPES)
-
-/** Canonical section order */
-const SECTION_ORDER: Record<string, number> = { Context: 0, Details: 1, Outcome: 2, Related: 3 }
-
-/** Recommended sections per note type */
-const TYPE_SECTIONS: Record<string, string[]> = {
-  project:       ['Context', 'Details', 'Related'],
-  decision:      ['Context', 'Details', 'Outcome', 'Related'],
-  context:       ['Details', 'Related'],
-  reference:     ['Details', 'Related'],
-  'session-log': ['Context', 'Outcome', 'Related'],
-  user:          ['Details', 'Related'],
-  feedback:      ['Context', 'Details', 'Related'],
-}
-
-/** Insert a new section in canonical order relative to existing sections. */
-function insertSectionInOrder(rawBody: string, sectionName: string, content: string): string {
-  const lines = rawBody.split('\n')
-  const orderIdx = SECTION_ORDER[sectionName] ?? 99
-
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].startsWith('## ')) continue
-    const existing = lines[i].replace(/^## /, '').trim()
-    if ((SECTION_ORDER[existing] ?? 99) > orderIdx) {
-      lines.splice(i, 0, `## ${sectionName}`, '', content, '', '')
-      return lines.join('\n')
-    }
-  }
-
-  return `${rawBody.trimEnd()}\n\n## ${sectionName}\n\n${content}\n`
-}
-
-/** Append to an existing section, or create it in canonical order. */
-function appendToSection(rawBody: string, sectionName: string, content: string): string {
-  const lines = rawBody.split('\n')
-  const header = `## ${sectionName}`
-  const idx = lines.findIndex((l) => l.trim() === header)
-
-  if (idx !== -1) {
-    let endIdx = lines.length
-    for (let i = idx + 1; i < lines.length; i++) {
-      if (lines[i].startsWith('## ')) { endIdx = i; break }
-    }
-    lines.splice(endIdx, 0, content)
-    return lines.join('\n')
-  }
-
-  return insertSectionInOrder(rawBody, sectionName, content)
-}
-
-/** Replace an existing section's content, or create it in canonical order. */
-function replaceSectionContent(rawBody: string, sectionName: string, newContent: string): string {
-  const lines = rawBody.split('\n')
-  const header = `## ${sectionName}`
-  const idx = lines.findIndex((l) => l.trim() === header)
-
-  if (idx === -1) return insertSectionInOrder(rawBody, sectionName, newContent)
-
-  let endIdx = lines.length
-  for (let i = idx + 1; i < lines.length; i++) {
-    if (lines[i].startsWith('## ')) { endIdx = i; break }
-  }
-
-  return [...lines.slice(0, idx + 1), '', newContent, '', ...lines.slice(endIdx)].join('\n')
-}
-
-/** Prepend to an existing section (after the header), or create it. */
-function prependToSection(rawBody: string, sectionName: string, content: string): string {
-  const lines = rawBody.split('\n')
-  const header = `## ${sectionName}`
-  const idx = lines.findIndex((l) => l.trim() === header)
-
-  if (idx === -1) return insertSectionInOrder(rawBody, sectionName, content)
-
-  let insertAt = idx + 1
-  const endIdx = lines.length
-  while (insertAt < endIdx && lines[insertAt].trim() === '') insertAt++
-
-  lines.splice(insertAt, 0, content)
-  return lines.join('\n')
-}
-
-/** Generate a structured note body from section inputs. */
-function generateNoteBody(input: {
-  title: string; type: string; summary?: string;
-  context?: string; details?: string; outcome?: string
-}): string {
-  const type = input.type || 'context'
-  const recommended = TYPE_SECTIONS[type] || ['Details', 'Related']
-  const lines: string[] = [`# ${input.title}`, '']
-
-  if (input.summary) { lines.push(input.summary, '') }
-
-  const shouldInclude = (s: string, content?: string) =>
-    s === 'Related' || !!content || recommended.includes(s)
-
-  if (shouldInclude('Context', input.context)) {
-    lines.push('## Context', '')
-    if (input.context) lines.push(input.context, '')
-  }
-  if (shouldInclude('Details', input.details)) {
-    lines.push('## Details', '')
-    if (input.details) lines.push(input.details, '')
-  }
-  if (shouldInclude('Outcome', input.outcome)) {
-    lines.push('## Outcome', '')
-    if (input.outcome) lines.push(input.outcome, '')
-  }
-
-  lines.push('## Related', '')
-  return lines.join('\n')
-}
-
-// ─── Backlink helpers ───────────────────────────────────────────────────────
-
-function filenameToWikilink(filename: string): string {
-  return filename.replace(/\.md$/, '')
-}
-
-function resolveWikilink(link: string): string | null {
-  const direct = link.endsWith('.md') ? link : `${link}.md`
-  const fullPath = path.join(MEMORIES_DIR, direct)
-  if (fs.existsSync(fullPath)) return direct
-
-  // Case-insensitive fallback
-  const lower = direct.toLowerCase()
-  for (const f of listNotes()) {
-    if (f.toLowerCase() === lower) return f
-  }
-  return null
-}
-
-function addToRelatedSection(rawBody: string, wikilink: string): string {
-  const entry = `- [[${wikilink}]]`
-  const sectionRegex = /^## Related\s*$/m
-
-  if (sectionRegex.test(rawBody)) {
-    if (rawBody.includes(`[[${wikilink}]]`)) return rawBody
-    const lines = rawBody.split('\n')
-    const idx = lines.findIndex((l) => /^## Related\s*$/.test(l))
-    let insertAt = idx + 1
-    for (let i = idx + 1; i < lines.length; i++) {
-      if (lines[i].startsWith('## ')) break
-      if (lines[i].trim()) insertAt = i + 1
-    }
-    lines.splice(insertAt, 0, entry)
-    return lines.join('\n')
-  }
-
-  return `${rawBody.trimEnd()}\n\n## Related\n\n${entry}\n`
-}
-
-function removeFromRelatedSection(rawBody: string, wikilink: string): string {
-  const lines = rawBody.split('\n')
-  const relatedIdx = lines.findIndex((l) => /^## Related\s*$/.test(l))
-  if (relatedIdx === -1) return rawBody
-
-  let endIdx = lines.length
-  for (let i = relatedIdx + 1; i < lines.length; i++) {
-    if (lines[i].startsWith('## ')) { endIdx = i; break }
-  }
-
-  const before = lines.slice(0, relatedIdx + 1)
-  const section = lines.slice(relatedIdx + 1, endIdx).filter((l) => l.trim() !== `- [[${wikilink}]]`)
-  const after = lines.slice(endIdx)
-  return [...before, ...section, ...after].join('\n')
-}
-
-function syncBacklinks(filename: string, oldWikilinks: string[], newWikilinks: string[]): void {
-  const oldSet = new Set(oldWikilinks)
-  const newSet = new Set(newWikilinks)
-  const added = newWikilinks.filter((l) => !oldSet.has(l))
-  const removed = oldWikilinks.filter((l) => !newSet.has(l))
-  const sourceWikilink = filenameToWikilink(filename)
-
-  for (const link of added) {
-    const target = resolveWikilink(link)
-    if (!target || target === filename) continue
-    const note = readNote(target)
-    if (!note) continue
-    const updated = addToRelatedSection(note.rawBody, sourceWikilink)
-    if (updated !== note.rawBody) writeNoteFile(target, updated)
-  }
-
-  for (const link of removed) {
-    const target = resolveWikilink(link)
-    if (!target || target === filename) continue
-    const note = readNote(target)
-    if (!note) continue
-    const updated = removeFromRelatedSection(note.rawBody, sourceWikilink)
-    if (updated !== note.rawBody) writeNoteFile(target, updated)
-  }
-}
-
-function getInboundLinks(filename: string): string[] {
-  const inbound: string[] = []
-  for (const fn of listNotes()) {
-    if (fn === filename) continue
-    const note = readNote(fn)
-    if (!note) continue
-    for (const link of note.wikilinks) {
-      const resolved = resolveWikilink(link)
-      if (resolved === filename) { inbound.push(fn); break }
-    }
-  }
-  return inbound
-}
-
-function cleanupRefsBeforeDelete(filename: string): void {
-  const note = readNote(filename)
-  if (!note) return
-  const sourceWikilink = filenameToWikilink(filename)
-
-  // Remove inbound refs
-  for (const refFn of getInboundLinks(filename)) {
-    const refNote = readNote(refFn)
-    if (!refNote) continue
-    const updated = removeFromRelatedSection(refNote.rawBody, sourceWikilink)
-    if (updated !== refNote.rawBody) writeNoteFile(refFn, updated)
-  }
-
-  // Remove outbound backlinks
-  for (const link of note.wikilinks) {
-    const target = resolveWikilink(link)
-    if (!target || target === filename) continue
-    const targetNote = readNote(target)
-    if (!targetNote) continue
-    const updated = removeFromRelatedSection(targetNote.rawBody, sourceWikilink)
-    if (updated !== targetNote.rawBody) writeNoteFile(target, updated)
-  }
-}
 
 // ─── MCP Server ─────────────────────────────────────────────────────────────
 
@@ -442,35 +166,29 @@ server.tool(
   async ({ title, filename, type, tags, summary, context, details, outcome }) => {
     const fn = filename || slugify(title)
 
-    if (readNote(fn)) {
+    if (io.readNote(fn)) {
       return { content: [{ type: 'text', text: `Error: Note "${fn}" already exists` }], isError: true }
     }
 
-    const date = today()
-    const noteType = type || 'context'
-    const body = generateNoteBody({ title, type: noteType, summary, context, details, outcome })
-    const rawBody = matter.stringify('\n' + body, { title, type: noteType, tags: tags || [], date, modified: date })
+    const rawBody = generateNote({ title, type: type || undefined, tags, summary, context, details, outcome })
+    io.writeNote(fn, rawBody)
+    let note = io.readNote(fn)!
 
-    writeNoteFile(fn, rawBody)
-    let note = readNote(fn)!
+    io.syncBacklinks(fn, [], note.wikilinks)
 
-    // Sync outbound links (add backlinks to target notes)
-    syncBacklinks(fn, [], note.wikilinks)
-
-    // Sync inbound links — check if existing notes already reference this new note
-    const inbound = getInboundLinks(fn)
+    const inbound = io.getInboundLinks(fn)
     if (inbound.length > 0) {
       let updatedRaw = note.rawBody
       for (const refFn of inbound) {
         updatedRaw = addToRelatedSection(updatedRaw, filenameToWikilink(refFn))
       }
       if (updatedRaw !== note.rawBody) {
-        writeNoteFile(fn, updatedRaw)
-        note = readNote(fn)!
+        io.writeNote(fn, updatedRaw)
+        note = io.readNote(fn)!
       }
     }
 
-    return { content: [{ type: 'text', text: `Created "${fn}" [${noteType}] (${note.wikilinks.length} outbound, ${inbound.length} inbound links synced)` }] }
+    return { content: [{ type: 'text', text: `Created "${fn}" [${note.type || 'context'}] (${note.wikilinks.length} outbound, ${inbound.length} inbound links synced)` }] }
   }
 )
 
@@ -481,7 +199,7 @@ server.tool(
   'Read a memory note by filename.',
   { filename: z.string().describe('Note filename (e.g. "my-note.md")') },
   async ({ filename }) => {
-    const note = readNote(filename)
+    const note = io.readNote(filename)
     if (!note) {
       return { content: [{ type: 'text', text: `Error: Note "${filename}" not found` }], isError: true }
     }
@@ -501,7 +219,7 @@ server.tool(
     content: z.string().describe('Content to add/replace'),
   },
   async ({ filename, heading, operation, content }) => {
-    const note = readNote(filename)
+    const note = io.readNote(filename)
     if (!note) {
       return { content: [{ type: 'text', text: `Error: Note "${filename}" not found` }], isError: true }
     }
@@ -517,11 +235,11 @@ server.tool(
     else if (operation === 'append') rawBody = appendToSection(note.rawBody, heading, content)
     else rawBody = prependToSection(note.rawBody, heading, content)
 
-    rawBody = rawBody.replace(/^modified:\s*.+$/m, `modified: '${today()}'`)
+    rawBody = touchModified(rawBody)
 
-    writeNoteFile(filename, rawBody)
-    const updated = readNote(filename)!
-    syncBacklinks(filename, oldWikilinks, updated.wikilinks)
+    io.writeNote(filename, rawBody)
+    const updated = io.readNote(filename)!
+    io.syncBacklinks(filename, oldWikilinks, updated.wikilinks)
 
     return { content: [{ type: 'text', text: `Updated "${filename}" (${operation} in ## ${heading})` }] }
   }
@@ -544,7 +262,6 @@ server.tool(
     const results: string[] = []
     const errors: string[] = []
 
-    // Group edits by filename to batch backlink syncs
     const byFile = new Map<string, typeof edits>()
     for (const edit of edits) {
       if (edit.heading === 'Related') {
@@ -556,7 +273,7 @@ server.tool(
     }
 
     for (const [filename, fileEdits] of byFile) {
-      const note = readNote(filename)
+      const note = io.readNote(filename)
       if (!note) {
         errors.push(`${filename}: not found`)
         continue
@@ -571,11 +288,11 @@ server.tool(
         else rawBody = prependToSection(rawBody, edit.heading, edit.content)
       }
 
-      rawBody = rawBody.replace(/^modified:\s*.+$/m, `modified: '${today()}'`)
-      writeNoteFile(filename, rawBody)
+      rawBody = touchModified(rawBody)
+      io.writeNote(filename, rawBody)
 
-      const updated = readNote(filename)!
-      syncBacklinks(filename, oldWikilinks, updated.wikilinks)
+      const updated = io.readNote(filename)!
+      io.syncBacklinks(filename, oldWikilinks, updated.wikilinks)
 
       results.push(`${filename}: ${fileEdits.length} edit(s) applied`)
     }
@@ -598,12 +315,12 @@ server.tool(
     force: z.boolean().optional().describe('Force delete even if referenced by other notes')
   },
   async ({ filename, force }) => {
-    const note = readNote(filename)
+    const note = io.readNote(filename)
     if (!note) {
       return { content: [{ type: 'text', text: `Error: Note "${filename}" not found` }], isError: true }
     }
 
-    const inbound = getInboundLinks(filename)
+    const inbound = io.getInboundLinks(filename)
     if (inbound.length > 0 && !force) {
       return {
         content: [{
@@ -615,10 +332,10 @@ server.tool(
     }
 
     if (inbound.length > 0 || note.wikilinks.length > 0) {
-      cleanupRefsBeforeDelete(filename)
+      io.cleanupRefsBeforeDelete(filename)
     }
 
-    deleteNoteFile(filename)
+    io.deleteNote(filename)
     return { content: [{ type: 'text', text: `Deleted "${filename}" (cleaned ${inbound.length} inbound references)` }] }
   }
 )
@@ -637,8 +354,8 @@ server.tool(
     const q = query.toLowerCase()
     const results: string[] = []
 
-    for (const fn of listNotes()) {
-      const note = readNote(fn)
+    for (const fn of io.listNotes()) {
+      const note = io.readNote(fn)
       if (!note) continue
 
       const matchesFilename = fn.toLowerCase().includes(q)
@@ -672,7 +389,7 @@ server.tool(
     type: noteTypeEnum.optional().describe('Filter by type')
   },
   async ({ tag, type }) => {
-    let notes = listNotes().map((fn) => readNote(fn)).filter(Boolean) as MemoryNote[]
+    let notes = io.listNotes().map((fn) => io.readNote(fn)).filter(Boolean) as MemoryNote[]
 
     if (tag) notes = notes.filter((n) => n.tags.includes(tag))
     if (type) notes = notes.filter((n) => n.type === type)
@@ -696,7 +413,7 @@ server.tool(
     tags: z.array(z.string()).describe('Tags to add')
   },
   async ({ filename, tags }) => {
-    const note = readNote(filename)
+    const note = io.readNote(filename)
     if (!note) {
       return { content: [{ type: 'text', text: `Error: Note "${filename}" not found` }], isError: true }
     }
@@ -711,7 +428,7 @@ server.tool(
     data.tags = [...note.tags, ...newTags]
     data.modified = today()
     const rawBody = matter.stringify(note.body, data)
-    writeNoteFile(filename, rawBody)
+    io.writeNote(filename, rawBody)
 
     return { content: [{ type: 'text', text: `Added ${newTags.length} tag(s) to "${filename}": ${newTags.join(', ')}` }] }
   }
@@ -727,7 +444,7 @@ server.tool(
     tags: z.array(z.string()).describe('Tags to remove')
   },
   async ({ filename, tags }) => {
-    const note = readNote(filename)
+    const note = io.readNote(filename)
     if (!note) {
       return { content: [{ type: 'text', text: `Error: Note "${filename}" not found` }], isError: true }
     }
@@ -744,7 +461,7 @@ server.tool(
     data.tags = remaining
     data.modified = today()
     const rawBody = matter.stringify(note.body, data)
-    writeNoteFile(filename, rawBody)
+    io.writeNote(filename, rawBody)
 
     return { content: [{ type: 'text', text: `Removed ${removed.length} tag(s) from "${filename}": ${removed.join(', ')}` }] }
   }
@@ -759,14 +476,11 @@ server.tool(
     filename: z.string().describe('Note filename to repair'),
   },
   async ({ filename }) => {
-    const note = readNote(filename)
+    const note = io.readNote(filename)
     if (!note) {
       return { content: [{ type: 'text', text: `Error: Note "${filename}" not found` }], isError: true }
     }
 
-    // Collect all links that should be in ## Related:
-    // 1. Outbound wikilinks from this note's content (excluding ## Related itself)
-    // 2. Inbound links from other notes
     const outbound = new Set<string>()
     const lines = note.body.split('\n')
     let inRelated = false
@@ -777,22 +491,21 @@ server.tool(
       }
       if (!inRelated) {
         for (const m of line.matchAll(/\[\[([^\]]+)\]\]/g)) {
-          const resolved = resolveWikilink(m[1])
+          const resolved = io.resolveWikilink(m[1])
           if (resolved && resolved !== filename) outbound.add(filenameToWikilink(resolved))
         }
       }
     }
 
-    const inbound = getInboundLinks(filename)
+    const inbound = io.getInboundLinks(filename)
     for (const fn of inbound) {
       outbound.add(filenameToWikilink(fn))
     }
 
-    // Rebuild ## Related
     const relatedEntries = [...outbound].sort().map((link) => `- [[${link}]]`).join('\n')
     const rawBody = replaceSectionContent(note.rawBody, 'Related', relatedEntries)
 
-    writeNoteFile(filename, rawBody)
+    io.writeNote(filename, rawBody)
 
     return {
       content: [{

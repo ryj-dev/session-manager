@@ -3,9 +3,10 @@
  * Registers/unregisters the memory MCP server in ~/.claude.json on app start/quit.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { atomicWriteSync } from './atomic-write'
 
 const MCP_JSON_PATH = join(homedir(), '.claude.json')
 const MCP_ENTRY_KEY = 'session-manager'
@@ -32,7 +33,7 @@ export function registerMcpServer(serverScriptPath: string): void {
   }
   config.mcpServers = mcpServers
 
-  writeFileSync(MCP_JSON_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+  atomicWriteSync(MCP_JSON_PATH, JSON.stringify(config, null, 2) + '\n')
   console.log('[mcp-launcher] registered in', MCP_JSON_PATH)
 }
 
@@ -57,7 +58,7 @@ export function unregisterMcpServer(): void {
       config.mcpServers = mcpServers
     }
 
-    writeFileSync(MCP_JSON_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+    atomicWriteSync(MCP_JSON_PATH, JSON.stringify(config, null, 2) + '\n')
     console.log('[mcp-launcher] unregistered from', MCP_JSON_PATH)
   } catch (err) {
     console.error('[mcp-launcher] failed to unregister:', err)
