@@ -591,7 +591,7 @@ const ELEMENT_DEFS: Record<string, ElementDef> = {
   },
   inputTokens: {
     extract: [
-      'IN_TOK=$(echo "$input" | jq -r \'.context_window.input_tokens // empty\')',
+      'IN_TOK=$(echo "$input" | jq -r \'.context_window.total_input_tokens // empty\')',
       'IN_TOK_FMT=""',
       'if [ -n "$IN_TOK" ]; then',
       '  if [ "$IN_TOK" -ge 1000000 ]; then',
@@ -608,7 +608,7 @@ const ELEMENT_DEFS: Record<string, ElementDef> = {
   },
   outputTokens: {
     extract: [
-      'OUT_TOK=$(echo "$input" | jq -r \'.context_window.output_tokens // empty\')',
+      'OUT_TOK=$(echo "$input" | jq -r \'.context_window.total_output_tokens // empty\')',
       'OUT_TOK_FMT=""',
       'if [ -n "$OUT_TOK" ]; then',
       '  if [ "$OUT_TOK" -ge 1000000 ]; then',
@@ -625,8 +625,8 @@ const ELEMENT_DEFS: Record<string, ElementDef> = {
   },
   totalTokens: {
     extract: [
-      'T_IN=$(echo "$input" | jq -r \'.context_window.input_tokens // 0\')',
-      'T_OUT=$(echo "$input" | jq -r \'.context_window.output_tokens // 0\')',
+      'T_IN=$(echo "$input" | jq -r \'.context_window.total_input_tokens // 0\')',
+      'T_OUT=$(echo "$input" | jq -r \'.context_window.total_output_tokens // 0\')',
       'TOTAL_TOK=$(( T_IN + T_OUT ))',
       'TOTAL_TOK_FMT=""',
       'if [ "$TOTAL_TOK" -gt 0 ]; then',
@@ -644,7 +644,7 @@ const ELEMENT_DEFS: Record<string, ElementDef> = {
   },
   cacheReadTokens: {
     extract: [
-      'CACHE_R=$(echo "$input" | jq -r \'.context_window.cache_read_input_tokens // empty\')',
+      'CACHE_R=$(echo "$input" | jq -r \'.context_window.current_usage.cache_read_input_tokens // empty\')',
       'CACHE_R_FMT=""',
       'if [ -n "$CACHE_R" ] && [ "$CACHE_R" -gt 0 ]; then',
       '  if [ "$CACHE_R" -ge 1000000 ]; then',

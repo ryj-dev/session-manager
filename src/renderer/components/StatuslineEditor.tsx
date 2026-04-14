@@ -69,10 +69,14 @@ The script receives this JSON structure:
   },
   "context_window": {
     "used_percentage": 8.3,
-    "input_tokens": 12400,
-    "output_tokens": 3200,
-    "cache_creation_input_tokens": 1500,
-    "cache_read_input_tokens": 8100
+    "total_input_tokens": 12400,
+    "total_output_tokens": 3200,
+    "current_usage": {
+      "input_tokens": 12400,
+      "output_tokens": 3200,
+      "cache_creation_input_tokens": 1500,
+      "cache_read_input_tokens": 8100
+    }
   },
   "cost": {
     "total_cost_usd": 0.12,
