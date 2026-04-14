@@ -277,6 +277,16 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
         stickyScrollState.delete(sessionId)
       }
 
+      // Trim trailing whitespace from copied text (like iTerm2 does)
+      term.element?.addEventListener('copy', (e: ClipboardEvent) => {
+        const selection = term.getSelection()
+        if (selection && e.clipboardData) {
+          const trimmed = selection.split('\n').map(line => line.trimEnd()).join('\n')
+          e.clipboardData.setData('text/plain', trimmed)
+          e.preventDefault()
+        }
+      })
+
       // Capture terminal title changes — use ref so callback is never stale
       term.onTitleChange((title) => {
         onTitleChangeRef.current?.(title)
