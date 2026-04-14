@@ -108,9 +108,10 @@ export function submitToSession(id: string, content: string): void {
   writeToSession(id, content)
   const session = sessions.get(id)
   if (session) {
+    const delay = submitDelay(content.length)
     setTimeout(() => {
       if (sessions.has(id)) session.process.write('\r')
-    }, 150)
+    }, delay)
   }
 }
 
@@ -207,8 +208,15 @@ export function writeWhenReady(id: string, data: string): void {
   }
 }
 
+/** Delay before sending \r after a PTY write. Large writes trigger
+ *  auto-bracketed paste — \r must arrive after paste brackets close.
+ *  Scale with content length since big payloads take longer to deliver. */
+function submitDelay(contentLength: number): number {
+  return Math.max(150, Math.min(Math.ceil(contentLength / 5), 2000))
+}
+
 /** Queue content for submission once Claude is ready (title set).
- *  Sends \r as a separate write after 150ms — large PTY writes trigger
+ *  Sends \r as a separate write after a delay — large PTY writes trigger
  *  auto-bracketed paste, which swallows an inline \r. */
 export function submitWhenReady(id: string, content: string): void {
   const session = sessions.get(id)
@@ -217,9 +225,10 @@ export function submitWhenReady(id: string, content: string): void {
   if (session.terminalTitle) {
     session.hasActivity = true
     session.process.write(content)
+    const delay = submitDelay(content.length)
     setTimeout(() => {
       if (sessions.has(id)) session.process.write('\r')
-    }, 150)
+    }, delay)
   } else {
     pendingWrites.set(id, (pendingWrites.get(id) || '') + content)
     pendingSubmits.add(id)
@@ -245,13 +254,21 @@ export function updateSessionTitle(id: string, title: string): void {
     if (pending) {
       pendingWrites.delete(id)
       session.hasActivity = true
+      console.log(`[pty] flushing pending write for ${id}: ${pending.length} chars`)
       session.process.write(pending)
       // If a delayed submit was queued, send \r after content is written
       if (pendingSubmits.has(id)) {
         pendingSubmits.delete(id)
+        const delay = submitDelay(pending.length)
+        console.log(`[pty] scheduling \\r for ${id} in ${delay}ms (${pending.length} chars)`)
         setTimeout(() => {
-          if (sessions.has(id)) session.process.write('\r')
-        }, 150)
+          if (sessions.has(id)) {
+            console.log(`[pty] sending \\r to ${id}`)
+            session.process.write('\r')
+          } else {
+            console.log(`[pty] session ${id} gone before \\r could be sent`)
+          }
+        }, delay)
       }
     }
   }
