@@ -5,7 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID } from 'crypto'
-import { spawnSession, submitWhenReady, submitToSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
+import { spawnSession, submitToSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
 
@@ -220,7 +220,10 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       args = ['--allowedTools', ...tools]
     }
 
-    const session = spawnSession(id, cwd, 'claude', args)
+    // Pass prompt as CLI positional arg — Claude Code parses it on startup,
+    // bypassing the PTY paste/timing issues of writing to the TUI.
+    // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
+    const session = spawnSession(id, cwd, 'claude', [...args, '--', payload.prompt])
 
     // Attach PTY listeners so the renderer can see this session
     if (attachListenersFn) {
@@ -232,9 +235,6 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     if (win && !win.isDestroyed()) {
       win.webContents.send('session:spawned', { id, projectPath: cwd })
     }
-
-    // Queue the prompt to be submitted once Claude is ready
-    submitWhenReady(id, payload.prompt)
 
     console.log(`[hook-server] spawned session ${id} in ${cwd}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -394,7 +394,10 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     const SEND_MSG = 'mcp__session-manager__send-message'
     const allowedTools = agent.tools.includes(SEND_MSG) ? agent.tools : [...agent.tools, SEND_MSG]
 
-    const args = ['--allowedTools', ...allowedTools]
+    // Pass slash command + prompt as CLI positional arg — Claude Code parses
+    // skill commands from CLI args, bypassing PTY paste/timing issues.
+    // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
+    const args = ['--allowedTools', ...allowedTools, '--', `/${commandName} ${prompt}`]
     const session = spawnSession(id, cwd, 'claude', args)
 
     if (attachListenersFn) {
@@ -405,13 +408,6 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     if (win && !win.isDestroyed()) {
       win.webContents.send('session:spawned', { id, projectPath: cwd })
     }
-
-    // Send slash command + prompt together so Claude gets both in one input.
-    // This prevents agents that auto-start (e.g. code reviewer) from missing
-    // the prompt because they're already working when it would be delivered.
-    // Submit (\r) is sent separately after 150ms — large PTY writes can split
-    // across kernel buffer chunks, losing an inline \r.
-    submitWhenReady(id, `/${commandName} ${prompt}`)
 
     console.log(`[hook-server] spawned agent "${agent.name}" session ${id} in ${cwd}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })
