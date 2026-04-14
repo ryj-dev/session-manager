@@ -439,6 +439,9 @@ export function App(): JSX.Element {
           markSessionSeen(focusedSessionId)
         }
         setActivePanel(null)
+        setShowSettings(false)
+        setShowShortcuts(false)
+        setShowStatusline(false)
         setFocusedSessionId(null)
         setViewMode('graph')
         return
@@ -811,7 +814,11 @@ export function App(): JSX.Element {
       <KeyboardShortcuts visible={showShortcuts} onClose={() => setShowShortcuts(false)} />
 
       {/* Statusline editor page */}
-      <StatuslineEditor visible={showStatusline} onClose={() => setShowStatusline(false)} />
+      <StatuslineEditor
+        visible={showStatusline}
+        onClose={() => setShowStatusline(false)}
+        onSpawn={(name, content) => handleSpawnWithSkill(name, content)}
+      />
 
       {/* Restore sessions prompt */}
       {showRestorePrompt && (

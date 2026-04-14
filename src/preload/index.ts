@@ -143,12 +143,29 @@ const api = {
     managed: boolean
     hasCustom?: boolean
     elements: string[]
+    customComponents?: Array<{
+      id: string
+      label: string
+      description: string
+      preview: string
+      extract: string
+      format: string
+      guard?: string
+    }>
     scriptPath?: string
     settingsPath?: string
   }> => ipcRenderer.invoke('claude:getStatuslineConfig'),
 
-  setStatuslineConfig: (elements: string[]): Promise<boolean> =>
-    ipcRenderer.invoke('claude:setStatuslineConfig', elements),
+  setStatuslineConfig: (elements: string[], customComponents?: Array<{
+    id: string
+    label: string
+    description: string
+    preview: string
+    extract: string
+    format: string
+    guard?: string
+  }>): Promise<boolean> =>
+    ipcRenderer.invoke('claude:setStatuslineConfig', elements, customComponents),
 
   // Session spawned externally (via MCP)
   onSessionSpawned: (callback: (data: { id: string; projectPath: string }) => void) => {

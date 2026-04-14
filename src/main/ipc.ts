@@ -452,14 +452,24 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('claude:setStatuslineConfig', (_event, elements: string[]) => {
+  ipcMain.handle('claude:setStatuslineConfig', (_event, elements: string[], customComponents?: CustomComponentDef[]) => {
     try {
-      // Save config
-      const config = { managed: true, elements }
+      // Save config (preserve existing custom components if not provided)
+      let existingCustom: CustomComponentDef[] = []
+      try {
+        const existing = JSON.parse(readFileSync(statuslineConfigPath, 'utf-8'))
+        existingCustom = existing.customComponents || []
+      } catch { /* no existing config */ }
+
+      const config = {
+        managed: true,
+        elements,
+        customComponents: customComponents ?? existingCustom,
+      }
       writeFileSync(statuslineConfigPath, JSON.stringify(config, null, 2) + '\n', 'utf-8')
 
       // Generate and write bash script
-      const script = generateStatuslineScript(elements)
+      const script = generateStatuslineScript(elements, config.customComponents)
       writeFileSync(statuslineScriptPath, script, 'utf-8')
       chmodSync(statuslineScriptPath, 0o755)
 
@@ -479,6 +489,16 @@ export function registerIpcHandlers(): void {
 }
 
 // ── Statusline script generator ───────────────────────────────────────
+
+interface CustomComponentDef {
+  id: string
+  label: string
+  description: string
+  preview: string
+  extract: string
+  format: string
+  guard?: string
+}
 
 interface ElementDef {
   extract: string      // bash lines to extract the value
@@ -569,20 +589,157 @@ const ELEMENT_DEFS: Record<string, ElementDef> = {
     format: '"$LINES"',
     guard: 'LINES',
   },
+  inputTokens: {
+    extract: [
+      'IN_TOK=$(echo "$input" | jq -r \'.context_window.input_tokens // empty\')',
+      'IN_TOK_FMT=""',
+      'if [ -n "$IN_TOK" ]; then',
+      '  if [ "$IN_TOK" -ge 1000000 ]; then',
+      '    IN_TOK_FMT="$(printf \'%.1fM\' "$(echo "$IN_TOK / 1000000" | bc -l)")"',
+      '  elif [ "$IN_TOK" -ge 1000 ]; then',
+      '    IN_TOK_FMT="$(printf \'%.1fk\' "$(echo "$IN_TOK / 1000" | bc -l)")"',
+      '  else',
+      '    IN_TOK_FMT="$IN_TOK"',
+      '  fi',
+      'fi',
+    ].join('\n'),
+    format: '"in: $IN_TOK_FMT"',
+    guard: 'IN_TOK_FMT',
+  },
+  outputTokens: {
+    extract: [
+      'OUT_TOK=$(echo "$input" | jq -r \'.context_window.output_tokens // empty\')',
+      'OUT_TOK_FMT=""',
+      'if [ -n "$OUT_TOK" ]; then',
+      '  if [ "$OUT_TOK" -ge 1000000 ]; then',
+      '    OUT_TOK_FMT="$(printf \'%.1fM\' "$(echo "$OUT_TOK / 1000000" | bc -l)")"',
+      '  elif [ "$OUT_TOK" -ge 1000 ]; then',
+      '    OUT_TOK_FMT="$(printf \'%.1fk\' "$(echo "$OUT_TOK / 1000" | bc -l)")"',
+      '  else',
+      '    OUT_TOK_FMT="$OUT_TOK"',
+      '  fi',
+      'fi',
+    ].join('\n'),
+    format: '"out: $OUT_TOK_FMT"',
+    guard: 'OUT_TOK_FMT',
+  },
+  totalTokens: {
+    extract: [
+      'T_IN=$(echo "$input" | jq -r \'.context_window.input_tokens // 0\')',
+      'T_OUT=$(echo "$input" | jq -r \'.context_window.output_tokens // 0\')',
+      'TOTAL_TOK=$(( T_IN + T_OUT ))',
+      'TOTAL_TOK_FMT=""',
+      'if [ "$TOTAL_TOK" -gt 0 ]; then',
+      '  if [ "$TOTAL_TOK" -ge 1000000 ]; then',
+      '    TOTAL_TOK_FMT="$(printf \'%.1fM\' "$(echo "$TOTAL_TOK / 1000000" | bc -l)")"',
+      '  elif [ "$TOTAL_TOK" -ge 1000 ]; then',
+      '    TOTAL_TOK_FMT="$(printf \'%.1fk\' "$(echo "$TOTAL_TOK / 1000" | bc -l)")"',
+      '  else',
+      '    TOTAL_TOK_FMT="$TOTAL_TOK"',
+      '  fi',
+      'fi',
+    ].join('\n'),
+    format: '"tok: $TOTAL_TOK_FMT"',
+    guard: 'TOTAL_TOK_FMT',
+  },
+  cacheReadTokens: {
+    extract: [
+      'CACHE_R=$(echo "$input" | jq -r \'.context_window.cache_read_input_tokens // empty\')',
+      'CACHE_R_FMT=""',
+      'if [ -n "$CACHE_R" ] && [ "$CACHE_R" -gt 0 ]; then',
+      '  if [ "$CACHE_R" -ge 1000000 ]; then',
+      '    CACHE_R_FMT="$(printf \'%.1fM\' "$(echo "$CACHE_R / 1000000" | bc -l)")"',
+      '  elif [ "$CACHE_R" -ge 1000 ]; then',
+      '    CACHE_R_FMT="$(printf \'%.1fk\' "$(echo "$CACHE_R / 1000" | bc -l)")"',
+      '  else',
+      '    CACHE_R_FMT="$CACHE_R"',
+      '  fi',
+      'fi',
+    ].join('\n'),
+    format: '"cache: $CACHE_R_FMT"',
+    guard: 'CACHE_R_FMT',
+  },
+  contextBar: {
+    extract: [
+      'CTX_BAR_PCT=$(echo "$input" | jq -r \'.context_window.used_percentage // empty\')',
+      'CTX_BAR=""',
+      'if [ -n "$CTX_BAR_PCT" ]; then',
+      '  FILLED=$(printf \'%.0f\' "$(echo "$CTX_BAR_PCT / 10" | bc -l)")',
+      '  BAR=""',
+      '  for i in $(seq 1 10); do',
+      '    if [ "$i" -le "$FILLED" ]; then BAR="${BAR}█"; else BAR="${BAR}░"; fi',
+      '  done',
+      '  CTX_BAR="ctx $BAR $(printf \'%.0f\' "$CTX_BAR_PCT")%"',
+      'fi',
+    ].join('\n'),
+    format: '"$CTX_BAR"',
+    guard: 'CTX_BAR',
+  },
+  rateLimitBar5h: {
+    extract: [
+      'RLB_5H=$(echo "$input" | jq -r \'.rate_limits.five_hour.used_percentage // empty\')',
+      'RLB_5H_FMT=""',
+      'if [ -n "$RLB_5H" ] && [ "$(echo "$RLB_5H > 0" | bc)" -eq 1 ]; then',
+      '  FILLED_5H=$(printf \'%.0f\' "$(echo "$RLB_5H / 10" | bc -l)")',
+      '  BAR_5H=""',
+      '  for i in $(seq 1 10); do',
+      '    if [ "$i" -le "$FILLED_5H" ]; then BAR_5H="${BAR_5H}█"; else BAR_5H="${BAR_5H}░"; fi',
+      '  done',
+      '  RLB_5H_FMT="5h $BAR_5H $(printf \'%.0f\' "$RLB_5H")%"',
+      'fi',
+    ].join('\n'),
+    format: '"$RLB_5H_FMT"',
+    guard: 'RLB_5H_FMT',
+  },
+  rateLimitBar7d: {
+    extract: [
+      'RLB_7D=$(echo "$input" | jq -r \'.rate_limits.seven_day.used_percentage // empty\')',
+      'RLB_7D_FMT=""',
+      'if [ -n "$RLB_7D" ] && [ "$(echo "$RLB_7D > 0" | bc)" -eq 1 ]; then',
+      '  FILLED_7D=$(printf \'%.0f\' "$(echo "$RLB_7D / 10" | bc -l)")',
+      '  BAR_7D=""',
+      '  for i in $(seq 1 10); do',
+      '    if [ "$i" -le "$FILLED_7D" ]; then BAR_7D="${BAR_7D}█"; else BAR_7D="${BAR_7D}░"; fi',
+      '  done',
+      '  RLB_7D_FMT="7d $BAR_7D $(printf \'%.0f\' "$RLB_7D")%"',
+      'fi',
+    ].join('\n'),
+    format: '"$RLB_7D_FMT"',
+    guard: 'RLB_7D_FMT',
+  },
 }
 
-function generateStatuslineScript(elements: string[]): string {
+function generateStatuslineScript(elements: string[], customComponents?: CustomComponentDef[]): string {
   const extracts: string[] = []
   const segments: string[] = []
 
+  // Build a lookup for custom components
+  const customMap = new Map<string, CustomComponentDef>()
+  for (const c of customComponents || []) {
+    customMap.set(c.id, c)
+  }
+
   for (const id of elements) {
-    const def = ELEMENT_DEFS[id]
-    if (!def) continue
-    extracts.push(def.extract)
-    if (def.guard) {
-      segments.push(`[ -n "$${def.guard}" ] && PARTS+=("$(echo -n ${def.format})")`)
-    } else {
-      segments.push(`PARTS+=("$(echo -n ${def.format})")`)
+    // Check built-in elements first, then custom components
+    const builtIn = ELEMENT_DEFS[id]
+    if (builtIn) {
+      extracts.push(builtIn.extract)
+      if (builtIn.guard) {
+        segments.push(`[ -n "$${builtIn.guard}" ] && PARTS+=("$(echo -n ${builtIn.format})")`)
+      } else {
+        segments.push(`PARTS+=("$(echo -n ${builtIn.format})")`)
+      }
+      continue
+    }
+
+    const custom = customMap.get(id)
+    if (custom) {
+      extracts.push(custom.extract)
+      if (custom.guard) {
+        segments.push(`[ -n "$${custom.guard}" ] && PARTS+=("$(echo -n ${custom.format})")`)
+      } else {
+        segments.push(`PARTS+=("$(echo -n ${custom.format})")`)
+      }
     }
   }
 
