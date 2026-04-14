@@ -569,13 +569,16 @@ async function callHookServer(endpoint: string, body: unknown): Promise<unknown>
   return JSON.parse(text)
 }
 
-function buildParentContext(reportBack: boolean): string {
+function buildParentContext(reportBack: 'true' | 'optional' | 'false'): string {
   const parentId = process.env.APP_SESSION_ID || null
   if (!parentId) return ''
 
-  const reportLine = reportBack
-    ? `Report back your findings and results using the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
-    : `If you need to report back results or issues, use the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
+  const reportLine =
+    reportBack === 'true'
+      ? `Report back your findings and results using the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
+      : reportBack === 'optional'
+        ? `If you need to report back results or issues, use the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
+        : `Do NOT report back unless you run into an issue that blocks your work. If you do need help, use the \`mcp__session-manager__send-message\` tool with targetSessionId "${parentId}".`
 
   return `\n\n---\nYou were spawned by session ${parentId}. ${reportLine}`
 }
@@ -587,7 +590,7 @@ server.tool(
     prompt: z.string().describe('The initial prompt to send to the new session. Include full context — the new session has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the new session. Defaults to the current working directory.'),
     allowedTools: z.array(z.string()).optional().describe('Restrict the session to specific tools (e.g. ["Read", "Write", "Edit", "Bash"])'),
-    reportBack: z.boolean().optional().default(true).describe('When true (default), the child session is instructed to report back its findings to the parent. When false, it only mentions reporting as optional.'),
+    reportBack: z.enum(['true', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): child must report back findings. "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
   },
   async ({ prompt, projectPath, allowedTools, reportBack }) => {
     try {
@@ -714,7 +717,7 @@ server.tool(
     agentName: z.string().describe('Name of the agent to spawn (from list-agents)'),
     prompt: z.string().describe('The task prompt for the agent. Include full context — the agent has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the session. Defaults to the current working directory.'),
-    reportBack: z.boolean().optional().default(true).describe('When true (default), the agent is instructed to report back its findings to the parent. When false, it only mentions reporting as optional.'),
+    reportBack: z.enum(['true', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): agent must report back findings. "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
   },
   async ({ agentName, prompt, projectPath, reportBack }) => {
     try {
