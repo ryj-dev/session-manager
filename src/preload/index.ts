@@ -139,11 +139,16 @@ const api = {
     ipcRenderer.send('skill:cleanupAll'),
 
   // Claude Code settings
-  getIdleThreshold: (): Promise<number> =>
-    ipcRenderer.invoke('claude:getIdleThreshold'),
+  getStatuslineConfig: (): Promise<{
+    managed: boolean
+    hasCustom?: boolean
+    elements: string[]
+    scriptPath?: string
+    settingsPath?: string
+  }> => ipcRenderer.invoke('claude:getStatuslineConfig'),
 
-  setIdleThreshold: (ms: number): Promise<boolean> =>
-    ipcRenderer.invoke('claude:setIdleThreshold', ms),
+  setStatuslineConfig: (elements: string[]): Promise<boolean> =>
+    ipcRenderer.invoke('claude:setStatuslineConfig', elements),
 
   // Session spawned externally (via MCP)
   onSessionSpawned: (callback: (data: { id: string; projectPath: string }) => void) => {

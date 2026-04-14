@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
-import { readFileSync, writeFileSync } from 'fs'
+import { readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
@@ -427,26 +427,185 @@ export function registerIpcHandlers(): void {
   // Claude Code settings — read/write ~/.claude/settings.json
   const claudeSettingsPath = join(app.getPath('home'), '.claude', 'settings.json')
 
-  ipcMain.handle('claude:getIdleThreshold', () => {
+  // ── Statusline configuration ──────────────────────────────────────────
+  const statuslineConfigPath = join(app.getPath('home'), '.claude', 'statusline-config.json')
+  const statuslineScriptPath = join(app.getPath('home'), '.claude', 'statusline-command.sh')
+
+  ipcMain.handle('claude:getStatuslineConfig', () => {
     try {
-      const settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf-8'))
-      return settings.messageIdleNotifThresholdMs ?? 60000
+      return JSON.parse(readFileSync(statuslineConfigPath, 'utf-8'))
     } catch {
-      return 60000
+      // No managed config — check if there's a custom statusline in settings.json
+      let hasCustom = false
+      try {
+        const settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf-8'))
+        hasCustom = !!settings.statusLine
+      } catch { /* no settings file */ }
+
+      return {
+        managed: false,
+        hasCustom,
+        elements: ['model', 'rateLimit5h', 'rateLimit7d'],
+        scriptPath: statuslineScriptPath,
+        settingsPath: claudeSettingsPath,
+      }
     }
   })
 
-  ipcMain.handle('claude:setIdleThreshold', (_event, ms: number) => {
+  ipcMain.handle('claude:setStatuslineConfig', (_event, elements: string[]) => {
     try {
+      // Save config
+      const config = { managed: true, elements }
+      writeFileSync(statuslineConfigPath, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+
+      // Generate and write bash script
+      const script = generateStatuslineScript(elements)
+      writeFileSync(statuslineScriptPath, script, 'utf-8')
+      chmodSync(statuslineScriptPath, 0o755)
+
+      // Ensure ~/.claude/settings.json points to the script
       let settings: Record<string, unknown> = {}
       try {
         settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf-8'))
       } catch { /* file doesn't exist */ }
-      settings.messageIdleNotifThresholdMs = ms
+      settings.statusLine = { type: 'command', command: `bash ${statuslineScriptPath}` }
       writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
+
       return true
     } catch {
       return false
     }
   })
+}
+
+// ── Statusline script generator ───────────────────────────────────────
+
+interface ElementDef {
+  extract: string      // bash lines to extract the value
+  format: string       // bash expression that produces the display segment
+  guard?: string       // condition to check before including (variable name)
+}
+
+const ELEMENT_DEFS: Record<string, ElementDef> = {
+  model: {
+    extract: 'MODEL=$(echo "$input" | jq -r \'.model.display_name // empty\')',
+    format: '"[$MODEL]"',
+    guard: 'MODEL',
+  },
+  rateLimit5h: {
+    extract: 'RATE_5H=$(echo "$input" | jq -r \'.rate_limits.five_hour.used_percentage // empty\')',
+    format: '"5h: $(printf \'%.0f\' "$RATE_5H")%"',
+    guard: 'RATE_5H',
+  },
+  rateLimit7d: {
+    extract: 'RATE_7D=$(echo "$input" | jq -r \'.rate_limits.seven_day.used_percentage // empty\')',
+    format: '"7d: $(printf \'%.0f\' "$RATE_7D")%"',
+    guard: 'RATE_7D',
+  },
+  resetTime5h: {
+    extract: [
+      'RESET_5H_TS=$(echo "$input" | jq -r \'.rate_limits.five_hour.resets_at // empty\')',
+      'RESET_5H=""',
+      'if [ -n "$RESET_5H_TS" ]; then',
+      '  NOW=$(date +%s)',
+      '  DIFF=$(( RESET_5H_TS - NOW ))',
+      '  if [ "$DIFF" -gt 0 ]; then',
+      '    HOURS=$(( DIFF / 3600 ))',
+      '    MINS=$(( (DIFF % 3600) / 60 ))',
+      '    if [ "$HOURS" -gt 0 ]; then',
+      '      RESET_5H="${HOURS}h ${MINS}m"',
+      '    else',
+      '      RESET_5H="${MINS}m"',
+      '    fi',
+      '  fi',
+      'fi',
+    ].join('\n'),
+    format: '"5h reset: $RESET_5H"',
+    guard: 'RESET_5H',
+  },
+  resetTime7d: {
+    extract: [
+      'RESET_7D_TS=$(echo "$input" | jq -r \'.rate_limits.seven_day.resets_at // empty\')',
+      'RESET_7D=""',
+      'if [ -n "$RESET_7D_TS" ]; then',
+      '  NOW=${NOW:-$(date +%s)}',
+      '  DIFF=$(( RESET_7D_TS - NOW ))',
+      '  if [ "$DIFF" -gt 0 ]; then',
+      '    DAYS=$(( DIFF / 86400 ))',
+      '    HOURS=$(( (DIFF % 86400) / 3600 ))',
+      '    if [ "$DAYS" -gt 0 ]; then',
+      '      RESET_7D="${DAYS}d ${HOURS}h"',
+      '    else',
+      '      RESET_7D="${HOURS}h"',
+      '    fi',
+      '  fi',
+      'fi',
+    ].join('\n'),
+    format: '"7d reset: $RESET_7D"',
+    guard: 'RESET_7D',
+  },
+  contextUsage: {
+    extract: 'CTX=$(echo "$input" | jq -r \'.context_window.used_percentage // empty\')',
+    format: '"ctx: $(printf \'%.0f\' "$CTX")%"',
+    guard: 'CTX',
+  },
+  cost: {
+    extract: 'COST=$(echo "$input" | jq -r \'.cost.total_cost_usd // empty\')',
+    format: '"\\$$COST"',
+    guard: 'COST',
+  },
+  gitBranch: {
+    extract: 'BRANCH=$(echo "$input" | jq -r \'.workspace.git_branch // empty\')',
+    format: '"⎇ $BRANCH"',
+    guard: 'BRANCH',
+  },
+  linesChanged: {
+    extract: [
+      'ADDED=$(echo "$input" | jq -r \'.cost.total_lines_added // empty\')',
+      'REMOVED=$(echo "$input" | jq -r \'.cost.total_lines_removed // empty\')',
+      'LINES=""',
+      '[ -n "$ADDED" ] && [ -n "$REMOVED" ] && LINES="+${ADDED} -${REMOVED}"',
+    ].join('\n'),
+    format: '"$LINES"',
+    guard: 'LINES',
+  },
+}
+
+function generateStatuslineScript(elements: string[]): string {
+  const extracts: string[] = []
+  const segments: string[] = []
+
+  for (const id of elements) {
+    const def = ELEMENT_DEFS[id]
+    if (!def) continue
+    extracts.push(def.extract)
+    if (def.guard) {
+      segments.push(`[ -n "$${def.guard}" ] && PARTS+=("$(echo -n ${def.format})")`)
+    } else {
+      segments.push(`PARTS+=("$(echo -n ${def.format})")`)
+    }
+  }
+
+  return [
+    '#!/bin/bash',
+    '# Auto-generated by session-manager statusline editor',
+    '# Edit via Settings > Statusline — manual changes will be overwritten',
+    'input=$(cat)',
+    '',
+    ...extracts,
+    '',
+    'PARTS=()',
+    ...segments,
+    '',
+    '# Join parts with separator',
+    'OUTPUT=""',
+    'for p in "${PARTS[@]}"; do',
+    '  [ -z "$p" ] && continue',
+    '  [ -n "$OUTPUT" ] && OUTPUT="$OUTPUT | "',
+    '  OUTPUT="$OUTPUT$p"',
+    'done',
+    '',
+    'echo "$OUTPUT"',
+    '',
+  ].join('\n')
 }

@@ -5,6 +5,7 @@ import { GraphView } from './components/GraphView'
 import { FileExplorer } from './components/FileExplorer'
 import { Settings } from './components/Settings'
 import { KeyboardShortcuts } from './components/KeyboardShortcuts'
+import { StatuslineEditor } from './components/StatuslineEditor'
 import { SidebarPicker } from './components/SidebarPicker'
 import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
@@ -82,6 +83,7 @@ export function App(): JSX.Element {
   // Settings
   const [showSettings, setShowSettings] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
+  const [showStatusline, setShowStatusline] = useState(false)
 
   // Saved sessions restore prompt
   const [savedSessions, setSavedSessions] = useState<SavedSessionInfo[]>([])
@@ -193,13 +195,16 @@ export function App(): JSX.Element {
     setShowRestorePrompt(false)
   }, [])
 
-  // Resolve the best project path for spawning
+  // Resolve the best project path for spawning.
+  // Prefer the focused session's project (what the user is looking at) over the
+  // keyboard-selected index, so spawning from inside a session uses the right project.
   const resolveProjectPath = useCallback(async (cwd?: string): Promise<string> => {
     if (cwd) return cwd
-    const fromSession = sessions[selectedIndex]?.projectPath
+    const focused = focusedSessionId ? sessions.find((s) => s.id === focusedSessionId) : null
+    const fromSession = focused?.projectPath ?? sessions[selectedIndex]?.projectPath
     if (fromSession) return fromSession
     return baseProjectsDir || (await window.api.getHomeDir())
-  }, [sessions, selectedIndex, baseProjectsDir])
+  }, [sessions, selectedIndex, focusedSessionId, baseProjectsDir])
 
   // Spawn a new claude session
   const spawnSession = useCallback(
@@ -412,6 +417,7 @@ export function App(): JSX.Element {
           spawnSession(explorerCurrentPath.current).catch((err) =>
             console.error('[hotkey] spawn in explorer dir failed:', err)
           )
+          setActivePanel(null)
         } else {
           spawnSession().catch((err) =>
             console.error('[hotkey] spawn failed:', err)
@@ -799,10 +805,13 @@ export function App(): JSX.Element {
       />
 
       {/* Settings overlay */}
-      <Settings visible={showSettings} onClose={() => setShowSettings(false)} onOpenShortcuts={() => setShowShortcuts(true)} />
+      <Settings visible={showSettings} onClose={() => setShowSettings(false)} onOpenShortcuts={() => setShowShortcuts(true)} onOpenStatusline={() => setShowStatusline(true)} />
 
       {/* Keyboard shortcuts page */}
       <KeyboardShortcuts visible={showShortcuts} onClose={() => setShowShortcuts(false)} />
+
+      {/* Statusline editor page */}
+      <StatuslineEditor visible={showStatusline} onClose={() => setShowStatusline(false)} />
 
       {/* Restore sessions prompt */}
       {showRestorePrompt && (

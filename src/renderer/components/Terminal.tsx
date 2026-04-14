@@ -16,6 +16,12 @@ const terminalInstances = new Map<
   { term: XTerm; fitAddon: FitAddon; webglAddon: WebglAddon | null; initialized: boolean; cleanup?: () => void }
 >()
 
+// Persistent sticky-scroll state per terminal. Tracks whether the user has
+// intentionally scrolled up (via wheel/touch). When false, every PTY data
+// write forces scroll-to-bottom — this is immune to xterm's _isUserScrolling
+// flag getting corrupted by fit() reflows or other stray scroll events.
+const stickyScrollState = new Map<string, { userScrolledUp: boolean }>()
+
 export function getTerminalCanvas(sessionId: string): HTMLCanvasElement | null {
   const instance = terminalInstances.get(sessionId)
   if (!instance) return null
@@ -147,6 +153,20 @@ function installScrollGuard(sessionId: string, term: XTerm, duration = 300, onDo
     }
   }
 
+  // Poll every frame — catches scrollHeight changes from xterm reflow that
+  // don't fire a scroll event (e.g. viewport starts at scrollTop=0 and stays
+  // there while scrollHeight grows).
+  let rafId: number
+  const poll = (): void => {
+    if (cancelled) return
+    const gap = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
+    if (gap > 2) {
+      snapToBottom()
+    }
+    rafId = requestAnimationFrame(poll)
+  }
+  rafId = requestAnimationFrame(poll)
+
   // Real user scroll intent — cancel the guard so we don't fight the user
   const onUserScroll = (): void => {
     cleanup()
@@ -158,6 +178,7 @@ function installScrollGuard(sessionId: string, term: XTerm, duration = 300, onDo
     viewport.removeEventListener('scroll', onScroll)
     viewport.removeEventListener('wheel', onUserScroll)
     viewport.removeEventListener('touchmove', onUserScroll)
+    cancelAnimationFrame(rafId)
     clearTimeout(timer)
     activeScrollGuards.delete(sessionId)
     onDone?.()
@@ -199,11 +220,62 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
         window.api.writeSession(sessionId, data)
       })
 
-      // Listen for PTY data on session-specific channel — no filtering needed
+      // Persistent sticky-scroll: track user scroll intent via wheel events
+      // so we know whether to auto-scroll on PTY output.
+      const scrollInfo = { userScrolledUp: false }
+      stickyScrollState.set(sessionId, scrollInfo)
+
+      // wheel-up = user wants to read scrollback, don't fight them
+      const onWheel = (e: WheelEvent): void => {
+        if (e.deltaY < 0) {
+          scrollInfo.userScrolledUp = true
+        } else if (e.deltaY > 0) {
+          // Scrolling down — check if we've reached the bottom
+          const vp = term.element?.querySelector('.xterm-viewport') as HTMLElement | null
+          if (vp) {
+            // Check after the scroll event processes
+            requestAnimationFrame(() => {
+              const gap = vp.scrollHeight - vp.clientHeight - vp.scrollTop
+              if (gap <= 5) {
+                scrollInfo.userScrolledUp = false
+              }
+            })
+          }
+        }
+      }
+      // Keyboard scrolling (shift+pageup etc.) back to bottom re-engages auto-scroll
+      const onVpScroll = (): void => {
+        const vp = term.element?.querySelector('.xterm-viewport') as HTMLElement | null
+        if (vp) {
+          const gap = vp.scrollHeight - vp.clientHeight - vp.scrollTop
+          if (gap <= 5) {
+            scrollInfo.userScrolledUp = false
+          }
+        }
+      }
+
+      // Attach after open() so term.element exists
+      const termEl = term.element
+      termEl?.addEventListener('wheel', onWheel)
+      const viewport = termEl?.querySelector('.xterm-viewport')
+      viewport?.addEventListener('scroll', onVpScroll)
+
+      // Listen for PTY data — after each write, force scroll-to-bottom unless
+      // user has scrolled up. This bypasses xterm's _isUserScrolling entirely.
       const unsubPtyData = window.api.onPtyData(sessionId, (data) => {
-        term.write(data)
+        term.write(data, () => {
+          if (!scrollInfo.userScrolledUp) {
+            term.scrollToBottom()
+          }
+        })
       })
-      instance.cleanup = unsubPtyData
+
+      instance.cleanup = () => {
+        unsubPtyData()
+        termEl?.removeEventListener('wheel', onWheel)
+        viewport?.removeEventListener('scroll', onVpScroll)
+        stickyScrollState.delete(sessionId)
+      }
 
       // Capture terminal title changes — use ref so callback is never stale
       term.onTitleChange((title) => {
@@ -273,10 +345,15 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       }
 
       if (wasInitial || wasAtBottom) {
+        // Reset sticky-scroll state — we're intentionally at the bottom
+        const scrollInfo = stickyScrollState.get(sessionId)
+        if (scrollInfo) scrollInfo.userScrolledUp = false
+
         // Install a reactive scroll guard that snaps to bottom whenever xterm's
-        // async reflow fires scroll events. This replaces fragile frame-counting —
-        // the guard reacts to the actual reflow event rather than guessing timing.
-        // Real user scrolls (wheel/touch) cancel the guard immediately.
+        // async reflow fires scroll events. The persistent sticky-scroll on PTY
+        // writes handles ongoing output, but the guard is needed for the brief
+        // window after fit() where reflow can desync the viewport before any
+        // PTY data arrives.
         installScrollGuard(sessionId, instance.term, 300, () => {
           if (wasInitial) instance.term.focus()
         })
@@ -345,5 +422,6 @@ export function disposeTerminal(sessionId: string): void {
     }
     instance.term.dispose()
     terminalInstances.delete(sessionId)
+    stickyScrollState.delete(sessionId)
   }
 }

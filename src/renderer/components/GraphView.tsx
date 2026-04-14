@@ -210,10 +210,14 @@ export function GraphView(): JSX.Element {
 
   const handleSessionClick = useCallback(
     (id: string) => {
+      // Sync selectedSessionIndex so spawning from inside the session uses the
+      // correct project (resolveProjectPath falls back to selectedIndex).
+      const idx = sessions.findIndex((s) => s.id === id)
+      if (idx !== -1) setSelectedIndex(idx)
       setFocusedSessionId(id)
       setViewMode('focused')
     },
-    [setFocusedSessionId, setViewMode]
+    [sessions, setSelectedIndex, setFocusedSessionId, setViewMode]
   )
 
   // Keyboard navigation: Left/Right within project, Up/Down between projects
