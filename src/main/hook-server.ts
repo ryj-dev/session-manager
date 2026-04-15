@@ -1,41 +1,26 @@
 import { createServer, type Server } from 'http'
 import { app, BrowserWindow } from 'electron'
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'fs'
-import { join } from 'path'
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync } from 'fs'
+import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID } from 'crypto'
-import { spawnSession, submitToSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
+import { spawnSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
 
 let server: Server | null = null
 let serverPort = 0
 
-// ── Message queue for inter-session messaging ──────────────────────────────
-// Messages are queued when the target session is busy, and flushed when it becomes idle.
-interface QueuedMessage {
-  fromSessionId: string | null
-  text: string
-  timestamp: number
-}
-
-const messageQueues = new Map<string, QueuedMessage[]>()
-// Track which sessions are idle (at the prompt)
+// Track which sessions are idle (at the prompt) — used for GUI status indicators
 const sessionStatus = new Map<string, 'working' | 'idle'>()
-// Fallback timers for message flushing — cancelled when idle_prompt or PTY prompt detection arrives first
-const stopFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>()
-// Sessions waiting for PTY prompt detection after Stop fires
-const awaitingPromptReady = new Set<string>()
 
 /** Clean up all hook-server state for a session (call on PTY exit/kill). */
 export function cleanupSession(appSessionId: string): void {
   sessionStatus.delete(appSessionId)
-  messageQueues.delete(appSessionId)
-  awaitingPromptReady.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
-  const timer = stopFallbackTimers.get(appSessionId)
-  if (timer) { clearTimeout(timer); stopFallbackTimers.delete(appSessionId) }
+  // Clean up the session's inbox directory
+  rmSync(join(app.getPath('userData'), 'messages', appSessionId), { recursive: true, force: true })
 }
 
 // Callback for attaching PTY listeners — set by ipc.ts to avoid circular deps
@@ -65,25 +50,12 @@ export function getHookServerPort(): number {
 
 
 /** Called from IPC when PTY outputs data.
- *  Detects permission rejection and input prompt readiness via terminal output. */
+ *  Detects permission rejection via terminal output. */
 export function onPtyData(appSessionId: string, data: string): void {
-  // Strip ANSI escape codes for matching
-  const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-
-  // Detect input prompt readiness — the "? for shortcuts" status bar text
-  // appears in the TUI only when Claude is idle and the input prompt is rendered.
-  if (awaitingPromptReady.has(appSessionId) && clean.includes('forshortcuts')) {
-    awaitingPromptReady.delete(appSessionId)
-    // Cancel the fallback timer
-    const fallback = stopFallbackTimers.get(appSessionId)
-    if (fallback) { clearTimeout(fallback); stopFallbackTimers.delete(appSessionId) }
-    // Flush immediately — the prompt is ready
-    console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] PTY prompt detected for ${appSessionId}`)
-    flushMessages(appSessionId)
-  }
-
   // Permission rejection detection
   if (!awaitingPermission.has(appSessionId)) return
+
+  const clean = data.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
   if (!clean.includes('What should Claude do instead')) return
 
   awaitingPermission.delete(appSessionId)
@@ -188,6 +160,8 @@ export function startHookServer(): Promise<number> {
 export function stopHookServer(): void {
   removeHooks()
   removePortFile()
+  // Wipe all inbox files on shutdown
+  rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true })
   server?.close()
   server = null
 }
@@ -283,28 +257,22 @@ function handleSendMessage(body: string, res: import('http').ServerResponse): vo
       return
     }
 
+    // Append message to the session's inbox file — the monitor (tail -f) picks it up
     const fromLabel = fromSessionId ? `Message from session ${fromSessionId}` : 'Message from another session'
-    const formatted = `${fromLabel}:\n${message}`
+    const line = `${fromLabel}: ${message.replace(/\n/g, '\\n')}\n`
+    const inboxPath = join(app.getPath('userData'), 'messages', targetSessionId, 'inbox.txt')
+    mkdirSync(dirname(inboxPath), { recursive: true })
+    appendFileSync(inboxPath, line)
 
-    const status = sessionStatus.get(targetSessionId)
-    if (status === 'idle') {
-      // Session is at the prompt — deliver immediately
-      submitToSession(targetSessionId, formatted)
-      console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] delivered message to ${targetSessionId}`)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ delivered: true }))
-    } else {
-      // Session is busy — queue for later
-      if (!messageQueues.has(targetSessionId)) messageQueues.set(targetSessionId, [])
-      messageQueues.get(targetSessionId)!.push({
-        fromSessionId: fromSessionId ?? null,
-        text: formatted,
-        timestamp: Date.now(),
-      })
-      console.log(`[hook-server] queued message for ${targetSessionId} (status: ${status})`)
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ delivered: false, queued: true }))
+    // Notify renderer for popup UI
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('session:message-received', { targetSessionId, fromSessionId: fromSessionId ?? null, message })
     }
+
+    console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] delivered message to ${targetSessionId}`)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ delivered: true }))
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
@@ -419,20 +387,6 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
   }
 }
 
-/** Flush any queued messages to a session that just became idle.
- *  Claude Code's TUI treats \n as newlines within the input buffer and
- *  only \r triggers submission, so no bracketed paste is needed. */
-function flushMessages(appSessionId: string): void {
-  const queue = messageQueues.get(appSessionId)
-  if (!queue || queue.length === 0) return
-
-  const combined = queue.map((m) => m.text).join('\n\n---\n\n')
-  messageQueues.delete(appSessionId)
-
-  submitToSession(appSessionId, combined)
-  console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] flushed ${queue.length} queued message(s) to ${appSessionId}`)
-}
-
 function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   const win = BrowserWindow.getAllWindows()[0]
   if (!win || win.isDestroyed()) return
@@ -451,34 +405,11 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
         sessionStatus.set(appSessionId, 'idle')
         win.webContents.send('claude:status', { id: appSessionId, status: 'permission' })
         break
-      case 'idle_prompt':
-        awaitingPermission.delete(appSessionId)
-        awaitingPromptReady.delete(appSessionId)
-        sessionStatus.set(appSessionId, 'idle')
-        win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
-        // Cancel fallback timer — idle_prompt is the definitive signal
-        const fallback = stopFallbackTimers.get(appSessionId)
-        if (fallback) { clearTimeout(fallback); stopFallbackTimers.delete(appSessionId) }
-        // Flush queued messages now that the input prompt is ready
-        flushMessages(appSessionId)
-        break
     }
   } else if (event === 'Stop') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'idle')
     win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
-    // Enable PTY prompt detection — watches for the status bar text that
-    // indicates the TUI input prompt is rendered and ready for input.
-    // Falls back to a timer if the PTY signal isn't detected.
-    if (messageQueues.has(appSessionId)) {
-      awaitingPromptReady.add(appSessionId)
-      const timer = setTimeout(() => {
-        awaitingPromptReady.delete(appSessionId)
-        stopFallbackTimers.delete(appSessionId)
-        flushMessages(appSessionId)
-      }, 2000)
-      stopFallbackTimers.set(appSessionId, timer)
-    }
   } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'UserPromptSubmit') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'working')
@@ -529,11 +460,10 @@ function installHooks(port: number): void {
     if ((hooks[eventName] as unknown[]).length === 0) delete hooks[eventName]
   }
 
-  // Notification — separate matchers for each notification type
+  // Notification — permission prompt detection
   hooks.Notification = [
     ...((hooks.Notification ?? []) as Array<Record<string, unknown>>),
     { matcher: 'permission_prompt', hooks: [hookEntry] },
-    { matcher: 'idle_prompt', hooks: [hookEntry] },
   ]
 
   // Stop — Claude finished responding

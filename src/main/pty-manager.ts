@@ -2,6 +2,9 @@ import * as pty from 'node-pty'
 import { execSync } from 'child_process'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
+import { join, dirname } from 'path'
+import { mkdirSync, writeFileSync } from 'fs'
+import { app } from 'electron'
 
 /** Regex to strip Claude Code's activity indicators (spinners, braille dots, etc.) from terminal titles. */
 export const TITLE_INDICATOR_RE = /[✳*\u2800-\u28FF]\s*/g
@@ -64,12 +67,17 @@ export function spawnSession(
   // Expand ~ to home directory (pty.spawn doesn't do shell expansion)
   const resolvedCwd = cwd.startsWith('~') ? cwd.replace('~', homedir()) : cwd
 
+  // Create inbox file for the monitor-based message bus
+  const inboxPath = join(app.getPath('userData'), 'messages', id, 'inbox.txt')
+  mkdirSync(dirname(inboxPath), { recursive: true })
+  writeFileSync(inboxPath, '', { flag: 'a' }) // create if missing, don't truncate
+
   const ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
     cols: 120,
     rows: 30,
     cwd: resolvedCwd,
-    env: { ...process.env, PATH: shellPath, APP_SESSION_ID: id }
+    env: { ...process.env, PATH: shellPath, APP_SESSION_ID: id, SESSION_MANAGER_INBOX: inboxPath }
   })
 
   const session: PtySession = {
@@ -85,8 +93,7 @@ export function spawnSession(
   return session
 }
 
-/** Raw write to a session's PTY — used for terminal keystrokes.
- *  Does NOT submit. For prompt/message delivery, use submitToSession. */
+/** Raw write to a session's PTY — used for terminal keystrokes. */
 export function writeToSession(id: string, data: string): void {
   const session = sessions.get(id)
   if (session) {
@@ -98,15 +105,6 @@ export function writeToSession(id: string, data: string): void {
     }
     session.process.write(data)
   }
-}
-
-/** Write content to a session then send \r once PTY output settles.
- *  Large writes trigger auto-bracketed paste in the PTY, which swallows
- *  an inline \r. Waiting for output to settle ensures the paste is done. */
-export function submitToSession(id: string, content: string): void {
-  writeToSession(id, content)
-  const session = sessions.get(id)
-  if (session) submitAfterEcho(session, id, content)
 }
 
 export function resizeSession(id: string, cols: number, rows: number): void {
@@ -198,40 +196,6 @@ export function writeWhenReady(id: string, data: string): void {
   } else {
     pendingWrites.set(id, (pendingWrites.get(id) || '') + data)
   }
-}
-
-/** Send \r once the written content appears in PTY output (echoed by the TUI).
- *  Used for inter-session messages to already-running sessions.
- *  Watches for a fingerprint of the content in PTY output to confirm the app
- *  has consumed the paste, then submits. Content-scaled timer as fallback. */
-function submitAfterEcho(session: PtySession, id: string, content: string): void {
-  const SETTLE_MS = 50 // brief pause after echo detected before sending \r
-  // Fallback: content-scaled timer for when fingerprint doesn't match
-  const FALLBACK_MS = Math.max(150, Math.min(Math.ceil(content.length / 5), 2000))
-
-  const fingerprint = content.replace(/\s+/g, '').slice(-20)
-  let outputBuf = ''
-  let done = false
-
-  const submit = (): void => {
-    if (done) return
-    done = true
-    dispose.dispose()
-    clearTimeout(fallback)
-    if (sessions.has(id)) session.process.write('\r')
-  }
-
-  const dispose = session.process.onData((data) => {
-    if (done) return
-    outputBuf += data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b[=>][^\x1b]*/g, '').replace(/\x1b\][^\x07]*\x07/g, '')
-    if (fingerprint && outputBuf.replace(/\s+/g, '').includes(fingerprint)) {
-      dispose.dispose()
-      clearTimeout(fallback)
-      setTimeout(submit, SETTLE_MS)
-    }
-  })
-
-  const fallback = setTimeout(submit, FALLBACK_MS)
 }
 
 export function updateClaudeSessionId(id: string, claudeSessionId: string): void {

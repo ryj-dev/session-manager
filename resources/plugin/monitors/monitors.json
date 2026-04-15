@@ -1,0 +1,8 @@
+[
+  {
+    "name": "message-bus",
+    "command": "tail -f \"${SESSION_MANAGER_INBOX}\"",
+    "description": "Incoming messages from other Claude Code sessions",
+    "when": "always"
+  }
+]

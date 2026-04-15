@@ -650,7 +650,7 @@ server.tool(
 
 server.tool(
   'send-message',
-  'Send a message to another Claude Code session. If the target session is idle, the message is delivered immediately as a new prompt. If busy, it is queued and delivered when the session finishes its current task.',
+  'Send a message to another Claude Code session. The message is delivered instantly via the monitor plugin — it arrives as a task notification regardless of whether the target session is idle or working.',
   {
     targetSessionId: z.string().describe('The session ID to send the message to (from list-sessions or spawn-session)'),
     message: z.string().describe('The message content to send'),
@@ -659,17 +659,13 @@ server.tool(
     try {
       const fromId = process.env.APP_SESSION_ID || null
 
-      const result = await callHookServer('/message', {
+      await callHookServer('/message', {
         targetSessionId,
         message,
         fromSessionId: fromId,
-      }) as { delivered: boolean; queued?: boolean }
+      })
 
-      if (result.delivered) {
-        return { content: [{ type: 'text', text: `Message delivered to session ${targetSessionId}` }] }
-      } else {
-        return { content: [{ type: 'text', text: `Message queued for session ${targetSessionId} (currently busy). It will be delivered when the session becomes idle.` }] }
-      }
+      return { content: [{ type: 'text', text: `Message delivered to session ${targetSessionId}` }] }
     } catch (err) {
       return {
         content: [{ type: 'text', text: `Error sending message: ${err instanceof Error ? err.message : String(err)}` }],

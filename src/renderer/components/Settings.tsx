@@ -18,6 +18,10 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }
   const setPersistExplorerPath = useStore((s) => s.setPersistExplorerPath)
   const explorerFollowsProject = useStore((s) => s.explorerFollowsProject)
   const setExplorerFollowsProject = useStore((s) => s.setExplorerFollowsProject)
+  const messagePopup = useStore((s) => s.messagePopup)
+  const setMessagePopup = useStore((s) => s.setMessagePopup)
+  const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
+  const setMessagePopupSeconds = useStore((s) => s.setMessagePopupSeconds)
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
 
   useEffect(() => {
@@ -125,6 +129,41 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }
                 When opening explorer from a terminal, start at that project's directory
               </p>
             </div>
+
+            {/* Message popup behavior */}
+            <div className="mb-4">
+              <label className="text-xs text-zinc-400 block mb-1.5">
+                Message popup behavior
+              </label>
+              <select
+                value={messagePopup}
+                onChange={(e) => setMessagePopup(e.target.value as 'manual' | 'timed' | 'disabled')}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 appearance-none cursor-pointer"
+              >
+                <option value="manual">Manual dismiss</option>
+                <option value="timed">Auto-dismiss after timeout</option>
+                <option value="disabled">Disabled (no popup)</option>
+              </select>
+              <p className="text-[10px] text-zinc-600 mt-1">
+                How inter-session message popups behave (messages always reach Claude via monitor)
+              </p>
+            </div>
+
+            {messagePopup === 'timed' && (
+              <div className="mb-6">
+                <label className="text-xs text-zinc-400 block mb-1.5">
+                  Auto-dismiss after (seconds)
+                </label>
+                <input
+                  type="number"
+                  min={3}
+                  max={120}
+                  value={messagePopupSeconds}
+                  onChange={(e) => setMessagePopupSeconds(Math.max(3, Math.min(120, parseInt(e.target.value) || 15)))}
+                  className="w-20 px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                />
+              </div>
+            )}
 
             {/* Editor buttons */}
             <div className="border-t border-zinc-800 pt-4 space-y-2">

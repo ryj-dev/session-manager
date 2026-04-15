@@ -11,6 +11,7 @@ import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
 import { SkillsGallery } from './components/SkillsGallery'
 import MemoryPanel from './components/memory/MemoryPanel'
+import { MessagePopup } from './components/MessagePopup'
 import { getTerminalCanvas, disposeTerminal, focusTerminal } from './components/Terminal'
 import { Terminal } from './components/Terminal'
 import { useDesigns } from './hooks/useDesigns'
@@ -61,6 +62,11 @@ export function App(): JSX.Element {
   const setExplorerFollowsProject = useStore((s) => s.setExplorerFollowsProject)
   const hotkeys = useStore((s) => s.hotkeys)
   const setHotkeys = useStore((s) => s.setHotkeys)
+  const messagePopup = useStore((s) => s.messagePopup)
+  const setMessagePopup = useStore((s) => s.setMessagePopup)
+  const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
+  const setMessagePopupSeconds = useStore((s) => s.setMessagePopupSeconds)
+  const addMessageNotification = useStore((s) => s.addMessageNotification)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)
   const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
 
@@ -92,12 +98,14 @@ export function App(): JSX.Element {
   // Load persisted settings on startup
   const settingsLoadedRef = useRef(false)
   useEffect(() => {
-    window.api.loadSettings().then((settings) => {
-      if (settings.baseProjectsDir) setBaseProjectsDir(settings.baseProjectsDir)
-      setAutoFocusOnSpawn(settings.autoFocusOnSpawn)
-      setPersistExplorerPath(settings.persistExplorerPath)
-      setExplorerFollowsProject(settings.explorerFollowsProject)
+    window.api.loadSettings().then((settings: Record<string, unknown>) => {
+      if (settings.baseProjectsDir) setBaseProjectsDir(settings.baseProjectsDir as string)
+      setAutoFocusOnSpawn(settings.autoFocusOnSpawn as boolean)
+      setPersistExplorerPath(settings.persistExplorerPath as boolean)
+      setExplorerFollowsProject(settings.explorerFollowsProject as boolean)
       if (settings.hotkeys) setHotkeys({ ...defaultHotkeys, ...settings.hotkeys } as HotkeyMap)
+      if (settings.messagePopup) setMessagePopup(settings.messagePopup as 'manual' | 'timed' | 'disabled')
+      if (settings.messagePopupSeconds != null) setMessagePopupSeconds(settings.messagePopupSeconds as number)
       settingsLoadedRef.current = true
     })
   }, [])
@@ -105,8 +113,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string> })
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds])
 
   // On startup: reconnect to active PTY sessions (renderer crash recovery),
   // then check for saved sessions from a previous clean quit.
@@ -569,6 +577,14 @@ export function App(): JSX.Element {
     return unsubscribe
   }, [addSession])
 
+  // Listen for inter-session messages
+  useEffect(() => {
+    const unsubscribe = window.api.onMessageReceived((data) => {
+      addMessageNotification(data)
+    })
+    return unsubscribe
+  }, [addMessageNotification])
+
   // Listen for Claude status changes from hooks
   useEffect(() => {
     const unsubscribe = window.api.onClaudeStatus(({ id, status }) => {
@@ -711,13 +727,14 @@ export function App(): JSX.Element {
               </button>
             </div>
           </div>
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 relative">
             <Terminal
               key={`focused-${focusedSessionId}`}
               sessionId={focusedSessionId!}
               visible={true}
               onTitleChange={(title) => handleTitleChange(focusedSessionId!, title)}
             />
+            <MessagePopup focusedSessionId={focusedSessionId} />
           </div>
         </div>
       )}

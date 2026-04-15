@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell, protocol, net, Menu } from 'electron'
 import { join, resolve, relative, isAbsolute } from 'path'
+import { rmSync } from 'fs'
 import { pathToFileURL } from 'url'
 import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions } from './pty-manager'
@@ -8,6 +9,7 @@ import { startHookServer, stopHookServer } from './hook-server'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
 import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
+import { installPlugin, uninstallPlugin } from './plugin-manager'
 
 // Register design:// as a privileged scheme (must be done before app ready)
 protocol.registerSchemesAsPrivileged([
@@ -46,6 +48,7 @@ function saveAndCleanup(): void {
   stopHookServer()
   stopMemoryWatcher()
   unregisterMcpServer()
+  uninstallPlugin()
 }
 
 function createWindow(): void {
@@ -151,7 +154,11 @@ app.whenReady().then(async () => {
   ]))
 
   cleanupAllSkillCommands() // Remove stale skill commands from previous sessions
+  // Wipe stale inbox files from previous sessions/crashes
+  rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true })
   await startHookServer()
+  uninstallPlugin() // Clean stale registration from prior crash before re-installing
+  installPlugin()
   startMemoryWatcher()
   registerMcpServer(getMcpServerScriptPath(), join(app.getPath('userData'), 'memories'))
   registerIpcHandlers()

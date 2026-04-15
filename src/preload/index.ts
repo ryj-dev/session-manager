@@ -94,10 +94,10 @@ const api = {
     ipcRenderer.invoke('sessions:clearSaved'),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string> }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string> }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // File system operations
@@ -172,6 +172,13 @@ const api = {
     const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string }) => callback(data)
     ipcRenderer.on('session:spawned', handler)
     return (): void => { ipcRenderer.removeListener('session:spawned', handler) }
+  },
+
+  // Inter-session message received
+  onMessageReceived: (callback: (data: { targetSessionId: string; fromSessionId: string | null; message: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { targetSessionId: string; fromSessionId: string | null; message: string }) => callback(data)
+    ipcRenderer.on('session:message-received', handler)
+    return (): void => { ipcRenderer.removeListener('session:message-received', handler) }
   },
 
   // Memory operations

@@ -1,0 +1,5 @@
+{
+  "name": "session-manager",
+  "version": "1.0.0",
+  "description": "Background monitors for session-manager inter-session messaging"
+}

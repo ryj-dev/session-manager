@@ -27,12 +27,16 @@ export const defaultHotkeys: HotkeyMap = {
   toggleMemory: 'm'
 }
 
+export type MessagePopupMode = 'manual' | 'timed' | 'disabled'
+
 export interface AppSettings {
   baseProjectsDir: string | null
   autoFocusOnSpawn: boolean
   persistExplorerPath: boolean
   explorerFollowsProject: boolean
   hotkeys: HotkeyMap
+  messagePopup: MessagePopupMode
+  messagePopupSeconds: number
 }
 
 const defaults: AppSettings = {
@@ -40,7 +44,9 @@ const defaults: AppSettings = {
   autoFocusOnSpawn: true,
   persistExplorerPath: true,
   explorerFollowsProject: true,
-  hotkeys: { ...defaultHotkeys }
+  hotkeys: { ...defaultHotkeys },
+  messagePopup: 'manual',
+  messagePopupSeconds: 15
 }
 
 function getSettingsPath(): string {
