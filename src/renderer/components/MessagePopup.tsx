@@ -20,10 +20,16 @@ function MessageBubble({
   const updateMessageTimer = useStore((s) => s.updateMessageTimer)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const startedRef = useRef<number | null>(null)
+  // elapsedRef tracks elapsed time within this mount cycle only
   const elapsedRef = useRef(0)
-  const totalMsRef = useRef(msg.timerRemainingMs ?? seconds * 1000)
-  // Track progress for the bar (0 = full, 1 = empty)
-  const [progress, setProgress] = useState(0)
+  // priorElapsed is time consumed in previous mounts (from store)
+  const priorElapsedRef = useRef(msg.timerRemainingMs != null ? (seconds * 1000) - msg.timerRemainingMs : 0)
+  // remainingMs is how much time this mount has left to count down
+  const remainingMsRef = useRef(msg.timerRemainingMs ?? seconds * 1000)
+  // Full duration for progress bar denominator — always the configured total
+  const fullDuration = seconds * 1000
+
+  const [progress, setProgress] = useState(() => priorElapsedRef.current / fullDuration)
   const rafRef = useRef<number | null>(null)
   const [paused, setPaused] = useState(false)
 
@@ -35,20 +41,20 @@ function MessageBubble({
   }, [])
 
   const startTimer = useCallback(() => {
-    const remaining = totalMsRef.current - elapsedRef.current
+    const remaining = remainingMsRef.current - elapsedRef.current
     if (remaining <= 0) { dismissMessage(msg.id); return }
     startedRef.current = Date.now()
     timerRef.current = setTimeout(() => dismissMessage(msg.id), remaining)
 
-    // Animate progress bar
+    // Animate progress bar — always relative to full configured duration
     const tick = (): void => {
       if (!startedRef.current) return
-      const currentElapsed = elapsedRef.current + (Date.now() - startedRef.current)
-      setProgress(Math.min(1, currentElapsed / totalMsRef.current))
+      const totalElapsed = priorElapsedRef.current + elapsedRef.current + (Date.now() - startedRef.current)
+      setProgress(Math.min(1, totalElapsed / fullDuration))
       rafRef.current = requestAnimationFrame(tick)
     }
     rafRef.current = requestAnimationFrame(tick)
-  }, [msg.id, dismissMessage])
+  }, [msg.id, dismissMessage, fullDuration])
 
   const pauseTimer = useCallback(() => {
     clearTimer()
@@ -56,17 +62,19 @@ function MessageBubble({
       elapsedRef.current += Date.now() - startedRef.current
       startedRef.current = null
     }
-    setProgress(Math.min(1, elapsedRef.current / totalMsRef.current))
-  }, [clearTimer])
+    const totalElapsed = priorElapsedRef.current + elapsedRef.current
+    setProgress(Math.min(1, totalElapsed / fullDuration))
+  }, [clearTimer, fullDuration])
 
   // Initialize and manage the timer lifecycle
   useEffect(() => {
     if (!isTimed) return
 
-    totalMsRef.current = msg.timerRemainingMs ?? seconds * 1000
+    priorElapsedRef.current = msg.timerRemainingMs != null ? fullDuration - msg.timerRemainingMs : 0
+    remainingMsRef.current = msg.timerRemainingMs ?? fullDuration
     elapsedRef.current = 0
 
-    if (totalMsRef.current <= 0) {
+    if (remainingMsRef.current <= 0) {
       dismissMessage(msg.id)
       return
     }
@@ -81,7 +89,7 @@ function MessageBubble({
     return () => {
       clearTimer()
       if (startedRef.current) elapsedRef.current += Date.now() - startedRef.current
-      updateMessageTimer(msg.id, Math.max(0, totalMsRef.current - elapsedRef.current))
+      updateMessageTimer(msg.id, Math.max(0, remainingMsRef.current - elapsedRef.current))
       document.removeEventListener('visibilitychange', handleVisibility)
     }
   }, [isTimed, seconds, msg.id, dismissMessage, updateMessageTimer, clearTimer, pauseTimer])
