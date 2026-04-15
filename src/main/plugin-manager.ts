@@ -1,22 +1,14 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { homedir } from 'os'
-import { mkdirSync, cpSync, rmSync, readFileSync, existsSync } from 'fs'
-import { atomicWriteSync } from './atomic-write'
+import { mkdirSync, cpSync, existsSync } from 'fs'
+import { execSync } from 'child_process'
 
-const PLUGIN_NAME = 'session-manager@local'
-const PLUGIN_VERSION = '1.0.0'
+const MARKETPLACE_NAME = 'session-manager-local'
+const PLUGIN_NAME = 'session-manager'
+const PLUGIN_FULL = `${PLUGIN_NAME}@${MARKETPLACE_NAME}`
 
 function getPluginInstallPath(): string {
   return join(app.getPath('userData'), 'plugin')
-}
-
-function getInstalledPluginsPath(): string {
-  return join(homedir(), '.claude', 'plugins', 'installed_plugins.json')
-}
-
-function getSettingsPath(): string {
-  return join(homedir(), '.claude', 'settings.json')
 }
 
 function getPluginSourcePath(): string {
@@ -25,73 +17,61 @@ function getPluginSourcePath(): string {
     : join(app.getAppPath(), 'resources', 'plugin')
 }
 
+function claudeCli(args: string): string | null {
+  try {
+    return execSync(`claude ${args}`, {
+      timeout: 15000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[plugin-manager] claude ${args} failed:`, msg)
+    return null
+  }
+}
+
+function isMarketplaceAdded(): boolean {
+  const output = claudeCli('plugin marketplace list')
+  return output != null && output.includes(MARKETPLACE_NAME)
+}
+
+function isPluginInstalled(): boolean {
+  const output = claudeCli('plugin list')
+  return output != null && output.includes(PLUGIN_FULL)
+}
+
 export function installPlugin(): void {
   const installPath = getPluginInstallPath()
   const sourcePath = getPluginSourcePath()
 
-  // Copy plugin files to app data
+  // Copy marketplace + plugin files to app data
   mkdirSync(installPath, { recursive: true })
   cpSync(sourcePath, installPath, { recursive: true })
 
-  // Register in installed_plugins.json
-  const pluginsPath = getInstalledPluginsPath()
-  let pluginsFile: { version: number; plugins: Record<string, unknown[]> } = { version: 2, plugins: {} }
-  try {
-    pluginsFile = JSON.parse(readFileSync(pluginsPath, 'utf-8'))
-  } catch { /* file doesn't exist yet */ }
+  // Register marketplace if not already added
+  if (!isMarketplaceAdded()) {
+    claudeCli(`plugin marketplace add "${installPath}"`)
+    console.log('[plugin-manager] registered marketplace:', MARKETPLACE_NAME)
+  }
 
-  const now = new Date().toISOString()
-  pluginsFile.plugins[PLUGIN_NAME] = [{
-    scope: 'user',
-    installPath,
-    version: PLUGIN_VERSION,
-    installedAt: now,
-    lastUpdated: now,
-  }]
-
-  mkdirSync(join(homedir(), '.claude', 'plugins'), { recursive: true })
-  atomicWriteSync(pluginsPath, JSON.stringify(pluginsFile, null, 2) + '\n')
-
-  // Enable in settings.json
-  const settingsPath = getSettingsPath()
-  let settings: Record<string, unknown> = {}
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-  } catch { /* file doesn't exist */ }
-
-  const enabled = (settings.enabledPlugins ?? {}) as Record<string, boolean>
-  enabled[PLUGIN_NAME] = true
-  settings.enabledPlugins = enabled
-  atomicWriteSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-
-  console.log('[plugin-manager] installed plugin at', installPath)
+  // Install plugin if not already installed
+  if (!isPluginInstalled()) {
+    claudeCli(`plugin install ${PLUGIN_FULL}`)
+    console.log('[plugin-manager] installed plugin:', PLUGIN_FULL)
+  } else {
+    console.log('[plugin-manager] plugin already installed:', PLUGIN_FULL)
+  }
 }
 
 export function uninstallPlugin(): void {
-  // Remove from installed_plugins.json
-  const pluginsPath = getInstalledPluginsPath()
-  try {
-    if (existsSync(pluginsPath)) {
-      const pluginsFile = JSON.parse(readFileSync(pluginsPath, 'utf-8'))
-      delete pluginsFile.plugins?.[PLUGIN_NAME]
-      atomicWriteSync(pluginsPath, JSON.stringify(pluginsFile, null, 2) + '\n')
-    }
-  } catch { /* non-critical */ }
+  if (isPluginInstalled()) {
+    claudeCli(`plugin uninstall ${PLUGIN_FULL}`)
+    console.log('[plugin-manager] uninstalled plugin:', PLUGIN_FULL)
+  }
 
-  // Remove from settings.json enabledPlugins
-  const settingsPath = getSettingsPath()
-  try {
-    if (existsSync(settingsPath)) {
-      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
-      if (settings.enabledPlugins) {
-        delete settings.enabledPlugins[PLUGIN_NAME]
-        if (Object.keys(settings.enabledPlugins).length === 0) {
-          delete settings.enabledPlugins
-        }
-        atomicWriteSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
-      }
-    }
-  } catch { /* non-critical */ }
-
-  console.log('[plugin-manager] uninstalled plugin')
+  if (isMarketplaceAdded()) {
+    claudeCli(`plugin marketplace remove ${MARKETPLACE_NAME}`)
+    console.log('[plugin-manager] removed marketplace:', MARKETPLACE_NAME)
+  }
 }

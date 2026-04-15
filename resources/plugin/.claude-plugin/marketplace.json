@@ -1,0 +1,15 @@
+{
+  "name": "session-manager-local",
+  "description": "Session manager background monitors for inter-session messaging",
+  "owner": {
+    "name": "Session Manager"
+  },
+  "plugins": [
+    {
+      "name": "session-manager",
+      "description": "Background monitors for session-manager inter-session messaging",
+      "category": "productivity",
+      "source": "./plugins/session-manager"
+    }
+  ]
+}
