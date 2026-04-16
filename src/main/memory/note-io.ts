@@ -43,8 +43,10 @@ export function createNoteIO(memoriesDir: string): NoteIO {
   }
 
   function deleteNote(filename: string): void {
-    const fullPath = path.join(memoriesDir, filename)
-    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath)
+    try {
+      const fullPath = path.join(memoriesDir, filename)
+      if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath)
+    } catch { /* may fail on Windows if file is locked */ }
   }
 
   function listNotes(): string[] {

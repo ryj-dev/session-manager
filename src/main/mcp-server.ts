@@ -31,10 +31,10 @@ import { createNoteIO, type NoteIO } from './memory/note-io'
 // ─── Storage ───────────────────────────────────────────────────────────────
 
 const MEMORIES_DIR = process.env.SM_MEMORIES_DIR || path.join(
-  process.env.HOME || process.env.USERPROFILE || '.',
-  process.platform === 'darwin'
-    ? 'Library/Application Support/session-manager/memories'
-    : '.config/session-manager/memories'
+  process.platform === 'win32'
+    ? path.join(process.env.APPDATA || path.join(process.env.USERPROFILE || '.', 'AppData', 'Roaming'), 'session-manager')
+    : path.join(process.env.HOME || '.', process.platform === 'darwin' ? 'Library/Application Support/session-manager' : '.config/session-manager'),
+  'memories'
 )
 
 const io: NoteIO = createNoteIO(MEMORIES_DIR)

@@ -101,7 +101,8 @@ export interface AppState {
 }
 
 function normalizePath(p: string): string {
-  return p.replace(/\//g, '\\')
+  // Normalize to forward slashes on all platforms (JS/Node handles them fine on Windows)
+  return p.replace(/\\/g, '/')
 }
 
 function projectNameFromPath(projectPath: string): string {

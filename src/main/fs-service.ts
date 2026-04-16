@@ -3,7 +3,7 @@ import { join, resolve } from 'path'
 import { homedir, tmpdir } from 'os'
 
 export function expandPath(p: string): string {
-  if (p.startsWith('~/') || p === '~') {
+  if (p.startsWith('~/') || p.startsWith('~\\') || p === '~') {
     return join(homedir(), p.slice(1))
   }
   return p
