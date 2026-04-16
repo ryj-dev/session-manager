@@ -169,7 +169,7 @@ app.whenReady().then(async () => {
   uninstallPlugin() // Clean stale registration from prior crash before re-installing
   installPlugin()
   startMemoryWatcher()
-  registerMcpServer(getMcpServerScriptPath(), join(app.getPath('userData'), 'memories'))
+  registerMcpServer(getMcpServerScriptPath(), join(app.getPath('userData'), 'memories'), app.getPath('userData'))
   registerIpcHandlers()
   createWindow()
 

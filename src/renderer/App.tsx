@@ -185,10 +185,14 @@ export function App(): JSX.Element {
   const handleTitleChange = useCallback(
     (id: string, title: string) => {
       const titleClean = title.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim()
-      if (titleClean === 'Claude Code') {
+      // Default titles: "Claude Code" on macOS, "claude" on Windows
+      const isDefault = titleClean === '' || ['claude code', 'claude'].includes(titleClean.toLowerCase())
+      if (isDefault) {
+        // Don't overwrite a real title with a default one
         const current = useStore.getState().sessions.find((s) => s.id === id)?.terminalTitle
         const currentClean = current?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
-        if (currentClean !== '' && currentClean !== 'Claude Code') return
+        const currentIsDefault = currentClean === '' || ['claude code', 'claude'].includes(currentClean.toLowerCase())
+        if (!currentIsDefault) return
       }
       updateSessionTitle(id, title)
       window.api.updateSessionTitle(id, title)
@@ -863,7 +867,13 @@ export function App(): JSX.Element {
                   className="flex items-center gap-2 py-1.5 text-xs"
                 >
                   <span className="text-zinc-400 truncate">
-                    {s.terminalTitle || s.projectPath.split('/').pop()}
+                    {(() => {
+                      const titleClean = s.terminalTitle?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
+                      const isDefault = titleClean === '' || ['claude code', 'claude'].includes(titleClean.toLowerCase())
+                      return isDefault
+                        ? s.projectPath.split(/[\\/]/).filter(Boolean).pop()
+                        : s.terminalTitle
+                    })()}
                   </span>
                   <span className="text-zinc-600 ml-auto">
                     {new Date(s.savedAt).toLocaleTimeString()}

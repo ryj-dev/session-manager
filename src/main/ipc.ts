@@ -12,7 +12,8 @@ import {
   getAllSessions,
   getActiveSessions,
   updateSessionTitle,
-  TITLE_INDICATOR_RE
+  TITLE_INDICATOR_RE,
+  isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
 import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession } from './hook-server'
@@ -64,21 +65,10 @@ function attachSessionListeners(
     hookOnPtyData(id, data)
   })
 
-  // Capture early PTY output for debugging quick exits
-  let earlyOutput = ''
-  const earlyCapture = session.process.onData((chunk) => {
-    if (earlyOutput.length < 2000) earlyOutput += chunk
-  })
-  setTimeout(() => earlyCapture.dispose(), 5000)
-
   session.process.onExit(({ exitCode }) => {
     attachedSessions.delete(id)
-    const clean = earlyOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-    if (exitCode !== 0) {
-      console.log(`[pty] session ${id} exited with code ${exitCode}:`, clean.slice(0, 300))
-    }
     setTimeout(() => {
-      sendToRenderer('pty:exit', { id, exitCode, error: exitCode !== 0 ? clean.slice(0, 300) : undefined })
+      sendToRenderer('pty:exit', { id, exitCode })
     }, 200)
   })
 }
@@ -206,7 +196,7 @@ export function registerIpcHandlers(): void {
     if (!session) return null
     // A session is resumable if it has a real title (not null/empty/"Claude Code")
     const titleClean = session.terminalTitle?.replace(TITLE_INDICATOR_RE, '').trim() ?? ''
-    const isResumable = !!(session.claudeSessionId && titleClean !== '' && titleClean !== 'Claude Code')
+    const isResumable = !!(session.claudeSessionId && !isDefaultTitle(titleClean))
     return {
       claudeSessionId: session.claudeSessionId,
       isResumable

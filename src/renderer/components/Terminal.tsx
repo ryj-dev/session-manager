@@ -69,8 +69,8 @@ function getOrCreateInstance(sessionId: string): { term: XTerm; fitAddon: FitAdd
 
   const term = new XTerm({
     cursorBlink: true,
-    fontSize: 13,
-    fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+    fontSize: 14,
+    fontFamily: 'Menlo, Monaco, Consolas, "Courier New", monospace',
     lineHeight: 1.2,
     theme: {
       background: '#0a0a0a',
@@ -215,6 +215,29 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       // Load WebGL addon (preserveDrawingBuffer needed for snapshot capture)
       loadWebGL(instance)
 
+      // On Windows/Linux, Ctrl+C/V should copy/paste instead of being sent to PTY.
+      // On Mac, Cmd+C/V are handled natively by the browser.
+      const isMac = navigator.platform.startsWith('Mac')
+      if (!isMac) {
+        term.attachCustomKeyEventHandler((e) => {
+          if (e.type !== 'keydown') return true
+          if (e.ctrlKey && e.key === 'c' && term.hasSelection()) {
+            navigator.clipboard.writeText(term.getSelection())
+            term.clearSelection()
+            e.preventDefault()
+            return false
+          }
+          if (e.ctrlKey && e.key === 'v') {
+            navigator.clipboard.readText().then((text) => {
+              if (text) term.paste(text)
+            })
+            e.preventDefault()
+            return false
+          }
+          return true
+        })
+      }
+
       // Forward keyboard input to PTY
       term.onData((data) => {
         window.api.writeSession(sessionId, data)
@@ -286,6 +309,31 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
           e.preventDefault()
         }
       })
+
+      // Zoom with Ctrl+=/- (or Cmd+=/- on Mac)
+      const onZoomKey = (e: KeyboardEvent): void => {
+        const mod = e.metaKey || e.ctrlKey
+        if (!mod) return
+        if (e.key === '=' || e.key === '+') {
+          e.preventDefault()
+          const newSize = Math.min(term.options.fontSize! + 1, 32)
+          term.options.fontSize = newSize
+          fitAddon.fit()
+          window.api.resizeSession(sessionId, term.cols, term.rows)
+        } else if (e.key === '-') {
+          e.preventDefault()
+          const newSize = Math.max(term.options.fontSize! - 1, 8)
+          term.options.fontSize = newSize
+          fitAddon.fit()
+          window.api.resizeSession(sessionId, term.cols, term.rows)
+        } else if (e.key === '0') {
+          e.preventDefault()
+          term.options.fontSize = 14
+          fitAddon.fit()
+          window.api.resizeSession(sessionId, term.cols, term.rows)
+        }
+      }
+      term.element?.addEventListener('keydown', onZoomKey)
 
       // Capture terminal title changes — use ref so callback is never stale
       term.onTitleChange((title) => {

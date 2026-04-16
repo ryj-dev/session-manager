@@ -534,11 +534,12 @@ server.tool(
 
 // ── spawn-session ──────────────────────────────────────────────────────────
 
-const APP_DATA_DIR = path.join(
-  process.env.HOME || process.env.USERPROFILE || '.',
-  process.platform === 'darwin'
-    ? 'Library/Application Support/session-manager'
-    : '.config/session-manager'
+const APP_DATA_DIR = process.env.SM_DATA_DIR || (
+  process.platform === 'win32'
+    ? path.join(process.env.APPDATA || path.join(process.env.USERPROFILE || '.', 'AppData', 'Roaming'), 'session-manager')
+    : process.platform === 'darwin'
+      ? path.join(process.env.HOME || '.', 'Library', 'Application Support', 'session-manager')
+      : path.join(process.env.HOME || '.', '.config', 'session-manager')
 )
 
 function getHookServerPort(): number | null {

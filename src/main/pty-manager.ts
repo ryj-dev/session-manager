@@ -23,6 +23,15 @@ function resolveCommand(command: string): string {
 /** Regex to strip Claude Code's activity indicators (spinners, braille dots, etc.) from terminal titles. */
 export const TITLE_INDICATOR_RE = /[✳*\u2800-\u28FF]\s*/g
 
+/** Default terminal titles that indicate an empty/unstarted Claude session.
+ *  macOS shows "Claude Code", Windows shows "claude" (the executable name). */
+const DEFAULT_TITLES = new Set(['claude code', 'claude'])
+
+/** Returns true if a cleaned title is a default/empty Claude session title. */
+export function isDefaultTitle(titleClean: string): boolean {
+  return titleClean === '' || DEFAULT_TITLES.has(titleClean.toLowerCase())
+}
+
 // Known shells that are safe to invoke for PATH resolution (macOS/Linux only)
 const KNOWN_SHELLS = new Set(['/bin/bash', '/bin/zsh', '/bin/sh', '/usr/bin/bash', '/usr/bin/zsh', '/usr/bin/sh', '/usr/local/bin/bash', '/usr/local/bin/zsh', '/opt/homebrew/bin/bash', '/opt/homebrew/bin/zsh'])
 
@@ -118,7 +127,7 @@ export function writeToSession(id: string, data: string): void {
     session.hasActivity = true
     // Set a fallback title on first input so the session passes the save gate
     // even if Claude Code never updates the terminal title from the default.
-    if (!session.terminalTitle || session.terminalTitle.replace(TITLE_INDICATOR_RE, '').trim() === 'Claude Code') {
+    if (!session.terminalTitle || isDefaultTitle(session.terminalTitle.replace(TITLE_INDICATOR_RE, '').trim())) {
       session.terminalTitle = 'Claude Session'
     }
     session.process.write(data)
@@ -185,11 +194,9 @@ export function getResumableSessions(): Array<{
 }> {
   const resumable: Array<{ id: string; projectPath: string; claudeSessionId: string; terminalTitle: string | null }> = []
   for (const session of sessions.values()) {
-    // Only save sessions that have had real activity AND a non-default title.
-    // Empty sessions (just trust prompt + no conversation) have null title or "Claude Code".
-    const titleClean = session.terminalTitle?.replace(TITLE_INDICATOR_RE, '').trim() ?? ''
-    const hasRealTitle = titleClean !== '' && titleClean !== 'Claude Code'
-    if (session.claudeSessionId && session.hasActivity && hasRealTitle) {
+    // Save sessions that have had real activity (user sent input).
+    // hasActivity is the reliable signal — terminal title may stay as the default on Windows.
+    if (session.claudeSessionId && session.hasActivity) {
       resumable.push({
         id: session.id,
         projectPath: session.projectPath,
