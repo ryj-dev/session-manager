@@ -700,7 +700,7 @@ export function App(): JSX.Element {
       {/* Focused View — titlebar + terminal */}
       {viewMode === 'focused' && focusedSession && (
         <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]">
-          <div className="h-10 flex items-center pl-20 pr-4 border-b border-zinc-800/50 titlebar-drag shrink-0">
+          <div className={`h-10 flex items-center pr-4 border-b border-zinc-800/50 titlebar-drag shrink-0 ${navigator.platform.startsWith('Mac') ? 'pl-20' : 'pl-4'}`}>
             <div className="titlebar-no-drag flex items-center gap-2">
               {focusedSession.terminalTitle && (
                 <>

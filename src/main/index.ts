@@ -57,8 +57,10 @@ function createWindow(): void {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 16, y: 16 } }
+      : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#0a0a0a', symbolColor: '#71717a', height: 40 } }
+    ),
     backgroundColor: '#0a0a0a',
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
@@ -126,32 +128,39 @@ app.whenReady().then(async () => {
 
   // Remove Chromium's default menu so it doesn't intercept our hotkeys
   // (e.g. Cmd+Shift+T = "Reopen Closed Tab", Cmd+N = "New Window")
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    {
-      label: app.name,
-      submenu: [
-        { role: 'about' },
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { role: 'unhide' },
-        { type: 'separator' },
-        { role: 'quit' }
-      ]
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
-        { type: 'separator' },
-        { role: 'cut' },
-        { role: 'copy' },
-        { role: 'paste' }
-        // selectAll intentionally omitted — Cmd+A is used for the agents panel
-      ]
-    }
-  ]))
+  if (process.platform === 'darwin') {
+    // macOS needs a menu for clipboard accelerators (Cmd+C/V/X) and system items
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      {
+        label: app.name,
+        submenu: [
+          { role: 'about' },
+          { type: 'separator' },
+          { role: 'hide' },
+          { role: 'hideOthers' },
+          { role: 'unhide' },
+          { type: 'separator' },
+          { role: 'quit' }
+        ]
+      },
+      {
+        label: 'Edit',
+        submenu: [
+          { role: 'undo' },
+          { role: 'redo' },
+          { type: 'separator' },
+          { role: 'cut' },
+          { role: 'copy' },
+          { role: 'paste' }
+          // selectAll intentionally omitted — Cmd+A is used for the agents panel
+        ]
+      }
+    ]))
+  } else {
+    // Windows/Linux: remove the menu entirely so Alt keypresses reach the renderer
+    // (Ctrl+C/V/X work natively on these platforms without a menu)
+    Menu.setApplicationMenu(null)
+  }
 
   cleanupAllSkillCommands() // Remove stale skill commands from previous sessions
   // Wipe stale inbox files from previous sessions/crashes

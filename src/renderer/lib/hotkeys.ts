@@ -117,9 +117,9 @@ export function parseHotkeyKeys(raw: string): string[] {
   const key = parts[parts.length - 1]
   const modifiers = new Set(parts.slice(0, -1))
 
-  const keys: string[] = ['Meta'] // Base modifier (Cmd/Alt) always present
+  const keys: string[] = [IS_MAC ? 'Meta' : 'Alt'] // Base modifier: Cmd on Mac, Alt on Windows
   if (modifiers.has('ctrl')) keys.push('Control')
-  if (modifiers.has('alt')) keys.push('Alt')
+  if (modifiers.has('alt') && IS_MAC) keys.push('Alt') // Only extra modifier on Mac
   if (modifiers.has('shift')) keys.push('Shift')
   keys.push(key.toUpperCase())
   return keys

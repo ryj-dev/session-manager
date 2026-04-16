@@ -10,13 +10,16 @@ interface KeyboardShortcutsProps {
 
 // ── Keyboard layout ───────────────────────────────────────────────────
 
+const IS_MAC = typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac')
+
 interface KeyDef {
   id: string       // Unique key identifier for highlighting
   label: string    // Display label
   width?: number   // Width multiplier (1 = standard key)
 }
 
-const KEYBOARD_ROWS: KeyDef[][] = [
+// Shared rows (identical across platforms)
+const SHARED_ROWS: KeyDef[][] = [
   // Row 1: Number row
   [
     { id: '`', label: '`' },
@@ -32,7 +35,7 @@ const KEYBOARD_ROWS: KeyDef[][] = [
     { id: '0', label: '0' },
     { id: '-', label: '-' },
     { id: '=', label: '=' },
-    { id: 'Backspace', label: 'delete', width: 1.5 },
+    { id: 'Backspace', label: IS_MAC ? 'delete' : 'Bksp', width: 1.5 },
   ],
   // Row 2: QWERTY
   [
@@ -65,7 +68,7 @@ const KEYBOARD_ROWS: KeyDef[][] = [
     { id: 'L', label: 'L' },
     { id: ';', label: ';' },
     { id: "'", label: "'" },
-    { id: 'Enter', label: 'return', width: 1.75 },
+    { id: 'Enter', label: IS_MAC ? 'return' : 'Enter', width: 1.75 },
   ],
   // Row 4: Shift row
   [
@@ -82,30 +85,54 @@ const KEYBOARD_ROWS: KeyDef[][] = [
     { id: '/', label: '/' },
     { id: 'ShiftRight', label: 'shift', width: 2.25 },
   ],
-  // Row 5: Bottom row
-  [
-    { id: 'Fn', label: 'fn', width: 1 },
-    { id: 'Control', label: 'ctrl', width: 1.25 },
-    { id: 'Alt', label: 'opt', width: 1.25 },
-    { id: 'Meta', label: '⌘', width: 1.5 },
-    { id: 'Space', label: '', width: 5 },
-    { id: 'MetaRight', label: '⌘', width: 1.5 },
-    { id: 'AltRight', label: 'opt', width: 1.25 },
-    { id: 'ArrowLeft', label: '←', width: 1 },
-    { id: 'ArrowUp+ArrowDown', label: '↑↓', width: 1 },
-    { id: 'ArrowRight', label: '→', width: 1 },
-  ],
 ]
 
-// Non-configurable shortcuts displayed in the list
-const FIXED_SHORTCUTS: { keys: string; label: string }[] = [
-  { keys: 'Enter', label: 'Focus selected session' },
-  { keys: '← →', label: 'Cycle sessions in project' },
-  { keys: '↑ ↓', label: 'Switch between projects' },
-  { keys: 'Esc', label: 'Close overlays / panels' },
-  { keys: '⌘Q', label: 'Quit app' },
-  { keys: '⌘⇧W', label: 'Force-close session' },
+// Platform-specific bottom row
+const MAC_BOTTOM_ROW: KeyDef[] = [
+  { id: 'Fn', label: 'fn', width: 1 },
+  { id: 'Control', label: 'ctrl', width: 1.25 },
+  { id: 'Alt', label: 'opt', width: 1.25 },
+  { id: 'Meta', label: '⌘', width: 1.5 },
+  { id: 'Space', label: '', width: 5 },
+  { id: 'MetaRight', label: '⌘', width: 1.5 },
+  { id: 'AltRight', label: 'opt', width: 1.25 },
+  { id: 'ArrowLeft', label: '←', width: 1 },
+  { id: 'ArrowUp+ArrowDown', label: '↑↓', width: 1 },
+  { id: 'ArrowRight', label: '→', width: 1 },
 ]
+
+const WIN_BOTTOM_ROW: KeyDef[] = [
+  { id: 'Control', label: 'Ctrl', width: 1.5 },
+  { id: 'Meta', label: 'Win', width: 1.25 },
+  { id: 'Alt', label: 'Alt', width: 1.25 },
+  { id: 'Space', label: '', width: 5 },
+  { id: 'AltRight', label: 'Alt', width: 1.25 },
+  { id: 'MetaRight', label: 'Win', width: 1.25 },
+  { id: 'ArrowLeft', label: '←', width: 1 },
+  { id: 'ArrowUp+ArrowDown', label: '↑↓', width: 1 },
+  { id: 'ArrowRight', label: '→', width: 1 },
+]
+
+const KEYBOARD_ROWS: KeyDef[][] = [...SHARED_ROWS, IS_MAC ? MAC_BOTTOM_ROW : WIN_BOTTOM_ROW]
+
+// Non-configurable shortcuts displayed in the list
+const FIXED_SHORTCUTS: { keys: string; label: string }[] = IS_MAC
+  ? [
+      { keys: 'Enter', label: 'Focus selected session' },
+      { keys: '← →', label: 'Cycle sessions in project' },
+      { keys: '↑ ↓', label: 'Switch between projects' },
+      { keys: 'Esc', label: 'Close overlays / panels' },
+      { keys: '⌘Q', label: 'Quit app' },
+      { keys: '⌘⇧W', label: 'Force-close session' },
+    ]
+  : [
+      { keys: 'Enter', label: 'Focus selected session' },
+      { keys: '← →', label: 'Cycle sessions in project' },
+      { keys: '↑ ↓', label: 'Switch between projects' },
+      { keys: 'Esc', label: 'Close overlays / panels' },
+      { keys: 'Alt+Q', label: 'Quit app' },
+      { keys: 'Alt+Shift+W', label: 'Force-close session' },
+    ]
 
 // Map fixed shortcut display keys to keyboard key IDs for highlighting
 function fixedShortcutKeyIds(keys: string): string[] {
@@ -116,6 +143,8 @@ function fixedShortcutKeyIds(keys: string): string[] {
     case 'Esc': return ['Escape']
     case '⌘Q': return ['Meta', 'Q']
     case '⌘⇧W': return ['Meta', 'Shift', 'W']
+    case 'Alt+Q': return ['Alt', 'Q']
+    case 'Alt+Shift+W': return ['Alt', 'Shift', 'W']
     default: return []
   }
 }
