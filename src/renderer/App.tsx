@@ -507,6 +507,14 @@ export function App(): JSX.Element {
         setShowSettings((prev) => !prev)
         return
       }
+
+      // Quit app — on Mac this is handled natively by Cmd+Q via the menu;
+      // on Windows/Linux there's no menu so we handle it here
+      if (key === 'q') {
+        e.preventDefault()
+        window.close()
+        return
+      }
     }
 
     // Use capture phase so app hotkeys fire before native browser actions (e.g. Cmd+A select-all)

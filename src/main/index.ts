@@ -163,8 +163,8 @@ app.whenReady().then(async () => {
   }
 
   cleanupAllSkillCommands() // Remove stale skill commands from previous sessions
-  // Wipe stale inbox files from previous sessions/crashes
-  rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true })
+  // Wipe stale inbox files from previous sessions/crashes (may fail on Windows if files are still locked)
+  try { rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true }) } catch { /* best-effort */ }
   await startHookServer()
   uninstallPlugin() // Clean stale registration from prior crash before re-installing
   installPlugin()

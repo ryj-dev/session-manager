@@ -19,8 +19,10 @@ const sessionStatus = new Map<string, 'working' | 'idle'>()
 export function cleanupSession(appSessionId: string): void {
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
-  // Clean up the session's inbox directory
-  rmSync(join(app.getPath('userData'), 'messages', appSessionId), { recursive: true, force: true })
+  // Clean up the session's inbox directory (may fail on Windows if files are still locked by exiting PTY)
+  try {
+    rmSync(join(app.getPath('userData'), 'messages', appSessionId), { recursive: true, force: true })
+  } catch { /* best-effort cleanup — leftover dirs are cleared on app quit */ }
 }
 
 // Callback for attaching PTY listeners — set by ipc.ts to avoid circular deps
@@ -155,8 +157,8 @@ export function startHookServer(): Promise<number> {
 export function stopHookServer(): void {
   removeHooks()
   removePortFile()
-  // Wipe all inbox files on shutdown
-  rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true })
+  // Wipe all inbox files on shutdown (may fail on Windows if files are still locked)
+  try { rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true }) } catch { /* best-effort */ }
   server?.close()
   server = null
 }
