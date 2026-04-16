@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
-import { readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
@@ -269,6 +269,7 @@ export function registerIpcHandlers(): void {
 
       let note = readNote(fn)!
       syncBacklinks(fn, [], note.wikilinks)
+      note = readNote(fn)!  // Re-read — syncBacklinks may have updated source's Related
 
       // Sync inbound links — existing notes that already reference this new note
       const inbound = getInboundLinks(fn)
@@ -619,7 +620,7 @@ Not all sections are required. Use \`create-note\` with the appropriate type and
 
 ### Back-links are automatic
 
-When you add \`[[note-b]]\` to a note, the MCP server automatically adds the reverse link. No need to manually update both sides.
+When you add \`[[note-b]]\` to a note, the MCP server automatically adds the reverse link. No need to manually update both sides. Wikilinks are resolved by **filename** (without the \`.md\` extension), not by note title — e.g. \`[[my-note]]\` links to \`my-note.md\`.
 
 ### Do NOT store
 

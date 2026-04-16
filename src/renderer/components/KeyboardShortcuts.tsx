@@ -139,7 +139,7 @@ function fixedShortcutKeyIds(keys: string): string[] {
   switch (keys) {
     case 'Enter': return ['Enter']
     case '← →': return ['ArrowLeft', 'ArrowRight']
-    case '↑ ↓': return ['ArrowUp+ArrowDown']
+    case '↑ ↓': return ['ArrowUp', 'ArrowDown']
     case 'Esc': return ['Escape']
     case '⌘Q': return ['Meta', 'Q']
     case '⌘⇧W': return ['Meta', 'Shift', 'W']

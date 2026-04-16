@@ -312,13 +312,21 @@ export function addToRelatedSection(rawBody: string, wikilink: string): string {
   const sectionRegex = /^## Related\s*$/m
 
   if (sectionRegex.test(rawBody)) {
-    if (rawBody.includes(`[[${wikilink}]]`)) return rawBody
-
     const lines = rawBody.split('\n')
     const idx = lines.findIndex((l) => /^## Related\s*$/.test(l))
-    let insertAt = idx + 1
+
+    // Find end of Related section
+    let endIdx = lines.length
     for (let i = idx + 1; i < lines.length; i++) {
-      if (lines[i].startsWith('## ')) break
+      if (lines[i].startsWith('## ')) { endIdx = i; break }
+    }
+
+    // Only check for duplicates within the Related section
+    const relatedLines = lines.slice(idx, endIdx)
+    if (relatedLines.some((l) => l.includes(`[[${wikilink}]]`))) return rawBody
+
+    let insertAt = idx + 1
+    for (let i = idx + 1; i < endIdx; i++) {
       if (lines[i].trim()) insertAt = i + 1
     }
     lines.splice(insertAt, 0, entry)

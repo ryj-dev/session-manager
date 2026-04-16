@@ -221,6 +221,10 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       if (!isMac) {
         term.attachCustomKeyEventHandler((e) => {
           if (e.type !== 'keydown') return true
+          // Block all Alt+key combos from reaching the PTY — Alt is the app's
+          // hotkey modifier on Windows/Linux (like Cmd on Mac), so these should
+          // never be forwarded as terminal escape sequences.
+          if (e.altKey && e.key !== 'Alt') return false
           if (e.ctrlKey && e.key === 'c' && term.hasSelection()) {
             navigator.clipboard.writeText(term.getSelection())
             term.clearSelection()

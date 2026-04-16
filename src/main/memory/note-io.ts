@@ -71,8 +71,10 @@ export function createNoteIO(memoriesDir: string): NoteIO {
     const newSet = new Set(newWikilinks)
     const added = newWikilinks.filter((l) => !oldSet.has(l))
     const removed = oldWikilinks.filter((l) => !newSet.has(l))
+    if (added.length === 0 && removed.length === 0) return
     const sourceWikilink = filenameToWikilink(filename)
 
+    // Update target notes' Related sections (add/remove backlink to source)
     for (const link of added) {
       const target = resolveWikilink(link)
       if (!target || target === filename) continue
@@ -90,6 +92,32 @@ export function createNoteIO(memoriesDir: string): NoteIO {
       const updated = removeFromRelatedSection(note.rawBody, sourceWikilink)
       if (updated !== note.rawBody) writeNote(target, updated)
     }
+
+    // Update source note's Related section with outbound targets
+    const sourceNote = readNote(filename)
+    if (!sourceNote) return
+    let updatedRaw = sourceNote.rawBody
+
+    for (const link of added) {
+      const target = resolveWikilink(link)
+      if (!target || target === filename) continue
+      updatedRaw = addToRelatedSection(updatedRaw, filenameToWikilink(target))
+    }
+
+    for (const link of removed) {
+      const target = resolveWikilink(link)
+      if (!target || target === filename) continue
+      // Only remove from source's Related if target doesn't also link back
+      const targetNote = readNote(target)
+      const targetLinksToSource = targetNote?.wikilinks.some(
+        (l) => resolveWikilink(l) === filename
+      ) ?? false
+      if (!targetLinksToSource) {
+        updatedRaw = removeFromRelatedSection(updatedRaw, filenameToWikilink(target))
+      }
+    }
+
+    if (updatedRaw !== sourceNote.rawBody) writeNote(filename, updatedRaw)
   }
 
   function getInboundLinks(filename: string): string[] {

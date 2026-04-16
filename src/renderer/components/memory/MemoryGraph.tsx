@@ -497,7 +497,7 @@ export default function MemoryGraph({
     <div style={{ position: 'relative', width: '100%', height: '100%', background: '#0a0a0a' }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'absolute', inset: 0 }} />
       {graphData && (
-        <div style={{ position: 'absolute', top: 14, right: 40, fontFamily: 'ui-monospace, monospace', fontSize: 10, color: '#556', display: 'flex', gap: 12, pointerEvents: 'none' }}>
+        <div style={{ position: 'absolute', top: 14, right: 160, fontFamily: 'ui-monospace, monospace', fontSize: 10, color: '#556', display: 'flex', gap: 12, pointerEvents: 'none' }}>
           <span>{searchMatchPaths ? searchMatchPaths.size : graphData.nodes.length} nodes</span>
           <span>{graphData.edges.length} edges</span>
         </div>

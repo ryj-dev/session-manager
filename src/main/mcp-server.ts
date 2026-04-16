@@ -116,7 +116,7 @@ Use **edit-note** for simple single-section edits.
 
 ## Linking
 
-Use [[wikilinks]] in note content to connect related notes. Backlinks in ## Related are fully automatic — never edit them manually.
+Use [[wikilinks]] in note content to connect related notes. Wikilinks are resolved by **filename** (without the .md extension), not by note title — e.g. \`[[my-note]]\` links to \`my-note.md\`. Backlinks in ## Related are fully automatic — never edit them manually.
 
 ## Keyword routing — IMPORTANT
 
@@ -191,6 +191,7 @@ server.tool(
     let note = io.readNote(fn)!
 
     io.syncBacklinks(fn, [], note.wikilinks)
+    note = io.readNote(fn)!  // Re-read — syncBacklinks may have updated source's Related
 
     const inbound = io.getInboundLinks(fn)
     if (inbound.length > 0) {

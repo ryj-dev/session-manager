@@ -32,6 +32,7 @@ export function syncBacklinks(
 
   beginBatch()
   try {
+    // Update target notes' Related sections (add/remove backlink to source)
     for (const link of added) {
       const targetFilename = resolveWikilink(link, index)
       if (!targetFilename || targetFilename === filename) continue
@@ -57,6 +58,37 @@ export function syncBacklinks(
       if (updated !== targetNote.rawBody) {
         writeNote(targetFilename, updated)
         invalidate(targetFilename)
+      }
+    }
+
+    // Update source note's Related section with outbound targets
+    const sourceNote = readNote(filename)
+    if (sourceNote) {
+      let updatedRaw = sourceNote.rawBody
+
+      for (const link of added) {
+        const targetFilename = resolveWikilink(link, index)
+        if (!targetFilename || targetFilename === filename) continue
+        updatedRaw = addToRelatedSection(updatedRaw, filenameToWikilink(targetFilename))
+      }
+
+      for (const link of removed) {
+        const targetFilename = resolveWikilink(link, index)
+        if (!targetFilename || targetFilename === filename) continue
+        // Only remove from source's Related if target doesn't also link back
+        const targetNote = readNote(targetFilename)
+        const targetLinksToSource = targetNote?.wikilinks.some((l) => {
+          const resolved = resolveWikilink(l, index)
+          return resolved === filename
+        }) ?? false
+        if (!targetLinksToSource) {
+          updatedRaw = removeFromRelatedSection(updatedRaw, filenameToWikilink(targetFilename))
+        }
+      }
+
+      if (updatedRaw !== sourceNote.rawBody) {
+        writeNote(filename, updatedRaw)
+        invalidate(filename)
       }
     }
   } finally {
