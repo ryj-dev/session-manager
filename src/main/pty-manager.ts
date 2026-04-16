@@ -6,6 +6,20 @@ import { join, dirname } from 'path'
 import { mkdirSync, writeFileSync } from 'fs'
 import { app } from 'electron'
 
+/** On Windows, node-pty requires a fully-qualified path or an extension to find executables.
+ *  Use `where` to resolve bare command names to their actual path. */
+function resolveCommand(command: string): string {
+  if (process.platform !== 'win32') return command
+  // Already has a path separator or extension — leave it alone
+  if (command.includes('\\') || command.includes('/') || command.includes('.')) return command
+  try {
+    const resolved = execSync(`where ${command}`, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0]
+    return resolved || command
+  } catch {
+    return command
+  }
+}
+
 /** Regex to strip Claude Code's activity indicators (spinners, braille dots, etc.) from terminal titles. */
 export const TITLE_INDICATOR_RE = /[✳*\u2800-\u28FF]\s*/g
 
@@ -73,6 +87,8 @@ export function spawnSession(
   const inboxPath = join(app.getPath('userData'), 'messages', id, 'inbox.txt')
   mkdirSync(dirname(inboxPath), { recursive: true })
   writeFileSync(inboxPath, '', { flag: 'a' }) // create if missing, don't truncate
+
+  command = resolveCommand(command)
 
   const ptyProcess = pty.spawn(command, args, {
     name: 'xterm-256color',
