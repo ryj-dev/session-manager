@@ -101,7 +101,7 @@ export interface AppState {
 }
 
 function projectNameFromPath(projectPath: string): string {
-  return projectPath.split('/').filter(Boolean).pop() || projectPath
+  return projectPath.split(/[\\/]/).filter(Boolean).pop() || projectPath
 }
 
 export const useStore = create<AppState>((set) => ({
