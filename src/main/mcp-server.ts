@@ -180,7 +180,8 @@ server.tool(
     outcome: z.string().optional().describe('Content for ## Outcome section'),
   },
   async ({ title, filename, type, tags, summary, context, details, outcome }) => {
-    const fn = filename || slugify(title)
+    let fn = filename || slugify(title)
+    if (!fn.endsWith('.md')) fn = `${fn}.md`
 
     if (io.readNote(fn)) {
       return { content: [{ type: 'text', text: `Error: Note "${fn}" already exists` }], isError: true }

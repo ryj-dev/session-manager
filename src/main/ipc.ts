@@ -252,7 +252,8 @@ export function registerIpcHandlers(): void {
         summary?: string; context?: string; details?: string; outcome?: string
       }
     ) => {
-      const fn = filename || slugify(title)
+      let fn = filename || slugify(title)
+      if (!fn.endsWith('.md')) fn = `${fn}.md`
 
       if (readNote(fn)) {
         throw new Error(`Note "${fn}" already exists`)
