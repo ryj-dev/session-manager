@@ -112,7 +112,12 @@ export function SessionNode({
         {session.terminalTitle && (
           <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-1.5">
             <span className="text-[10px] text-zinc-300 font-medium truncate block">
-              {session.terminalTitle}
+              {(() => {
+                const clean = session.terminalTitle?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
+                const lower = clean.toLowerCase()
+                const isDefault = clean === '' || ['claude code', 'claude'].includes(lower) || lower.endsWith('claude.exe') || lower.endsWith('claude')
+                return isDefault ? session.projectName : session.terminalTitle
+              })()}
             </span>
           </div>
         )}

@@ -18,6 +18,16 @@ import { useDesigns } from './hooks/useDesigns'
 import { useAgents } from './hooks/useAgents'
 import { useSkills } from './hooks/useSkills'
 
+/** Returns true if a terminal title is a default/empty Claude session title. */
+function isDefaultTitle(titleClean: string): boolean {
+  if (titleClean === '') return true
+  const lower = titleClean.toLowerCase()
+  if (['claude code', 'claude'].includes(lower)) return true
+  // Windows sets the title to the full executable path (e.g. C:\Users\ry\.local\bin\claude.exe)
+  if (lower.endsWith('claude.exe') || lower.endsWith('claude')) return true
+  return false
+}
+
 // Snapshot capture interval
 const SNAPSHOT_INTERVAL_ACTIVE = 500
 const SNAPSHOT_INTERVAL_IDLE = 3000
@@ -185,14 +195,11 @@ export function App(): JSX.Element {
   const handleTitleChange = useCallback(
     (id: string, title: string) => {
       const titleClean = title.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim()
-      // Default titles: "Claude Code" on macOS, "claude" on Windows
-      const isDefault = titleClean === '' || ['claude code', 'claude'].includes(titleClean.toLowerCase())
-      if (isDefault) {
+      if (isDefaultTitle(titleClean)) {
         // Don't overwrite a real title with a default one
         const current = useStore.getState().sessions.find((s) => s.id === id)?.terminalTitle
         const currentClean = current?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
-        const currentIsDefault = currentClean === '' || ['claude code', 'claude'].includes(currentClean.toLowerCase())
-        if (!currentIsDefault) return
+        if (!isDefaultTitle(currentClean)) return
       }
       updateSessionTitle(id, title)
       window.api.updateSessionTitle(id, title)
@@ -869,8 +876,7 @@ export function App(): JSX.Element {
                   <span className="text-zinc-400 truncate">
                     {(() => {
                       const titleClean = s.terminalTitle?.replace(/[✳*\u2800-\u28FF]\s*/g, '').trim() ?? ''
-                      const isDefault = titleClean === '' || ['claude code', 'claude'].includes(titleClean.toLowerCase())
-                      return isDefault
+                      return isDefaultTitle(titleClean)
                         ? s.projectPath.split(/[\\/]/).filter(Boolean).pop()
                         : s.terminalTitle
                     })()}

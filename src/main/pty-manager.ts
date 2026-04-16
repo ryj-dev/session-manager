@@ -29,7 +29,12 @@ const DEFAULT_TITLES = new Set(['claude code', 'claude'])
 
 /** Returns true if a cleaned title is a default/empty Claude session title. */
 export function isDefaultTitle(titleClean: string): boolean {
-  return titleClean === '' || DEFAULT_TITLES.has(titleClean.toLowerCase())
+  if (titleClean === '') return true
+  const lower = titleClean.toLowerCase()
+  if (DEFAULT_TITLES.has(lower)) return true
+  // Windows sets the title to the full executable path (e.g. C:\Users\ry\.local\bin\claude.exe)
+  if (lower.endsWith('claude.exe') || lower.endsWith('claude')) return true
+  return false
 }
 
 // Known shells that are safe to invoke for PATH resolution (macOS/Linux only)
