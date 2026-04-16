@@ -65,12 +65,7 @@ export function onPtyData(appSessionId: string, data: string): void {
   }
 }
 
-const APP_DATA_DIR = join(
-  homedir(),
-  process.platform === 'darwin'
-    ? 'Library/Application Support/session-manager'
-    : '.config/session-manager'
-)
+const APP_DATA_DIR = join(app.getPath('userData'))
 const PORT_FILE = join(APP_DATA_DIR, 'hook-server.port')
 
 function writePortFile(port: number): void {
