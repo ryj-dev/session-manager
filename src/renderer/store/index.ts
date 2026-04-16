@@ -100,6 +100,10 @@ export interface AppState {
   updateMessageTimer: (id: string, remainingMs: number) => void
 }
 
+function normalizePath(p: string): string {
+  return p.replace(/\//g, '\\')
+}
+
 function projectNameFromPath(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).pop() || projectPath
 }
@@ -113,7 +117,7 @@ export const useStore = create<AppState>((set) => ({
         ...state.sessions,
         {
           id,
-          projectPath,
+          projectPath: normalizePath(projectPath),
           projectName: projectNameFromPath(projectPath),
           terminalTitle: null,
           status: 'seen',
