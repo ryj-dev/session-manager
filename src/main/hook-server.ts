@@ -259,9 +259,23 @@ function handleSendMessage(body: string, res: import('http').ServerResponse): vo
 
     // Append message to the session's inbox file — the monitor (tail -f) picks it up
     const fromLabel = fromSessionId ? `Message from session ${fromSessionId}` : 'Message from another session'
-    const line = `${fromLabel}: ${message.replace(/\n/g, '\\n')}\n`
-    const inboxPath = join(app.getPath('userData'), 'messages', targetSessionId, 'inbox.txt')
-    mkdirSync(dirname(inboxPath), { recursive: true })
+    const msgDir = join(app.getPath('userData'), 'messages', targetSessionId)
+    mkdirSync(msgDir, { recursive: true })
+    const inboxPath = join(msgDir, 'inbox.txt')
+
+    // For long messages, write to a file and reference it in the inbox line.
+    // Claude Code truncates monitor notifications at exactly 500 chars.
+    // Reserve room for the "Message from session {uuid}: " prefix (~60 chars).
+    const MAX_INLINE_LENGTH = 400
+    const escaped = message.replace(/\n/g, '\\n')
+    let line: string
+    if (escaped.length <= MAX_INLINE_LENGTH) {
+      line = `${fromLabel}: ${escaped}\n`
+    } else {
+      const msgFile = join(msgDir, `msg-${randomUUID()}.md`)
+      writeFileSync(msgFile, message)
+      line = `${fromLabel} — full message saved to file (too long for inline delivery). Read it with: ${msgFile}\n`
+    }
     appendFileSync(inboxPath, line)
 
     // Notify renderer for popup UI
