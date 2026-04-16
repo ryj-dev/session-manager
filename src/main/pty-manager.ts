@@ -9,11 +9,13 @@ import { app } from 'electron'
 /** Regex to strip Claude Code's activity indicators (spinners, braille dots, etc.) from terminal titles. */
 export const TITLE_INDICATOR_RE = /[✳*\u2800-\u28FF]\s*/g
 
-// Known shells that are safe to invoke for PATH resolution
+// Known shells that are safe to invoke for PATH resolution (macOS/Linux only)
 const KNOWN_SHELLS = new Set(['/bin/bash', '/bin/zsh', '/bin/sh', '/usr/bin/bash', '/usr/bin/zsh', '/usr/bin/sh', '/usr/local/bin/bash', '/usr/local/bin/zsh', '/opt/homebrew/bin/bash', '/opt/homebrew/bin/zsh'])
 
 // Electron doesn't inherit the full shell PATH. Resolve it once at startup.
 function getShellPath(): string {
+  // On Windows, the PATH is inherited correctly — no shell invocation needed
+  if (process.platform === 'win32') return process.env.PATH || ''
   try {
     const shell = process.env.SHELL || '/bin/zsh'
     if (!KNOWN_SHELLS.has(shell)) return process.env.PATH || ''

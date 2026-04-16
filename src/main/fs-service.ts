@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, unlinkSync } from 'fs'
 import { join, resolve } from 'path'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 
 export function expandPath(p: string): string {
   if (p.startsWith('~/') || p === '~') {
@@ -10,7 +10,9 @@ export function expandPath(p: string): string {
 }
 
 /** Paths the renderer is allowed to read from. */
-const ALLOWED_ROOTS = [homedir(), '/tmp', '/var/folders']
+const ALLOWED_ROOTS = process.platform === 'win32'
+  ? [homedir(), tmpdir()]
+  : [homedir(), '/tmp', '/var/folders']
 
 function assertAllowedPath(target: string): void {
   const resolved = resolve(target)
