@@ -10,6 +10,7 @@ interface CustomComponentDef {
   extract: string
   format: string
   guard?: string
+  extractNode?: string  // JS expression for Windows (custom components)
 }
 
 interface StatuslineEditorProps {
@@ -47,20 +48,10 @@ const ELEMENTS: ElementDef[] = [
 
 const ELEMENT_MAP = new Map(ELEMENTS.map((e) => [e.id, e]))
 
+const IS_WIN = typeof navigator !== 'undefined' && navigator.platform.startsWith('Win')
+
 function buildCustomComponentSkill(scriptPath: string, configPath: string): string {
-  return `You are a statusline component designer for Claude Code. The user wants to create a custom statusline component.
-
-## How the statusline works
-
-Claude Code's statusline is powered by a bash script at \`${scriptPath}\`. The script receives JSON via stdin on every Claude Code response and outputs a single line of text.
-
-The statusline configuration is stored at \`${configPath}\`. This JSON file tracks which elements are enabled and stores custom component definitions.
-
-## JSON schema available via stdin
-
-The script receives this JSON structure:
-
-\`\`\`json
+  const jsonSchema = `\`\`\`json
 {
   "model": { "display_name": "Claude Sonnet 4" },
   "rate_limits": {
@@ -87,7 +78,89 @@ The script receives this JSON structure:
     "git_branch": "main"
   }
 }
+\`\`\``
+
+  if (IS_WIN) {
+    return `You are a statusline component designer for Claude Code. The user wants to create a custom statusline component.
+
+## How the statusline works
+
+Claude Code's statusline is powered by a Node.js script at \`${scriptPath}\`. The script receives JSON via stdin on every Claude Code response and outputs a single line of text.
+
+The statusline configuration is stored at \`${configPath}\`. This JSON file tracks which elements are enabled and stores custom component definitions.
+
+## JSON schema available via stdin
+
+The script receives this JSON structure:
+
+${jsonSchema}
+
+## How to register a custom component
+
+Custom components are stored in \`${configPath}\` under the \`customComponents\` array. Each component has:
+
+\`\`\`json
+{
+  "id": "custom_my_component",
+  "label": "My Component",
+  "description": "What it does",
+  "preview": "example output",
+  "extract": "",
+  "format": "",
+  "extractNode": "JS expression that returns the formatted string (receives parsed JSON as 'd')"
+}
 \`\`\`
+
+### Important rules for the extractNode field:
+- It must be a JavaScript expression that evaluates to a string (or empty string to skip)
+- The parsed JSON object is available as \`d\`
+- Use optional chaining (\`d.cost?.total_cost_usd\`) for safe access
+- Return empty string \`''\` to hide the component when data is unavailable
+
+### Example: Cost warning component
+
+\`\`\`json
+{
+  "id": "custom_cost_warning",
+  "label": "Cost warning",
+  "description": "Shows warning icon when session cost exceeds $1",
+  "preview": "⚠ $1.23",
+  "extract": "",
+  "format": "",
+  "extractNode": "(() => { const c = d.cost?.total_cost_usd; return c && c > 1 ? \`⚠ $\${c}\` : ''; })()"
+}
+\`\`\`
+
+## Your task
+
+Ask the user what they want their custom component to display. Then:
+
+1. Design the JavaScript expression for the component
+2. Read the current config at \`${configPath}\`
+3. Add the new component to the \`customComponents\` array
+4. Add the component's id to the \`elements\` array (to enable it)
+5. Write the updated config back to \`${configPath}\`
+
+After writing the config, the session manager will automatically regenerate the Node.js script on next toggle or reload.
+
+You can use Unicode characters in the preview and output. ANSI escape codes are NOT supported — the statusline is plain text only.
+
+Be creative! The user might want computed values, conditional formatting, emoji indicators, progress bars, or combinations of existing data. Ask what they'd like to build.`
+  }
+
+  return `You are a statusline component designer for Claude Code. The user wants to create a custom statusline component.
+
+## How the statusline works
+
+Claude Code's statusline is powered by a bash script at \`${scriptPath}\`. The script receives JSON via stdin on every Claude Code response and outputs a single line of text.
+
+The statusline configuration is stored at \`${configPath}\`. This JSON file tracks which elements are enabled and stores custom component definitions.
+
+## JSON schema available via stdin
+
+The script receives this JSON structure:
+
+${jsonSchema}
 
 ## How to register a custom component
 
@@ -282,9 +355,11 @@ export function StatuslineEditor({ visible, onClose, onSpawn }: StatuslineEditor
     groups.set(el.group, list)
   }
 
-  // Shorten paths for display
-  const displayScript = scriptPath.replace(/^\/Users\/[^/]+/, '~')
-  const displaySettings = settingsPath.replace(/^\/Users\/[^/]+/, '~')
+  // Shorten paths for display (macOS: /Users/x → ~, Windows: C:\Users\x → ~)
+  const shortenHome = (p: string): string =>
+    p.replace(/^\/Users\/[^/]+/, '~').replace(/^[A-Z]:\\Users\\[^\\]+/, '~')
+  const displayScript = shortenHome(scriptPath)
+  const displaySettings = shortenHome(settingsPath)
 
   const renderToggleRow = (
     id: string,
@@ -413,7 +488,7 @@ export function StatuslineEditor({ visible, onClose, onSpawn }: StatuslineEditor
                           <code className="text-[10px] text-zinc-300 break-all">{displayScript}</code>
                         </div>
                         <div className="text-[10px] text-zinc-600 ml-[3.25rem]">
-                          Generated bash script with your selected elements
+                          Generated {displayScript.endsWith('.js') ? 'Node.js' : 'bash'} script with your selected elements
                         </div>
                       </div>
                       <div className="border-t border-zinc-700/50 pt-2.5">
@@ -424,7 +499,7 @@ export function StatuslineEditor({ visible, onClose, onSpawn }: StatuslineEditor
                         <pre className="text-[10px] leading-relaxed font-mono rounded bg-zinc-900/80 border border-zinc-700/40 px-2.5 py-2 overflow-x-auto">
                           <span className="text-emerald-400/80">+ "statusLine": {'{\n'}
                           {'    '}"type": "command",{'\n'}
-                          {'    '}"command": "bash {displayScript}"{'\n'}
+                          {'    '}"command": "{displayScript.endsWith('.js') ? `node "${displayScript}"` : `bash ${displayScript}`}"{'\n'}
                           {'  }'}</span>
                         </pre>
                       </div>
@@ -518,7 +593,7 @@ export function StatuslineEditor({ visible, onClose, onSpawn }: StatuslineEditor
                   {/* Footer */}
                   <div className="mt-8 pt-4 border-t border-zinc-800">
                     <p className="text-[10px] text-zinc-600">
-                      Generates {displayScript}
+                      Generates {displayScript} ({displayScript.endsWith('.js') ? 'Node.js' : 'bash'})
                     </p>
                   </div>
                 </>

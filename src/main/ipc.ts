@@ -428,8 +428,9 @@ export function registerIpcHandlers(): void {
   const claudeSettingsPath = join(app.getPath('home'), '.claude', 'settings.json')
 
   // ── Statusline configuration ──────────────────────────────────────────
+  const isWin = process.platform === 'win32'
   const statuslineConfigPath = join(app.getPath('home'), '.claude', 'statusline-config.json')
-  const statuslineScriptPath = join(app.getPath('home'), '.claude', 'statusline-command.sh')
+  const statuslineScriptPath = join(app.getPath('home'), '.claude', isWin ? 'statusline-command.js' : 'statusline-command.sh')
 
   ipcMain.handle('claude:getStatuslineConfig', () => {
     try {
@@ -468,17 +469,22 @@ export function registerIpcHandlers(): void {
       }
       writeFileSync(statuslineConfigPath, JSON.stringify(config, null, 2) + '\n', 'utf-8')
 
-      // Generate and write bash script
-      const script = generateStatuslineScript(elements, config.customComponents)
+      // Generate and write statusline script (bash on macOS/Linux, Node.js on Windows)
+      const script = isWin
+        ? generateStatuslineScriptNode(elements, config.customComponents)
+        : generateStatuslineScript(elements, config.customComponents)
       writeFileSync(statuslineScriptPath, script, 'utf-8')
-      chmodSync(statuslineScriptPath, 0o755)
+      if (!isWin) chmodSync(statuslineScriptPath, 0o755)
 
       // Ensure ~/.claude/settings.json points to the script
+      const command = isWin
+        ? `node "${statuslineScriptPath}"`
+        : `bash ${statuslineScriptPath}`
       let settings: Record<string, unknown> = {}
       try {
         settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf-8'))
       } catch { /* file doesn't exist */ }
-      settings.statusLine = { type: 'command', command: `bash ${statuslineScriptPath}` }
+      settings.statusLine = { type: 'command', command }
       writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
 
       return true
@@ -498,6 +504,7 @@ interface CustomComponentDef {
   extract: string
   format: string
   guard?: string
+  extractNode?: string  // JS expression for Windows (custom components)
 }
 
 interface ElementDef {
@@ -763,6 +770,151 @@ function generateStatuslineScript(elements: string[], customComponents?: CustomC
     'done',
     '',
     'echo "$OUTPUT"',
+    '',
+  ].join('\n')
+}
+
+// ── Node.js statusline generator (Windows) ────────────────────────────
+
+interface NodeElementDef {
+  extract: string   // JS code that returns the formatted string (or empty string to skip)
+}
+
+const NODE_ELEMENT_DEFS: Record<string, NodeElementDef> = {
+  model: {
+    extract: `d.model?.display_name ? \`[\${d.model.display_name}]\` : ''`,
+  },
+  rateLimit5h: {
+    extract: `d.rate_limits?.five_hour?.used_percentage != null ? \`5h: \${Math.round(d.rate_limits.five_hour.used_percentage)}%\` : ''`,
+  },
+  rateLimit7d: {
+    extract: `d.rate_limits?.seven_day?.used_percentage != null ? \`7d: \${Math.round(d.rate_limits.seven_day.used_percentage)}%\` : ''`,
+  },
+  resetTime5h: {
+    extract: [
+      `(() => {`,
+      `  const ts = d.rate_limits?.five_hour?.resets_at;`,
+      `  if (!ts) return '';`,
+      `  const diff = ts - Math.floor(Date.now() / 1000);`,
+      `  if (diff <= 0) return '';`,
+      `  const h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60);`,
+      `  return h > 0 ? \`5h reset: \${h}h \${m}m\` : \`5h reset: \${m}m\`;`,
+      `})()`,
+    ].join('\n'),
+  },
+  resetTime7d: {
+    extract: [
+      `(() => {`,
+      `  const ts = d.rate_limits?.seven_day?.resets_at;`,
+      `  if (!ts) return '';`,
+      `  const diff = ts - Math.floor(Date.now() / 1000);`,
+      `  if (diff <= 0) return '';`,
+      `  const days = Math.floor(diff / 86400), h = Math.floor((diff % 86400) / 3600);`,
+      `  return days > 0 ? \`7d reset: \${days}d \${h}h\` : \`7d reset: \${h}h\`;`,
+      `})()`,
+    ].join('\n'),
+  },
+  contextUsage: {
+    extract: `d.context_window?.used_percentage != null ? \`ctx: \${Math.round(d.context_window.used_percentage)}%\` : ''`,
+  },
+  cost: {
+    extract: `d.cost?.total_cost_usd != null ? \`$\${d.cost.total_cost_usd}\` : ''`,
+  },
+  gitBranch: {
+    extract: `d.workspace?.git_branch ? \`⎇ \${d.workspace.git_branch}\` : ''`,
+  },
+  linesChanged: {
+    extract: `(d.cost?.total_lines_added != null && d.cost?.total_lines_removed != null) ? \`+\${d.cost.total_lines_added} -\${d.cost.total_lines_removed}\` : ''`,
+  },
+  inputTokens: {
+    extract: `((t) => t == null ? '' : \`in: \${t >= 1e6 ? (t/1e6).toFixed(1)+'M' : t >= 1e3 ? (t/1e3).toFixed(1)+'k' : t}\`)(d.context_window?.total_input_tokens)`,
+  },
+  outputTokens: {
+    extract: `((t) => t == null ? '' : \`out: \${t >= 1e6 ? (t/1e6).toFixed(1)+'M' : t >= 1e3 ? (t/1e3).toFixed(1)+'k' : t}\`)(d.context_window?.total_output_tokens)`,
+  },
+  totalTokens: {
+    extract: [
+      `(() => {`,
+      `  const i = d.context_window?.total_input_tokens || 0, o = d.context_window?.total_output_tokens || 0;`,
+      `  const t = i + o;`,
+      `  if (t === 0) return '';`,
+      `  return \`tok: \${t >= 1e6 ? (t/1e6).toFixed(1)+'M' : t >= 1e3 ? (t/1e3).toFixed(1)+'k' : t}\`;`,
+      `})()`,
+    ].join('\n'),
+  },
+  cacheReadTokens: {
+    extract: `((t) => !t || t === 0 ? '' : \`cache: \${t >= 1e6 ? (t/1e6).toFixed(1)+'M' : t >= 1e3 ? (t/1e3).toFixed(1)+'k' : t}\`)(d.context_window?.current_usage?.cache_read_input_tokens)`,
+  },
+  contextBar: {
+    extract: [
+      `(() => {`,
+      `  const p = d.context_window?.used_percentage;`,
+      `  if (p == null) return '';`,
+      `  const filled = Math.round(p / 10);`,
+      `  return \`ctx \${'█'.repeat(filled)}\${'░'.repeat(10 - filled)} \${Math.round(p)}%\`;`,
+      `})()`,
+    ].join('\n'),
+  },
+  rateLimitBar5h: {
+    extract: [
+      `(() => {`,
+      `  const p = d.rate_limits?.five_hour?.used_percentage;`,
+      `  if (p == null || p <= 0) return '';`,
+      `  const filled = Math.round(p / 10);`,
+      `  return \`5h \${'█'.repeat(filled)}\${'░'.repeat(10 - filled)} \${Math.round(p)}%\`;`,
+      `})()`,
+    ].join('\n'),
+  },
+  rateLimitBar7d: {
+    extract: [
+      `(() => {`,
+      `  const p = d.rate_limits?.seven_day?.used_percentage;`,
+      `  if (p == null || p <= 0) return '';`,
+      `  const filled = Math.round(p / 10);`,
+      `  return \`7d \${'█'.repeat(filled)}\${'░'.repeat(10 - filled)} \${Math.round(p)}%\`;`,
+      `})()`,
+    ].join('\n'),
+  },
+}
+
+function generateStatuslineScriptNode(elements: string[], customComponents?: CustomComponentDef[]): string {
+  const customMap = new Map<string, CustomComponentDef>()
+  for (const c of customComponents || []) {
+    customMap.set(c.id, c)
+  }
+
+  const extractors: string[] = []
+  for (const id of elements) {
+    const builtIn = NODE_ELEMENT_DEFS[id]
+    if (builtIn) {
+      extractors.push(`  parts.push(${builtIn.extract});`)
+      continue
+    }
+    // Custom components on Windows use JS extract/format (not bash)
+    const custom = customMap.get(id)
+    if (custom?.extractNode) {
+      extractors.push(`  parts.push(${custom.extractNode});`)
+    }
+  }
+
+  return [
+    '#!/usr/bin/env node',
+    '// Auto-generated by session-manager statusline editor',
+    '// Edit via Settings > Statusline — manual changes will be overwritten',
+    '',
+    'let input = "";',
+    'process.stdin.setEncoding("utf8");',
+    'process.stdin.on("data", (chunk) => input += chunk);',
+    'process.stdin.on("end", () => {',
+    '  try {',
+    '    const d = JSON.parse(input);',
+    '    const parts = [];',
+    ...extractors,
+    '    process.stdout.write(parts.filter(Boolean).join(" | "));',
+    '  } catch {',
+    '    process.stdout.write("");',
+    '  }',
+    '});',
     '',
   ].join('\n')
 }
