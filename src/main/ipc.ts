@@ -492,6 +492,130 @@ export function registerIpcHandlers(): void {
       return false
     }
   })
+
+  // ── CLAUDE.md instructions installer ────────────────────────────────
+  const claudeMdPath = join(app.getPath('home'), '.claude', 'CLAUDE.md')
+  const CLAUDE_MD_MARKER = '<!-- session-manager-instructions -->'
+
+  ipcMain.handle('claude:getClaudeMdStatus', () => {
+    try {
+      const content = readFileSync(claudeMdPath, 'utf-8')
+      return { exists: true, hasInstructions: content.includes(CLAUDE_MD_MARKER) }
+    } catch {
+      return { exists: false, hasInstructions: false }
+    }
+  })
+
+  ipcMain.handle('claude:getClaudeMdPreview', () => {
+    return generateClaudeMdInstructions()
+  })
+
+  ipcMain.handle('claude:installClaudeMdInstructions', () => {
+    try {
+      mkdirSync(join(app.getPath('home'), '.claude'), { recursive: true })
+
+      let existing = ''
+      try { existing = readFileSync(claudeMdPath, 'utf-8') } catch { /* doesn't exist */ }
+
+      // Already installed
+      if (existing.includes(CLAUDE_MD_MARKER)) return { ok: true, alreadyInstalled: true }
+
+      const instructions = generateClaudeMdInstructions()
+      const separator = existing.length > 0 && !existing.endsWith('\n\n') ? '\n\n' : ''
+      writeFileSync(claudeMdPath, existing + separator + instructions, 'utf-8')
+      return { ok: true, alreadyInstalled: false }
+    } catch (err) {
+      return { ok: false, error: String(err) }
+    }
+  })
+
+  ipcMain.handle('claude:removeClaudeMdInstructions', () => {
+    try {
+      const content = readFileSync(claudeMdPath, 'utf-8')
+      // Remove from marker start to marker end (inclusive)
+      const startMarker = CLAUDE_MD_MARKER
+      const endMarker = '<!-- /session-manager-instructions -->'
+      const startIdx = content.indexOf(startMarker)
+      const endIdx = content.indexOf(endMarker)
+      if (startIdx === -1 || endIdx === -1) return { ok: true }
+
+      const before = content.slice(0, startIdx).replace(/\n+$/, '')
+      const after = content.slice(endIdx + endMarker.length).replace(/^\n+/, '')
+      const result = before + (before && after ? '\n\n' : '') + after
+      writeFileSync(claudeMdPath, result, 'utf-8')
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: String(err) }
+    }
+  })
+}
+
+// ── CLAUDE.md instructions generator ──────────────────────────────────
+
+function generateClaudeMdInstructions(): string {
+  return `<!-- session-manager-instructions -->
+# Session Manager
+
+The \`session-manager\` MCP server provides a memory knowledge base and session management for Claude Code.
+
+## Memory Knowledge Base
+
+Proactively create and update notes throughout every session. Don't wait to be asked — if you encounter something note-worthy, write it down. Always search notes first (\`search-notes\`) before creating new ones to avoid duplicates.
+
+### Note types
+
+| Type | Purpose |
+|------|---------|
+| \`project\` | Project overview, tech stack, structure |
+| \`decision\` | Why something was built a certain way |
+| \`context\` | Domain knowledge, conventions, business logic |
+| \`reference\` | Pointers to external resources |
+| \`session-log\` | Session activity logs |
+| \`user\` | User preferences, role, collaboration style |
+| \`feedback\` | Corrections and confirmed approaches |
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| \`create-note\` | Create a note with structured sections |
+| \`read-note\` | Read a note by filename |
+| \`edit-note\` | Edit a single section (append/prepend/replace) |
+| \`batch-section-edit\` | Edit multiple sections across multiple notes |
+| \`search-notes\` | Search by content, filename, or both |
+| \`list-notes\` | List all notes, optionally filtered by tag/type |
+| \`delete-note\` | Delete a note (cleans up backlinks) |
+| \`add-tags\` / \`remove-tags\` | Manage tags on notes |
+
+Use \`[[wikilinks]]\` in note content to connect related notes. Backlinks in ## Related are automatic.
+
+## Session Management
+
+### Keyword routing — IMPORTANT
+
+When the user asks to spawn, start, kick off, or create an agent or session, ALWAYS use the session-manager MCP tools — NEVER the built-in Agent tool:
+
+| User says | Use this tool |
+|-----------|---------------|
+| "spawn", "spin up", "start a session", "new session", "kick off" | **spawn-session** |
+| "spawn agent", "run agent", "use the [name] agent" | **spawn-agent** |
+| "message", "tell session", "send to session" | **send-message** |
+| "what's running", "active sessions" | **list-sessions** |
+| "what agents", "available agents" | **list-agents** |
+
+**Why:** Session-manager tracks sessions in a graph view. MCP-spawned sessions are visible, manageable, and can message each other. Built-in Agent subagents are invisible and ephemeral.
+
+**Exception:** The built-in Agent tool is still fine for quick internal searches/exploration that don't need tracking.
+
+### Spawning sessions
+
+Use **spawn-session** to delegate work. The new session appears in the graph view and starts immediately. Include full context in the prompt — it has no conversation history. NEVER include your own session ID — parent ID and messaging instructions are injected automatically.
+
+Use **spawn-agent** to spin up a specialised agent (researcher, debugger, code-reviewer). Use **list-agents** to see what's available.
+
+Use **send-message** to communicate between sessions. Messages are delivered immediately if idle, or queued and auto-delivered when the target finishes its current task.
+<!-- /session-manager-instructions -->
+`
 }
 
 // ── Statusline script generator ───────────────────────────────────────

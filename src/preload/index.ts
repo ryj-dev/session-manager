@@ -216,7 +216,20 @@ const api = {
     const handler = (_event: Electron.IpcRendererEvent, changed: string[]) => callback(changed)
     ipcRenderer.on('memory:changed', handler)
     return (): void => { ipcRenderer.removeListener('memory:changed', handler) }
-  }
+  },
+
+  // CLAUDE.md instructions
+  getClaudeMdStatus: (): Promise<{ exists: boolean; hasInstructions: boolean }> =>
+    ipcRenderer.invoke('claude:getClaudeMdStatus'),
+
+  getClaudeMdPreview: (): Promise<string> =>
+    ipcRenderer.invoke('claude:getClaudeMdPreview'),
+
+  installClaudeMdInstructions: (): Promise<{ ok: boolean; alreadyInstalled?: boolean; error?: string }> =>
+    ipcRenderer.invoke('claude:installClaudeMdInstructions'),
+
+  removeClaudeMdInstructions: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('claude:removeClaudeMdInstructions'),
 }
 
 contextBridge.exposeInMainWorld('api', api)

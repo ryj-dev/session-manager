@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store'
 
@@ -23,10 +23,47 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }
   const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
   const setMessagePopupSeconds = useStore((s) => s.setMessagePopupSeconds)
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
+  const [claudeMdInstalled, setClaudeMdInstalled] = useState<boolean | null>(null)
+  const [claudeMdBusy, setClaudeMdBusy] = useState(false)
+  const [claudeMdPreview, setClaudeMdPreview] = useState<string | null>(null)
 
   useEffect(() => {
     setDirInput(baseProjectsDir || '')
   }, [baseProjectsDir])
+
+  // Check CLAUDE.md status when settings open
+  useEffect(() => {
+    if (!visible) return
+    window.api.getClaudeMdStatus().then((s) => setClaudeMdInstalled(s.hasInstructions))
+  }, [visible])
+
+  const handleClaudeMdClick = useCallback(async () => {
+    if (claudeMdInstalled) {
+      // Remove directly (no preview needed)
+      setClaudeMdBusy(true)
+      try {
+        const result = await window.api.removeClaudeMdInstructions()
+        if (result.ok) setClaudeMdInstalled(false)
+      } finally {
+        setClaudeMdBusy(false)
+      }
+    } else {
+      // Show preview before installing
+      const preview = await window.api.getClaudeMdPreview()
+      setClaudeMdPreview(preview)
+    }
+  }, [claudeMdInstalled])
+
+  const handleClaudeMdConfirm = useCallback(async () => {
+    setClaudeMdBusy(true)
+    try {
+      const result = await window.api.installClaudeMdInstructions()
+      if (result.ok) setClaudeMdInstalled(true)
+    } finally {
+      setClaudeMdBusy(false)
+      setClaudeMdPreview(null)
+    }
+  }, [])
 
   useEffect(() => {
     if (!visible) return
@@ -204,6 +241,37 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }
                   <path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
+
+              {/* CLAUDE.md instructions */}
+              {claudeMdInstalled !== null && (
+                <button
+                  onClick={handleClaudeMdClick}
+                  disabled={claudeMdBusy}
+                  className="w-full flex items-center justify-between px-3 py-2.5 bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 hover:border-zinc-600 rounded-lg transition-colors group disabled:opacity-50"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="text-zinc-400">
+                      <path d="M3 2h8a1 1 0 011 1v8a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2" />
+                      <path d="M4.5 5h5M4.5 7h5M4.5 9h3" stroke="currentColor" strokeWidth="0.8" strokeLinecap="round" />
+                    </svg>
+                    <div>
+                      <span className="text-xs text-zinc-300">CLAUDE.md instructions</span>
+                      <p className="text-[10px] text-zinc-600">
+                        {claudeMdInstalled
+                          ? 'Installed — teaches Claude about memory and session tools'
+                          : 'Add memory and session management instructions to global CLAUDE.md'}
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`text-[10px] px-2 py-0.5 rounded border shrink-0 ${
+                    claudeMdInstalled
+                      ? 'text-emerald-400 border-emerald-800 bg-emerald-950/50'
+                      : 'text-zinc-500 border-zinc-700 bg-zinc-900'
+                  }`}>
+                    {claudeMdBusy ? '...' : claudeMdInstalled ? 'Remove' : 'Install'}
+                  </span>
+                </button>
+              )}
             </div>
 
             <div className="mt-5 flex justify-end">
@@ -212,6 +280,61 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }
                 className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium rounded-lg transition-colors"
               >
                 Close
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+
+      {/* CLAUDE.md preview modal */}
+      {claudeMdPreview && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          className="absolute inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          onClick={() => setClaudeMdPreview(null)}
+        >
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.15 }}
+            className="bg-zinc-900 border border-zinc-700 rounded-xl max-w-2xl w-full mx-4 shadow-2xl flex flex-col max-h-[80vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-zinc-800 shrink-0">
+              <h3 className="text-sm font-medium text-zinc-200">Preview: CLAUDE.md additions</h3>
+              <p className="text-[10px] text-zinc-500 mt-1">
+                The following will be appended to ~/.claude/CLAUDE.md
+              </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-4">
+              <pre className="text-[11px] leading-relaxed font-mono text-emerald-400/80 whitespace-pre-wrap break-words">
+                {claudeMdPreview.split('\n').map((line, i) => (
+                  <div key={i} className="flex">
+                    <span className="text-emerald-700 select-none w-5 shrink-0 text-right mr-3">{line.trim() ? '+' : ''}</span>
+                    <span>{line}</span>
+                  </div>
+                ))}
+              </pre>
+            </div>
+
+            <div className="px-5 py-4 border-t border-zinc-800 shrink-0 flex justify-end gap-2">
+              <button
+                onClick={() => setClaudeMdPreview(null)}
+                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleClaudeMdConfirm}
+                disabled={claudeMdBusy}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded-lg transition-colors disabled:opacity-50"
+              >
+                {claudeMdBusy ? 'Installing...' : 'Install'}
               </button>
             </div>
           </motion.div>
