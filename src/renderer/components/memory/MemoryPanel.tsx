@@ -111,6 +111,20 @@ export default function MemoryPanel({ visible, onClose }: Props) {
     setGraphData(data as GraphData)
   }, [])
 
+  // Escape key: go back to graph from note view
+  useEffect(() => {
+    if (!visible || !selectedNote || editingNote) return
+    const handleKeyDown = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape') return
+      // Don't intercept Escape when an inline section editor is focused
+      if ((e.target as HTMLElement)?.tagName === 'TEXTAREA') return
+      e.preventDefault()
+      handleBackToGraph()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [visible, selectedNote, editingNote, handleBackToGraph])
+
   const handleSidebarMouseEnter = useCallback(() => {
     if (sidebarHideTimer.current) { clearTimeout(sidebarHideTimer.current); sidebarHideTimer.current = null }
     setSidebarOpen(true)
