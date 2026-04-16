@@ -668,11 +668,13 @@ Use \`spawn-session\` to create a new Claude Code session with an initial prompt
   | Value | When to use | Examples |
   |-------|-------------|---------|
   | \`"true"\` | Parent is **waiting on results** to continue its own work | Research questions, investigations, lookups, audits |
+  | \`"done"\` | Parent wants to **know when it finishes** but doesn't need details — child sends a short "\<task\> done." message (e.g. "Schema migration done.") | Build tasks, migrations, "do X then let me know" |
   | \`"optional"\` | The work is **useful to know about** but the parent isn't blocked | Background refactors, routine cleanup, "fix this if you can" |
   | \`"false"\` | The task is **fully self-contained** — fire and forget | Autonomous maintenance, independent feature work the user will review via PR |
 
   **Heuristics:**
   - If the user says "find out", "investigate", "what is", "check whether" → \`"true"\` (they want an answer)
+  - If the user says "do X then let me know", "notify when done" → \`"done"\` (they want a ping, not a report)
   - If the user says "go fix", "handle this", "take care of" → \`"optional"\` (they want it done, report only if interesting)
   - If the user says "just do it", or the task has its own visible output (PR, commit, file) → \`"false"\`
   - When in doubt, default to \`"true"\` — an unnecessary report is low-cost, a missing one is frustrating
