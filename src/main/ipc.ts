@@ -548,35 +548,26 @@ function generateClaudeMdInstructions(): string {
   return `<!-- session-manager-instructions -->
 # Session Manager
 
-The \`session-manager\` MCP server provides a memory knowledge base for storing and retrieving notes, context, and knowledge. It also manages Claude Code sessions — spawning, listing, and inter-session messaging. **Session-manager tools are auto-allowed — do not ask the user for permission before creating, reading, or editing notes. Just do it.**
+The \`session-manager\` MCP server is (1) a memory knowledge base (notes with wikilinks) and (2) a Claude Code session manager (spawn, list, inter-session messaging). **All session-manager tools are auto-allowed — never ask permission before using them.**
 
-## Search Memory First
+## Search memory first
 
-**Before investigating ANY topic** — whether it's a project, a bug, a tool, an architecture question, or anything else — **always search memory notes first**.
+Before investigating any topic — project, bug, tool, architecture — run \`search-notes\` first. Useful context almost certainly already exists. Only fall back to code / filesystem / web search after memory comes up empty.
 
-### Investigation order (mandatory)
+## Memory knowledge base
 
-1. **Search session-manager notes** (\`search-notes\`) — by filename and content
-2. **Only then** fall back to code exploration, file searches, web searches, or filesystem browsing
+### When to write notes
 
-Do NOT skip to step 2. Assume useful context already exists in memory. This applies to every task, not just memory-related ones.
+**Proactively.** If you encounter something note-worthy, write it down immediately — don't wait to be asked. This is YOUR memory; you control it. Bias toward writing: a low-value note can be deleted, but lost knowledge cannot be recovered. Write for:
 
-## Memory Knowledge Base
+- Findings, decisions, root-cause analyses — what was tried and why
+- Architectural decisions and trade-offs
+- Domain knowledge, business logic, conventions, terminology
+- Project overviews, tech stack, patterns, gotchas discovered while coding
+- External references (API docs, dashboards, deployment info)
+- Anything the user asks you to remember
 
-### When to create memories
-
-**Proactively** create or update notes throughout every session. Do NOT wait for the user to ask — if you encounter something note-worthy, write it down immediately. This is YOUR memory, not the user's — you control it. Create your own memories when you feel it is appropriate. Do NOT ask permission, it is already auto-allowed. Create notes for:
-
-- **Findings and decisions**: Any decision made during a session, investigation results, root cause analyses, what was tried and why
-- **Cross-project knowledge**: Relationships, shared patterns, or dependencies between projects
-- **Architectural decisions**: Why something was built a certain way, trade-offs considered
-- **Domain knowledge**: Business logic, terminology, workflows
-- **Project context**: High-level summaries, key patterns, tech stack details
-- **Useful references**: External resources, API docs, deployment info
-- **Implementation details**: Notable patterns, gotchas, or workarounds discovered while working on code
-- **Anything the user asks you to remember**
-
-**Bias toward writing notes.** When in doubt, create the note. A note that turns out to be low-value can be deleted later; knowledge lost because you didn't write it down cannot be recovered.
+**Never store** secrets, tokens, credentials, or ephemeral task state.
 
 ### Note types
 
@@ -592,112 +583,54 @@ Do NOT skip to step 2. Assume useful context already exists in memory. This appl
 
 ### Note structure
 
-Every note has: H1 title, optional summary paragraph, then \`## sections\` in this order:
-- **## Context** — Background, motivation, constraints
-- **## Details** — Main content (free-form markdown)
-- **## Outcome** — Conclusions, decisions, results
-- **## Related** — Auto-managed \`[[wikilinks]]\` (do NOT edit manually)
+H1 title, optional summary, then \`##\` sections in order: **Context** (background) → **Details** (main content) → **Outcome** (conclusions) → **Related** (auto-managed \`[[wikilinks]]\` — never edit manually). Not all sections required. \`create-note\` scaffolds the right ones per type.
 
-Not all sections are required. Use \`create-note\` with the appropriate type and it will scaffold the right sections.
+### Wikilinks and backlinks
 
-### Tools reference
+\`[[note-b]]\` resolves by **filename** without the \`.md\` extension, not by title — \`[[my-note]]\` links to \`my-note.md\`. Backlinks are automatic: adding a link on one side updates both.
+
+### Tools
 
 | Tool | Purpose |
 |------|---------|
-| \`create-note\` | Create a new note. Sections auto-generated based on type |
-| \`read-note\` | Read a note by filename |
-| \`edit-note\` | Edit a single \`## Section\` of a note (\`append\`, \`prepend\`, \`replace\`) |
-| \`batch-section-edit\` | Edit multiple sections across multiple notes in one call |
-| \`search-notes\` | Search notes by content, filename, or both |
-| \`list-notes\` | List all notes, optionally filtered by tag or type |
-| \`delete-note\` | Delete a note (refuses if referenced unless \`force=true\`) |
-| \`add-tags\` / \`remove-tags\` | Manage note tags |
-| \`repair-related\` | Rebuild \`## Related\` section from wikilink scan |
+| \`create-note\` | New note; sections scaffolded by type |
+| \`read-note\` / \`search-notes\` / \`list-notes\` | Read / full-text search / filter by tag or type |
+| \`edit-note\` | Edit one \`## Section\` (\`append\`, \`prepend\`, \`replace\`) |
+| \`batch-section-edit\` | Multiple sections across multiple notes in one call |
+| \`delete-note\` | Refuses if referenced unless \`force=true\` |
+| \`add-tags\` / \`remove-tags\` | Manage tags |
+| \`repair-related\` | Rebuild \`## Related\` from a wikilink scan |
 
-### Before creating a note
+**Before creating a note: always \`search-notes\` first** and update an existing note rather than creating a duplicate.
 
-- **Always search first** (\`search-notes\`) to check if a note on the same topic already exists
-- **Update the existing note** rather than creating a duplicate
+## Session management
 
-### Back-links are automatic
+### CRITICAL: use spawn-session / spawn-agent, NOT the built-in Agent tool
 
-When you add \`[[note-b]]\` to a note, the MCP server automatically adds the reverse link. No need to manually update both sides. Wikilinks are resolved by **filename** (without the \`.md\` extension), not by note title — e.g. \`[[my-note]]\` links to \`my-note.md\`.
+**When the user asks to spawn, spin up, kick off, launch, start, fire up, run, create, or send an agent or session — ALWAYS use \`spawn-agent\` or \`spawn-session\` (MCP), never the built-in \`Agent\` tool.** Same rule if they name an agent type ("research agent", "code review agent") or describe delegation to a separate Claude Code session.
 
-### Do NOT store
-
-- Secrets, tokens, or credentials
-- Ephemeral debugging context or temporary task state
-
-## Session Management
-
-### CRITICAL: spawn-agent / spawn-session vs built-in Agent tool
-
-**When the user asks you to spawn, spin up, kick off, launch, start, or create an agent or session, ALWAYS use the session-manager MCP tools (\`spawn-agent\` or \`spawn-session\`), NOT the built-in \`Agent\` subagent tool.**
-
-Trigger phrases that MUST use session-manager MCP tools:
-- "spin up a/an ... agent/session"
-- "spawn a/an ... agent/session"
-- "kick off a/an ... agent/session"
-- "launch a/an ... agent/session"
-- "start a/an ... agent/session"
-- "create a/an ... agent/session"
-- "run a/an ... agent/session"
-- Any reference to a named agent type (e.g., "research agent", "code review agent")
-- Any request involving delegation to a separate Claude Code session
-
-**Decision rule:**
-
-| Scenario | Tool to use |
-|----------|-------------|
-| User asks to spawn/spin up/launch an agent or session | \`spawn-agent\` or \`spawn-session\` (MCP) |
-| User references a named agent type (research, review, etc.) | \`list-agents\` then \`spawn-agent\` (MCP) |
-| User wants work done in a separate terminal/session | \`spawn-session\` (MCP) |
-| User wants to delegate work that reports back | \`spawn-session\` (MCP) |
-| You autonomously decide to parallelise internal subtasks (no user request to "spawn" anything) | Built-in \`Agent\` tool is acceptable |
-| Simple codebase search/exploration as part of your own workflow | Built-in \`Agent\` tool is acceptable |
-
-**The built-in \`Agent\` tool is an internal implementation detail for your own workflow.** When the user explicitly asks for an agent or session, they mean a real Claude Code session managed by session-manager — one that appears in the graph view, can receive messages, and persists independently.
+The built-in \`Agent\` tool is an internal implementation detail — fine when YOU decide to parallelise your own work (codebase searches, etc.), but user-requested agents/sessions must be real sessions that appear in the graph, can receive messages, and persist.
 
 ### Spawning sessions
 
-Use \`spawn-session\` to create a new Claude Code session with an initial prompt. The session appears in the graph view and starts working immediately.
+\`spawn-session\` creates a new Claude Code session with an initial prompt — appears in the graph, starts immediately. **Include full context** (no conversation history is inherited). **Never put your own session ID in the prompt** — it is appended automatically. Optional \`allowedTools\` restricts the child's tools (e.g., \`["Read", "Edit", "Bash"]\`).
 
-- **Include full context** — the new session has no conversation history
-- **Never include your own session ID** in the prompt — it is appended automatically
-- \`reportBack\` controls whether the child reports findings to the parent. **Choose intelligently based on the task:**
+\`reportBack\` controls what the child sends back:
 
-  | Value | When to use | Examples |
-  |-------|-------------|---------|
-  | \`"true"\` | Parent is **waiting on results** to continue its own work | Research questions, investigations, lookups, audits |
-  | \`"done"\` | Parent wants to **know when it finishes** but doesn't need details — child sends a short "\<task\> done." message (e.g. "Schema migration done.") | Build tasks, migrations, "do X then let me know" |
-  | \`"optional"\` | The work is **useful to know about** but the parent isn't blocked | Background refactors, routine cleanup, "fix this if you can" |
-  | \`"false"\` | The task is **fully self-contained** — fire and forget | Autonomous maintenance, independent feature work the user will review via PR |
+| Value | Meaning | Pick when user says… |
+|-------|---------|----------------------|
+| \`"true"\` | Parent is waiting on results | "find out", "investigate", "what is", "check whether" |
+| \`"done"\` | Parent wants a ping when finished, no details — child sends a short "\<task\> done." | "do X then let me know", "notify when done" |
+| \`"optional"\` | Useful to know; parent isn't blocked | "go fix", "handle this", "take care of" |
+| \`"false"\` | Fire-and-forget; output visible elsewhere (PR, file) | "just do it" |
 
-  **Heuristics:**
-  - If the user says "find out", "investigate", "what is", "check whether" → \`"true"\` (they want an answer)
-  - If the user says "do X then let me know", "notify when done" → \`"done"\` (they want a ping, not a report)
-  - If the user says "go fix", "handle this", "take care of" → \`"optional"\` (they want it done, report only if interesting)
-  - If the user says "just do it", or the task has its own visible output (PR, commit, file) → \`"false"\`
-  - When in doubt, default to \`"true"\` — an unnecessary report is low-cost, a missing one is frustrating
+When in doubt, default to \`"true"\` — an unnecessary report is low-cost; a missing one is frustrating.
 
-- Optionally restrict tools with \`allowedTools\` (e.g., \`["Read", "Write", "Edit", "Bash"]\`)
+### Other session tools
 
-### Spawning agents
-
-Use \`list-agents\` to see available specialised agents, then \`spawn-agent\` to spawn one. Agents have predefined tool sets and system prompts tailored to their specialisation.
-
-### Listing sessions
-
-Use \`list-sessions\` to see all active Claude Code sessions — their IDs, project paths, status, and terminal titles. Use this to discover sessions for messaging.
-
-### Inter-session messaging
-
-Sessions can communicate with each other via \`send-message\`:
-
-- If the target session is **idle**, the message is delivered immediately as a new prompt
-- If the target session is **busy**, the message is queued and delivered when it finishes its current task
-- **Child sessions can message their parent** for additional context if needed — the parent session ID is automatically available
-- Use this for coordination: reporting results back, requesting clarification, or passing discovered context between related sessions
+- \`spawn-agent\` — spawn a specialised agent. Run \`list-agents\` first to see what's available and their tool sets.
+- \`list-sessions\` — all active sessions (IDs, project paths, status, terminal titles). Use before messaging.
+- \`send-message\` — message another session. Delivered immediately if the target is idle, queued if busy. Child sessions can message their parent — the parent ID is available automatically.
 <!-- /session-manager-instructions -->
 `
 }
