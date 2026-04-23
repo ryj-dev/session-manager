@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState } from 'react'
 import type { Simulation } from 'd3-force'
+import { forceX, forceY } from 'd3-force'
 import {
   createHubSimulation,
   computeSpokeOffsets,
@@ -200,6 +201,13 @@ export function useSimulation(width: number, height: number): SimulationResult {
     if (!spokesSettled || hubActive) {
       rafRef.current = requestAnimationFrame(() => tickRef.current())
     } else {
+      // Pin hubs at their settled positions so future low-alpha ticks
+      // (triggered by unrelated sessions-array mutations) can't nudge them.
+      // Unpinned again only when a hub is added or removed.
+      for (const hub of hubNodes) {
+        hub.fx = hub.x ?? null
+        hub.fy = hub.y ?? null
+      }
       animatingRef.current = false
     }
   }
@@ -212,10 +220,11 @@ export function useSimulation(width: number, height: number): SimulationResult {
     rafRef.current = requestAnimationFrame(() => tickRef.current())
   }
 
-  // ── Initialize hub simulation ──────────────────────────────────────
+  // ── Initialize hub simulation (once) ───────────────────────────────
 
   useEffect(() => {
     if (width === 0 || height === 0) return
+    if (hubSimRef.current) return
 
     const sim = createHubSimulation(width, height)
     hubSimRef.current = sim
@@ -223,9 +232,19 @@ export function useSimulation(width: number, height: number): SimulationResult {
 
     return () => {
       sim.stop()
+      hubSimRef.current = null
       animatingRef.current = false
       cancelAnimationFrame(rafRef.current)
     }
+  }, [width, height])
+
+  // ── Update centering forces when size changes, without rebuilding the
+  // simulation (which would re-jiggle hub positions).
+  useEffect(() => {
+    const sim = hubSimRef.current
+    if (!sim || width === 0 || height === 0) return
+    sim.force('centerX', forceX(width / 2).strength(0.08))
+    sim.force('centerY', forceY(height / 2).strength(0.08))
   }, [width, height])
 
   // ── Sync sessions → hub nodes + spoke springs ─────────────────────
@@ -234,7 +253,9 @@ export function useSimulation(width: number, height: number): SimulationResult {
     const sim = hubSimRef.current
     if (!sim || width === 0 || height === 0) return
 
-    // Group sessions by project
+    // Group sessions by project. Sort session ids deterministically so their
+    // spoke slot assignment doesn't shift if the sessions array order changes
+    // (e.g. from status updates after a display wake).
     const groups = new Map<string, { projectName: string; sessionIds: string[] }>()
     for (const s of sessions) {
       const existing = groups.get(s.projectPath)
@@ -243,6 +264,9 @@ export function useSimulation(width: number, height: number): SimulationResult {
       } else {
         groups.set(s.projectPath, { projectName: s.projectName, sessionIds: [s.id] })
       }
+    }
+    for (const group of groups.values()) {
+      group.sessionIds.sort()
     }
 
     // Sync hub nodes
@@ -329,9 +353,17 @@ export function useSimulation(width: number, height: number): SimulationResult {
     const hadCachedPositions = newHubNodes.some((h) => hubPositionCache.has(h.id))
     prevSessionCountRef.current = sessions.length
 
-    if (countChanged || hubCountChanged) {
-      // Gentle nudge if restoring from cache, full reheat if new layout
+    if (hubCountChanged) {
+      // Layout genuinely needs to change — unpin so hubs can re-solve,
+      // then reheat.
+      for (const h of newHubNodes) {
+        h.fx = null
+        h.fy = null
+      }
       sim.alpha(hadCachedPositions ? 0.05 : 0.3)
+    } else if (countChanged) {
+      // Same projects, different spoke counts — nudge, don't uproot.
+      sim.alpha(0.05)
     }
 
     startAnimation()

@@ -91,10 +91,22 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
-  // Forward Escape key from any frame (including cross-origin iframes) to the renderer
+  // Forward Escape key from any frame (including cross-origin iframes) to the renderer,
+  // and intercept the DevTools toggle shortcut before the app's hotkey handler swallows it.
   mainWindow.webContents.on('before-input-event', (_event, input) => {
-    if (input.key === 'Escape' && input.type === 'keyDown') {
+    if (input.type !== 'keyDown') return
+    if (input.key === 'Escape') {
       mainWindow?.webContents.send('global:escape')
+      return
+    }
+    const isMac = process.platform === 'darwin'
+    const keyI = input.key.toLowerCase() === 'i'
+    const devToolsCombo =
+      (isMac && input.meta && input.alt && keyI) ||
+      (!isMac && input.control && input.shift && keyI) ||
+      input.key === 'F12'
+    if (devToolsCombo) {
+      mainWindow?.webContents.toggleDevTools()
     }
   })
 
@@ -154,11 +166,20 @@ app.whenReady().then(async () => {
           { role: 'paste' }
           // selectAll intentionally omitted — Cmd+A is used for the agents panel
         ]
+      },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'toggleDevTools' },
+          { role: 'reload' },
+          { role: 'forceReload' }
+        ]
       }
     ]))
   } else {
     // Windows/Linux: remove the menu entirely so Alt keypresses reach the renderer
-    // (Ctrl+C/V/X work natively on these platforms without a menu)
+    // (Ctrl+C/V/X work natively on these platforms without a menu).
+    // Register DevTools globally on the window so F12 / Ctrl+Shift+I still works.
     Menu.setApplicationMenu(null)
   }
 

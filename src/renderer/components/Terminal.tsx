@@ -22,6 +22,47 @@ const terminalInstances = new Map<
 // flag getting corrupted by fit() reflows or other stray scroll events.
 const stickyScrollState = new Map<string, { userScrolledUp: boolean }>()
 
+// Tracks when each terminal has performed its first render (i.e. the canvas
+// has actual content). Used by snapshot capture to fire on the exact paint,
+// avoiding timer-based guessing.
+const terminalReadyState = new Map<string, { ready: boolean; waiters: Array<() => void> }>()
+
+export function onTerminalReady(sessionId: string, cb: () => void): () => void {
+  let state = terminalReadyState.get(sessionId)
+  if (!state) {
+    state = { ready: false, waiters: [] }
+    terminalReadyState.set(sessionId, state)
+  }
+  if (state.ready) {
+    queueMicrotask(cb)
+    return () => {}
+  }
+  state.waiters.push(cb)
+  return () => {
+    const s = terminalReadyState.get(sessionId)
+    if (!s) return
+    s.waiters = s.waiters.filter((w) => w !== cb)
+  }
+}
+
+function markTerminalReady(sessionId: string): void {
+  let state = terminalReadyState.get(sessionId)
+  if (!state) {
+    state = { ready: true, waiters: [] }
+    terminalReadyState.set(sessionId, state)
+    return
+  }
+  if (state.ready) return
+  state.ready = true
+  const waiters = state.waiters
+  state.waiters = []
+  for (const w of waiters) w()
+}
+
+export function clearTerminalReady(sessionId: string): void {
+  terminalReadyState.delete(sessionId)
+}
+
 export function getTerminalCanvas(sessionId: string): HTMLCanvasElement | null {
   const instance = terminalInstances.get(sessionId)
   if (!instance) return null
@@ -289,11 +330,32 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
 
       // Listen for PTY data — after each write, force scroll-to-bottom unless
       // user has scrolled up. This bypasses xterm's _isUserScrolling entirely.
+      // The write() callback fires after xterm has parsed AND rendered the
+      // chunk, so it doubles as our "terminal has painted real content"
+      // signal — fire the ready event exactly once on the first write.
+      // Fire the "ready" signal once the data burst has settled — the first
+      // chunk from a resumed PTY is often just a cursor-position report or a
+      // tiny ack; the real screen content arrives in follow-up writes. We
+      // restart a short debounce on every chunk and fire when it's quiet.
+      // Fire the "ready" signal once the data burst has settled — the first
+      // chunk from a resumed PTY is often just a cursor-position report or a
+      // tiny ack; the real screen content arrives in follow-up writes. We
+      // restart a short debounce on every chunk and fire when it's quiet.
+      let readyTimer: ReturnType<typeof setTimeout> | null = null
+      let readyFired = false
+      const READY_DEBOUNCE_MS = 400
       const unsubPtyData = window.api.onPtyData(sessionId, (data) => {
         term.write(data, () => {
           if (!scrollInfo.userScrolledUp) {
             term.scrollToBottom()
           }
+          if (readyFired) return
+          if (readyTimer) clearTimeout(readyTimer)
+          readyTimer = setTimeout(() => {
+            readyTimer = null
+            readyFired = true
+            markTerminalReady(sessionId)
+          }, READY_DEBOUNCE_MS)
         })
       })
 
@@ -343,6 +405,7 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       term.onTitleChange((title) => {
         onTitleChangeRef.current?.(title)
       })
+
 
 
       // Initial fit — always attempt even when off-screen (container has real

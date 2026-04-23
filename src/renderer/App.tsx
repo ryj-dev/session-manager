@@ -12,7 +12,7 @@ import { AgentGallery } from './components/AgentGallery'
 import { SkillsGallery } from './components/SkillsGallery'
 import MemoryPanel from './components/memory/MemoryPanel'
 import { MessagePopup } from './components/MessagePopup'
-import { getTerminalCanvas, disposeTerminal, focusTerminal } from './components/Terminal'
+import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
 import { Terminal } from './components/Terminal'
 import { useDesigns } from './hooks/useDesigns'
 import { useAgents } from './hooks/useAgents'
@@ -87,7 +87,8 @@ export function App(): JSX.Element {
 
   // Track last data received per session for idle detection
   const lastDataRef = useRef<Map<string, number>>(new Map())
-  const firstSnapshotTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // Sessions we've already registered a first-snapshot listener for
+  const firstSnapshotSubs = useRef<Set<string>>(new Set())
   // Reuse offscreen canvases for snapshot capture to avoid GC churn
   const snapshotCanvases = useRef<Map<string, HTMLCanvasElement>>(new Map())
 
@@ -143,7 +144,7 @@ export function App(): JSX.Element {
         // Force screen redraws so recovered terminals aren't blank.
         // After renderer crash, new xterm instances have no scrollback.
         // Nudging the PTY size triggers SIGWINCH → the running process redraws.
-        // Timeline: 500ms (terminals mount) → resize → 50ms → restore → 1500ms (data arrives + WebGL renders) → snapshot
+        // Once it renders, the onTerminalReady effect captures the snapshot.
         setTimeout(() => {
           for (const s of active) {
             window.api.resizeSession(s.id, 119, 30)
@@ -152,13 +153,6 @@ export function App(): JSX.Element {
             for (const s of active) {
               window.api.resizeSession(s.id, 120, 30)
             }
-            // Capture snapshots after data has arrived and WebGL has rendered.
-            // This is the only snapshot these idle/seen sessions need.
-            setTimeout(() => {
-              for (const s of active) {
-                captureSnapshot(s.id)
-              }
-            }, 1500)
           }, 50)
         }, 500)
 
@@ -403,6 +397,8 @@ export function App(): JSX.Element {
       selectNextAfterRemoval(sessionId)
       removeSession(sessionId)
       snapshotCanvases.current.delete(sessionId)
+      firstSnapshotSubs.current.delete(sessionId)
+      clearTerminalReady(sessionId)
       setFocusedSessionId(null)
       setViewMode('graph')
     },
@@ -571,6 +567,8 @@ export function App(): JSX.Element {
           removeSession(id)
           disposeTerminal(id)
           snapshotCanvases.current.delete(id)
+          firstSnapshotSubs.current.delete(id)
+          clearTerminalReady(id)
           if (stillViewing) {
             setFocusedSessionId(null)
             setViewMode('graph')
@@ -583,6 +581,8 @@ export function App(): JSX.Element {
         removeSession(id)
         disposeTerminal(id)
         snapshotCanvases.current.delete(id)
+        firstSnapshotSubs.current.delete(id)
+        clearTerminalReady(id)
       }
     })
     return unsubscribe
@@ -633,26 +633,27 @@ export function App(): JSX.Element {
     return unsubscribe
   }, [updateSessionStatus, captureSnapshot])
 
-  // Track last data time for idle detection + eagerly capture first snapshot
+  // Track last data time for idle detection
   useEffect(() => {
     const unsubscribe = window.api.onPtyActivity((id) => {
       lastDataRef.current.set(id, Date.now())
-      const session = useStore.getState().sessions.find((s) => s.id === id)
-      if (!session) return
-
-      // Eagerly capture first snapshot: debounce so we capture after the initial
-      // data burst settles and WebGL has had time to render.
-      if (!session.snapshot) {
-        const prev = firstSnapshotTimers.current.get(id)
-        if (prev) clearTimeout(prev)
-        firstSnapshotTimers.current.set(id, setTimeout(() => {
-          firstSnapshotTimers.current.delete(id)
-          captureSnapshot(id)
-        }, 500))
-      }
     })
     return unsubscribe
-  }, [captureSnapshot])
+  }, [])
+
+  // Capture the first snapshot the moment a terminal paints for the first time.
+  // onTerminalReady fires from xterm's write callback — no timer guesswork, and
+  // if the terminal is already rendered when we subscribe, it fires immediately.
+  useEffect(() => {
+    for (const session of sessions) {
+      if (session.snapshot) continue
+      if (firstSnapshotSubs.current.has(session.id)) continue
+      firstSnapshotSubs.current.add(session.id)
+      onTerminalReady(session.id, () => {
+        requestAnimationFrame(() => captureSnapshot(session.id))
+      })
+    }
+  }, [sessions, captureSnapshot])
 
   // Snapshot capture loop (only in graph view, only when sessions are active)
   useEffect(() => {

@@ -70,9 +70,25 @@ export function GraphView(): JSX.Element {
   const hotkeys = useStore((s) => s.hotkeys)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // Track container size so the simulation re-centers on window resize.
+  // Reading clientWidth directly during render would go stale (React doesn't
+  // re-render just because the window resized), so we subscribe explicitly.
+  const [size, setSize] = useState({ width: 0, height: 0 })
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const update = (): void => {
+      setSize({ width: el.clientWidth, height: el.clientHeight })
+    }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   const { hubs, spokes, edges, contentBounds, nudge } = useSimulation(
-    containerRef.current?.clientWidth ?? 800,
-    containerRef.current?.clientHeight ?? 600
+    size.width || 800,
+    size.height || 600
   )
 
   // ── Viewport: auto-fit from content bounds, overridable by wheel zoom ──
