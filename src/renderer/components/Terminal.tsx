@@ -3,6 +3,8 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
+import { useStore } from '../store'
+import { comboFromEvent } from '../lib/hotkeys'
 
 interface TerminalProps {
   sessionId: string
@@ -262,10 +264,18 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
       if (!isMac) {
         term.attachCustomKeyEventHandler((e) => {
           if (e.type !== 'keydown') return true
-          // Block all Alt+key combos from reaching the PTY — Alt is the app's
-          // hotkey modifier on Windows/Linux (like Cmd on Mac), so these should
-          // never be forwarded as terminal escape sequences.
-          if (e.altKey && e.key !== 'Alt') return false
+          // Block Alt+key combos that match a configured app hotkey so they
+          // don't double-fire as terminal escape sequences (e.g. Alt+T would
+          // otherwise reach Claude as "toggle thinking"). Unbound Alt combos
+          // (like Alt+V for Claude Code's image paste) pass through.
+          if (e.altKey && e.key !== 'Alt') {
+            const combo = comboFromEvent(e)
+            if (combo) {
+              const hotkeys = useStore.getState().hotkeys
+              const bound = new Set<string>([...Object.values(hotkeys), 'q', 'shift+w'])
+              if (bound.has(combo)) return false
+            }
+          }
           if (e.ctrlKey && e.key === 'c' && term.hasSelection()) {
             navigator.clipboard.writeText(term.getSelection())
             term.clearSelection()
