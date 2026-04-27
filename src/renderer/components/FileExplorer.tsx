@@ -98,7 +98,7 @@ export function FileExplorer({
       const meta = e.metaKey || e.ctrlKey
 
       // Cmd+Opt+C — copy selected entry path (or current directory if nothing selected)
-      if (meta && e.altKey && e.key === 'c') {
+      if (meta && e.altKey && e.code === 'KeyC') {
         e.preventDefault()
         const pathToCopy = entries[selectedIndex]?.path || currentPath
         navigator.clipboard.writeText(pathToCopy)
