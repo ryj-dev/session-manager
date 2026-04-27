@@ -13,6 +13,8 @@ export interface HotkeyMap {
   toggleDesign: string
   openSettings: string
   toggleMemory: string
+  toggleNotesProject: string
+  toggleNotesGlobal: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -24,7 +26,9 @@ export const defaultHotkeys: HotkeyMap = {
   toggleSkills: 's',
   toggleDesign: 'd',
   openSettings: 'o',
-  toggleMemory: 'm'
+  toggleMemory: 'm',
+  toggleNotesProject: 'n',
+  toggleNotesGlobal: 'shift+n',
 }
 
 export type MessagePopupMode = 'manual' | 'timed' | 'disabled'
@@ -37,6 +41,9 @@ export interface AppSettings {
   hotkeys: HotkeyMap
   messagePopup: MessagePopupMode
   messagePopupSeconds: number
+  notesShowInactive?: boolean
+  notesProjectViewDefault?: 'project' | 'global'
+  notesZoom?: number
 }
 
 const defaults: AppSettings = {
@@ -46,7 +53,10 @@ const defaults: AppSettings = {
   explorerFollowsProject: true,
   hotkeys: { ...defaultHotkeys },
   messagePopup: 'manual',
-  messagePopupSeconds: 15
+  messagePopupSeconds: 15,
+  notesShowInactive: false,
+  notesProjectViewDefault: 'project',
+  notesZoom: 1.15,
 }
 
 function getSettingsPath(): string {

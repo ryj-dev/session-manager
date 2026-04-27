@@ -12,11 +12,12 @@ import {
   getAllSessions,
   getActiveSessions,
   updateSessionTitle,
+  onClaudeSessionIdChange,
   TITLE_INDICATOR_RE,
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSettings, saveSettings, type AppSettings } from './settings-store'
 import {
@@ -38,6 +39,8 @@ import {
 } from './memory/index'
 import { syncBacklinks, getInboundLinks, cleanupRefsBeforeDelete, addToRelatedSection, filenameToWikilink } from './memory/backlinks'
 import { validateNote, slugify, generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/core'
+import * as notesManager from './notes-manager'
+import type { TodoStatus } from './notes-manager'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -77,6 +80,11 @@ export function registerIpcHandlers(): void {
   // Register the attach-listeners callback for hook-server spawned sessions
   setAttachListeners((id, session) => attachSessionListeners(id, session))
 
+  // Broadcast Claude session ID changes to the renderer so the store can update.
+  onClaudeSessionIdChange((id, claudeSessionId) => {
+    sendToRenderer('session:claudeId', { id, claudeSessionId })
+  })
+
   // Spawn a new PTY session
   ipcMain.handle(
     'pty:spawn',
@@ -94,7 +102,7 @@ export function registerIpcHandlers(): void {
         const session = spawnSession(id, cwd, command, finalArgs)
         console.log('[main] session spawned:', id)
         attachSessionListeners(id, session)
-        return { id, projectPath: cwd }
+        return { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null }
       } catch (err) {
         console.error('[main] spawn failed:', err)
         throw err
@@ -111,7 +119,7 @@ export function registerIpcHandlers(): void {
       // Pre-set the claude session ID since we already know it
       session.claudeSessionId = claudeSessionId
       attachSessionListeners(id, session)
-      return { id, projectPath }
+      return { id, projectPath, claudeSessionId }
     }
   )
 
@@ -416,6 +424,78 @@ export function registerIpcHandlers(): void {
     return resolveWikilink(link)
   })
 
+  // ── Notes & Todo lists ─────────────────────────────────────────────────
+
+  ipcMain.handle('notes:listProjects', () => notesManager.listProjects())
+  ipcMain.handle('notes:listProjectsDetailed', () => notesManager.listProjectsDetailed())
+  ipcMain.handle('notes:listEntries', () => notesManager.listAllEntries())
+  ipcMain.handle('notes:listDirs', () => notesManager.listAllDirs())
+
+  ipcMain.handle('notes:readNote', (_e, relPath: string) => notesManager.readNote(relPath))
+  ipcMain.handle('notes:writeNote', (_e, relPath: string, content: string) => {
+    notesManager.writeNote(relPath, content)
+  })
+
+  ipcMain.handle('notes:readTodoList', (_e, relPath: string) => notesManager.readTodoList(relPath))
+
+  ipcMain.handle(
+    'notes:createNote',
+    (_e, opts: { project: string | null; subdir?: string[]; name: string; kind: 'note' | 'todo-list'; content?: string }) =>
+      notesManager.createNote(opts)
+  )
+
+  ipcMain.handle(
+    'notes:createDir',
+    (_e, project: string | null, subdirParts: string[]) => notesManager.createDir(project, subdirParts)
+  )
+
+  ipcMain.handle('notes:move', (_e, fromRel: string, toRel: string) => {
+    notesManager.moveEntry(fromRel, toRel)
+  })
+
+  ipcMain.handle('notes:delete', (_e, relPath: string) => {
+    notesManager.deleteEntry(relPath)
+  })
+
+  ipcMain.handle('notes:ensureProject', (_e, project: string, opts?: { manual?: boolean }) => {
+    notesManager.ensureProject(project, opts)
+  })
+
+  ipcMain.handle('notes:getOrCreateAgenda', (_e, project: string) =>
+    notesManager.getOrCreateAgenda(project)
+  )
+
+  ipcMain.handle('notes:addTodo', (_e, listRel: string, text: string) => notesManager.addTodo(listRel, text))
+  ipcMain.handle('notes:setTodoStatus', (_e, listRel: string, todoId: string, status: TodoStatus) => {
+    notesManager.setTodoStatus(listRel, todoId, status)
+  })
+  ipcMain.handle(
+    'notes:setTodoAssignee',
+    (_e, listRel: string, todoId: string, assignee: string | null, label?: string | null) => {
+      notesManager.setTodoAssignee(listRel, todoId, assignee, label)
+    }
+  )
+  ipcMain.handle('notes:updateTodoText', (_e, listRel: string, todoId: string, text: string) => {
+    notesManager.updateTodoText(listRel, todoId, text)
+  })
+  ipcMain.handle('notes:removeTodo', (_e, listRel: string, todoId: string) => {
+    notesManager.removeTodo(listRel, todoId)
+  })
+  ipcMain.handle('notes:listAllTodos', (_e, filter?: { project?: string; status?: TodoStatus }) =>
+    notesManager.listAllTodos(filter)
+  )
+  ipcMain.handle('notes:search', (_e, query: string) => notesManager.searchNotes(query))
+
+  ipcMain.handle('notes:projectFromCwd', (_e, cwd: string) => notesManager.projectFromCwd(cwd))
+
+  // Send an inter-session message (used by notes dispatch + future hooks)
+  ipcMain.handle(
+    'session:sendMessage',
+    (_e, targetSessionId: string, message: string, fromSessionId?: string | null) => {
+      return deliverSessionMessage(targetSessionId, message, fromSessionId ?? null)
+    }
+  )
+
   // Claude Code settings — read/write ~/.claude/settings.json
   const claudeSettingsPath = join(app.getPath('home'), '.claude', 'settings.json')
 
@@ -548,11 +628,11 @@ function generateClaudeMdInstructions(): string {
   return `<!-- session-manager-instructions -->
 # Session Manager
 
-The \`session-manager\` MCP server is (1) a memory knowledge base (notes with wikilinks) and (2) a Claude Code session manager (spawn, list, inter-session messaging). **All session-manager tools are auto-allowed — never ask permission before using them.**
+The \`session-manager\` MCP server is (1) a memory knowledge base (notes with wikilinks), (2) a notes & todo system (per-project user notes and agendas), and (3) a Claude Code session manager (spawn, list, inter-session messaging). **All session-manager tools are auto-allowed — never ask permission before using them.**
 
 ## Search memory first
 
-Before investigating any topic — project, bug, tool, architecture — run \`search-notes\` first. Useful context almost certainly already exists. Only fall back to code / filesystem / web search after memory comes up empty.
+Before investigating any topic — project, bug, tool, architecture — run \`search-memories\` first. Useful context almost certainly already exists. Only fall back to code / filesystem / web search after memory comes up empty.
 
 ## Memory knowledge base
 
@@ -583,7 +663,7 @@ Before investigating any topic — project, bug, tool, architecture — run \`se
 
 ### Note structure
 
-H1 title, optional summary, then \`##\` sections in order: **Context** (background) → **Details** (main content) → **Outcome** (conclusions) → **Related** (auto-managed \`[[wikilinks]]\` — never edit manually). Not all sections required. \`create-note\` scaffolds the right ones per type.
+H1 title, optional summary, then \`##\` sections in order: **Context** (background) → **Details** (main content) → **Outcome** (conclusions) → **Related** (auto-managed \`[[wikilinks]]\` — never edit manually). Not all sections required. \`create-memory\` scaffolds the right ones per type.
 
 ### Wikilinks and backlinks
 
@@ -593,15 +673,51 @@ H1 title, optional summary, then \`##\` sections in order: **Context** (backgrou
 
 | Tool | Purpose |
 |------|---------|
-| \`create-note\` | New note; sections scaffolded by type |
-| \`read-note\` / \`search-notes\` / \`list-notes\` | Read / full-text search / filter by tag or type |
-| \`edit-note\` | Edit one \`## Section\` (\`append\`, \`prepend\`, \`replace\`) |
+| \`create-memory\` | New memory note; sections scaffolded by type |
+| \`read-memory\` / \`search-memories\` / \`list-memories\` | Read / full-text search / filter by tag or type |
+| \`edit-memory\` | Edit one \`## Section\` (\`append\`, \`prepend\`, \`replace\`) |
 | \`batch-section-edit\` | Multiple sections across multiple notes in one call |
-| \`delete-note\` | Refuses if referenced unless \`force=true\` |
+| \`delete-memory\` | Refuses if referenced unless \`force=true\` |
 | \`add-tags\` / \`remove-tags\` | Manage tags |
 | \`repair-related\` | Rebuild \`## Related\` from a wikilink scan |
 
-**Before creating a note: always \`search-notes\` first** and update an existing note rather than creating a duplicate.
+**Before creating a memory note: always \`search-memories\` first** and update an existing note rather than creating a duplicate.
+
+## Notes & todos
+
+**Distinct from memory.** Memory is YOUR long-term knowledge base. Notes & todos are the USER's workspace — free-form markdown notes and structured todo lists organised by project folder. Never write memory content into notes, and don't turn todos into memory unless the user asks.
+
+### When to use
+
+- **Each project folio has exactly ONE pinned agenda** (\`<project>/Agenda.todo.yaml\`), auto-created. Don't create additional todo lists.
+- **User says "add a todo / task"** or discusses action items → \`add-todo\` against the project's agenda (use \`ensure-agenda\` if unsure whether it exists).
+- **User asks to take a note / jot something / write this down** → \`create-note\` or \`edit-note\` (freeform markdown, unlimited per project).
+- **User asks what's on their plate / what's outstanding** → \`list-todos\` (optionally filtered by \`project\`, \`status\`, or \`assignee\`).
+
+### Status model
+
+Four statuses: \`not-started\`, \`agent-todo\` (flagged for an agent to pick up), \`in-progress\`, \`completed\`. Only \`agent-todo\` items with a matching \`assignee\` trigger ambient reminders.
+
+### Assigned to you (agent-todos)
+
+On each user message, if you have agent-todos assigned to this session, a system-reminder will appear with the count and delta. When that happens:
+
+- Treat it as context, not a command — do NOT pivot away from what the user is actually asking about.
+- If the user's current message relates to those todos, acknowledge them and \`list-todos\` with \`assignee="<your claudeSessionId from the reminder>"\` for details.
+- If unrelated, just continue the current conversation. The reminder will stay visible until the count changes.
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| \`create-note\` / \`read-note\` / \`edit-note\` | Markdown notes per project (distinct from \`create-memory\`) |
+| \`ensure-agenda\` | Idempotent — returns the project's single pinned agenda path |
+| \`add-todo\` / \`update-todo-text\` / \`remove-todo\` | Mutate items on the agenda |
+| \`set-todo-status\` | \`not-started\` / \`agent-todo\` / \`in-progress\` / \`completed\` |
+| \`set-todo-assignee\` | Assign a todo to a session (pass \`null\` to clear) |
+| \`list-todos\` | Flat list, filters: \`project\`, \`status\`, \`assignee\` (\`"null"\` = unassigned) |
+| \`list-notes\` / \`list-projects\` / \`search-notes\` | Discovery |
+| \`move-note\` / \`delete-note\` | Organisation |
 
 ## Session management
 

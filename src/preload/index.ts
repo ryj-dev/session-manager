@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type PtySpawnResult = { id: string; projectPath: string }
+export type PtySpawnResult = { id: string; projectPath: string; claudeSessionId?: string | null }
 export type FsEntry = { name: string; path: string; isDirectory: boolean }
 export type SavedSession = { claudeSessionId: string; projectPath: string; terminalTitle: string | null; savedAt: number }
 
@@ -94,10 +94,10 @@ const api = {
     ipcRenderer.invoke('sessions:clearSaved'),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; notesShowInactive?: boolean; notesProjectViewDefault?: string; notesZoom?: number }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; notesShowInactive?: boolean; notesProjectViewDefault?: string; notesZoom?: number }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // File system operations
@@ -168,10 +168,16 @@ const api = {
     ipcRenderer.invoke('claude:setStatuslineConfig', elements, customComponents),
 
   // Session spawned externally (via MCP)
-  onSessionSpawned: (callback: (data: { id: string; projectPath: string }) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string }) => callback(data)
+  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string; claudeSessionId?: string | null }) => callback(data)
     ipcRenderer.on('session:spawned', handler)
     return (): void => { ipcRenderer.removeListener('session:spawned', handler) }
+  },
+
+  onSessionClaudeId: (callback: (data: { id: string; claudeSessionId: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { id: string; claudeSessionId: string }) => callback(data)
+    ipcRenderer.on('session:claudeId', handler)
+    return (): void => { ipcRenderer.removeListener('session:claudeId', handler) }
   },
 
   // Inter-session message received
@@ -216,6 +222,75 @@ const api = {
     const handler = (_event: Electron.IpcRendererEvent, changed: string[]) => callback(changed)
     ipcRenderer.on('memory:changed', handler)
     return (): void => { ipcRenderer.removeListener('memory:changed', handler) }
+  },
+
+  // Notes & Todo
+  notesListProjects: (): Promise<string[]> => ipcRenderer.invoke('notes:listProjects'),
+  notesListProjectsDetailed: (): Promise<Array<{ name: string; manual: boolean }>> =>
+    ipcRenderer.invoke('notes:listProjectsDetailed'),
+  notesListEntries: (): Promise<Array<{
+    relPath: string; name: string; project: string | null; subdir: string[]; kind: 'note' | 'todo-list'
+  }>> => ipcRenderer.invoke('notes:listEntries'),
+  notesListDirs: (): Promise<Array<{ relPath: string; name: string; project: string | null }>> =>
+    ipcRenderer.invoke('notes:listDirs'),
+  notesReadNote: (relPath: string): Promise<string> => ipcRenderer.invoke('notes:readNote', relPath),
+  notesWriteNote: (relPath: string, content: string): Promise<void> =>
+    ipcRenderer.invoke('notes:writeNote', relPath, content),
+  notesReadTodoList: (relPath: string): Promise<{
+    type: 'todo-list'; title: string; created: string; updated: string
+    todos: Array<{
+      id: string; text: string
+      status: 'not-started' | 'agent-todo' | 'in-progress' | 'completed'
+      created: string; updated?: string
+      assignee?: string | null; assigneeLabel?: string | null
+    }>
+  }> => ipcRenderer.invoke('notes:readTodoList', relPath),
+  notesCreateNote: (opts: {
+    project: string | null; subdir?: string[]; name: string; kind: 'note' | 'todo-list'; content?: string
+  }): Promise<string> => ipcRenderer.invoke('notes:createNote', opts),
+  notesCreateDir: (project: string | null, subdirParts: string[]): Promise<string> =>
+    ipcRenderer.invoke('notes:createDir', project, subdirParts),
+  notesMove: (fromRel: string, toRel: string): Promise<void> =>
+    ipcRenderer.invoke('notes:move', fromRel, toRel),
+  notesDelete: (relPath: string): Promise<void> => ipcRenderer.invoke('notes:delete', relPath),
+  notesEnsureProject: (project: string, opts?: { manual?: boolean }): Promise<void> =>
+    ipcRenderer.invoke('notes:ensureProject', project, opts),
+  notesGetOrCreateAgenda: (project: string): Promise<string> =>
+    ipcRenderer.invoke('notes:getOrCreateAgenda', project),
+  notesAddTodo: (listRel: string, text: string): Promise<{ id: string; text: string; status: 'not-started'; created: string; assignee?: string | null }> =>
+    ipcRenderer.invoke('notes:addTodo', listRel, text),
+  notesSetTodoStatus: (listRel: string, todoId: string, status: 'not-started' | 'agent-todo' | 'in-progress' | 'completed'): Promise<void> =>
+    ipcRenderer.invoke('notes:setTodoStatus', listRel, todoId, status),
+  notesSetTodoAssignee: (listRel: string, todoId: string, assignee: string | null, label?: string | null): Promise<void> =>
+    ipcRenderer.invoke('notes:setTodoAssignee', listRel, todoId, assignee, label),
+  notesUpdateTodoText: (listRel: string, todoId: string, text: string): Promise<void> =>
+    ipcRenderer.invoke('notes:updateTodoText', listRel, todoId, text),
+  notesRemoveTodo: (listRel: string, todoId: string): Promise<void> =>
+    ipcRenderer.invoke('notes:removeTodo', listRel, todoId),
+  notesListAllTodos: (filter?: {
+    project?: string
+    status?: 'not-started' | 'agent-todo' | 'in-progress' | 'completed'
+    assignee?: string | null
+  }): Promise<Array<{
+    listRelPath: string; listTitle: string; project: string | null
+    todo: {
+      id: string; text: string
+      status: 'not-started' | 'agent-todo' | 'in-progress' | 'completed'
+      created: string; updated?: string
+      assignee?: string | null; assigneeLabel?: string | null
+    }
+  }>> => ipcRenderer.invoke('notes:listAllTodos', filter),
+  notesSearch: (query: string): Promise<Array<{ relPath: string; kind: 'note' | 'todo-list'; project: string | null; snippet: string }>> =>
+    ipcRenderer.invoke('notes:search', query),
+  notesProjectFromCwd: (cwd: string): Promise<string> => ipcRenderer.invoke('notes:projectFromCwd', cwd),
+
+  sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
+    Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('session:sendMessage', targetSessionId, message, fromSessionId),
+  onNotesChanged: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('notes:changed', handler)
+    return (): void => { ipcRenderer.removeListener('notes:changed', handler) }
   },
 
   // CLAUDE.md instructions

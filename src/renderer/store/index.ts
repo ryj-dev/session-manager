@@ -12,6 +12,8 @@ export interface HotkeyMap {
   toggleDesign: string
   openSettings: string
   toggleMemory: string
+  toggleNotesProject: string
+  toggleNotesGlobal: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -23,10 +25,14 @@ export const defaultHotkeys: HotkeyMap = {
   toggleSkills: 's',
   toggleDesign: 'd',
   openSettings: 'o',
-  toggleMemory: 'm'
+  toggleMemory: 'm',
+  toggleNotesProject: 'n',
+  toggleNotesGlobal: 'shift+n',
 }
 
-export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | null
+export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | null
+
+export type NotesView = 'project' | 'global'
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
 
@@ -52,17 +58,20 @@ export interface Session {
   status: SessionStatus
   snapshot: HTMLCanvasElement | null
   createdAt: number
+  /** Stable Claude Code conversation UUID (persists across resumes / app reloads). */
+  claudeSessionId: string | null
 }
 
 export interface AppState {
   // Sessions
   sessions: Session[]
-  addSession: (id: string, projectPath: string) => void
+  addSession: (id: string, projectPath: string, claudeSessionId?: string | null) => void
   removeSession: (id: string) => void
   updateSessionStatus: (id: string, status: SessionStatus) => void
   markSessionSeen: (id: string) => void
   updateSessionSnapshot: (id: string, snapshot: HTMLCanvasElement) => void
   updateSessionTitle: (id: string, title: string) => void
+  updateSessionClaudeId: (id: string, claudeSessionId: string) => void
 
   // UI state
   viewMode: ViewMode
@@ -92,6 +101,22 @@ export interface AppState {
   messagePopupSeconds: number
   setMessagePopupSeconds: (seconds: number) => void
 
+  // Notes & todos
+  notesView: NotesView
+  setNotesView: (v: NotesView) => void
+  notesProjectFilter: string | null
+  setNotesProjectFilter: (p: string | null) => void
+  notesSelectedPath: string | null
+  setNotesSelectedPath: (p: string | null) => void
+  notesExpandedProjects: Record<string, boolean>
+  toggleNotesProjectExpanded: (p: string) => void
+  notesShowInactive: boolean
+  setNotesShowInactive: (v: boolean) => void
+  notesProjectViewDefault: NotesView
+  setNotesProjectViewDefault: (v: NotesView) => void
+  notesZoom: number
+  setNotesZoom: (z: number) => void
+
   // Message notifications
   pendingMessages: MessageNotification[]
   addMessageNotification: (msg: { targetSessionId: string; fromSessionId: string | null; message: string }) => void
@@ -112,7 +137,7 @@ function projectNameFromPath(projectPath: string): string {
 export const useStore = create<AppState>((set) => ({
   // Sessions
   sessions: [],
-  addSession: (id, projectPath) =>
+  addSession: (id, projectPath, claudeSessionId = null) =>
     set((state) => ({
       sessions: [
         ...state.sessions,
@@ -123,7 +148,8 @@ export const useStore = create<AppState>((set) => ({
           terminalTitle: null,
           status: 'seen',
           snapshot: null,
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          claudeSessionId,
         }
       ]
     })),
@@ -149,6 +175,10 @@ export const useStore = create<AppState>((set) => ({
   updateSessionTitle: (id, title) =>
     set((state) => ({
       sessions: state.sessions.map((s) => (s.id === id ? { ...s, terminalTitle: title } : s))
+    })),
+  updateSessionClaudeId: (id, claudeSessionId) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) => (s.id === id ? { ...s, claudeSessionId } : s))
     })),
 
   // UI state
@@ -178,6 +208,25 @@ export const useStore = create<AppState>((set) => ({
   setMessagePopup: (mode) => set({ messagePopup: mode }),
   messagePopupSeconds: 15,
   setMessagePopupSeconds: (seconds) => set({ messagePopupSeconds: seconds }),
+
+  // Notes & todos
+  notesView: 'project',
+  setNotesView: (v) => set({ notesView: v }),
+  notesProjectFilter: null,
+  setNotesProjectFilter: (p) => set({ notesProjectFilter: p }),
+  notesSelectedPath: null,
+  setNotesSelectedPath: (p) => set({ notesSelectedPath: p }),
+  notesExpandedProjects: {},
+  toggleNotesProjectExpanded: (p) =>
+    set((state) => ({
+      notesExpandedProjects: { ...state.notesExpandedProjects, [p]: !state.notesExpandedProjects[p] },
+    })),
+  notesShowInactive: false,
+  setNotesShowInactive: (v) => set({ notesShowInactive: v }),
+  notesProjectViewDefault: 'project',
+  setNotesProjectViewDefault: (v) => set({ notesProjectViewDefault: v }),
+  notesZoom: 1.15,
+  setNotesZoom: (z) => set({ notesZoom: Math.min(2.0, Math.max(0.7, Math.round(z * 100) / 100)) }),
 
   // Message notifications
   pendingMessages: [],

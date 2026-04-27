@@ -11,6 +11,7 @@ import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
 import { SkillsGallery } from './components/SkillsGallery'
 import MemoryPanel from './components/memory/MemoryPanel'
+import { NotesPanel } from './components/notes/NotesPanel'
 import { MessagePopup } from './components/MessagePopup'
 import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
 import { Terminal } from './components/Terminal'
@@ -76,6 +77,9 @@ export function App(): JSX.Element {
   const setMessagePopup = useStore((s) => s.setMessagePopup)
   const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
   const setMessagePopupSeconds = useStore((s) => s.setMessagePopupSeconds)
+  const notesZoom = useStore((s) => s.notesZoom)
+  const notesShowInactive = useStore((s) => s.notesShowInactive)
+  const notesProjectViewDefault = useStore((s) => s.notesProjectViewDefault)
   const addMessageNotification = useStore((s) => s.addMessageNotification)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)
   const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
@@ -117,6 +121,11 @@ export function App(): JSX.Element {
       if (settings.hotkeys) setHotkeys({ ...defaultHotkeys, ...settings.hotkeys } as HotkeyMap)
       if (settings.messagePopup) setMessagePopup(settings.messagePopup as 'manual' | 'timed' | 'disabled')
       if (settings.messagePopupSeconds != null) setMessagePopupSeconds(settings.messagePopupSeconds as number)
+      if (settings.notesShowInactive != null) useStore.getState().setNotesShowInactive(settings.notesShowInactive as boolean)
+      if (settings.notesProjectViewDefault) {
+        useStore.getState().setNotesProjectViewDefault(settings.notesProjectViewDefault as 'project' | 'global')
+      }
+      if (typeof settings.notesZoom === 'number') useStore.getState().setNotesZoom(settings.notesZoom as number)
       settingsLoadedRef.current = true
     })
   }, [])
@@ -124,8 +133,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, notesShowInactive, notesProjectViewDefault, notesZoom } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds, notesShowInactive, notesProjectViewDefault, notesZoom])
 
   // On startup: reconnect to active PTY sessions (renderer crash recovery),
   // then check for saved sessions from a previous clean quit.
@@ -135,7 +144,7 @@ export function App(): JSX.Element {
       if (active.length > 0) {
         console.log(`[recovery] reconnecting to ${active.length} active PTY sessions`)
         for (const s of active) {
-          addSession(s.id, s.projectPath)
+          addSession(s.id, s.projectPath, s.claudeSessionId)
           if (s.terminalTitle) {
             updateSessionTitle(s.id, s.terminalTitle)
           }
@@ -174,7 +183,7 @@ export function App(): JSX.Element {
   const restoreSessions = useCallback(async () => {
     for (const saved of savedSessions) {
       const result = await window.api.resumeSession(saved.claudeSessionId, saved.projectPath)
-      addSession(result.id, result.projectPath)
+      addSession(result.id, result.projectPath, result.claudeSessionId ?? saved.claudeSessionId)
       if (saved.terminalTitle) {
         updateSessionTitle(result.id, saved.terminalTitle)
         window.api.updateSessionTitle(result.id, saved.terminalTitle)
@@ -227,7 +236,7 @@ export function App(): JSX.Element {
       console.log('[spawn] calling api.spawnSession with path:', projectPath)
       const result = await window.api.spawnSession(projectPath, 'claude')
       console.log('[spawn] session created:', result)
-      addSession(result.id, result.projectPath)
+      addSession(result.id, result.projectPath, result.claudeSessionId ?? null)
 
       if (autoFocusOnSpawn) {
         setFocusedSessionId(result.id)
@@ -486,7 +495,10 @@ export function App(): JSX.Element {
       }
 
       if (key === hotkeys.toggleAgents) {
+        // Let Cmd+A behave as native select-all while the notes panel is open.
+        if (activePanel === 'notes') return
         e.preventDefault()
+        e.stopImmediatePropagation()
         setActivePanel(activePanel === 'agents' ? null : 'agents')
         return
       }
@@ -506,6 +518,44 @@ export function App(): JSX.Element {
       if (key === hotkeys.toggleMemory) {
         e.preventDefault()
         setActivePanel(activePanel === 'memory' ? null : 'memory')
+        return
+      }
+
+      if (key === hotkeys.toggleNotesProject) {
+        e.preventDefault()
+        if (activePanel === 'notes') {
+          setActivePanel(null)
+        } else {
+          const store = useStore.getState()
+          const focused = store.focusedSessionId ? store.sessions.find((s) => s.id === store.focusedSessionId) : null
+          const projectPath = focused?.projectPath ?? store.sessions[store.selectedSessionIndex]?.projectPath ?? null
+          if (projectPath) {
+            window.api.notesProjectFromCwd(projectPath).then((project) => {
+              window.api.notesEnsureProject(project).then(() => {
+                store.setNotesProjectFilter(project)
+                store.setNotesView('project')
+                store.setNotesSelectedPath(null)
+                setActivePanel('notes')
+              })
+            })
+          } else {
+            // No session context → open global view
+            store.setNotesProjectFilter(null)
+            store.setNotesView('global')
+            store.setNotesSelectedPath(null)
+            setActivePanel('notes')
+          }
+        }
+        return
+      }
+
+      if (key === hotkeys.toggleNotesGlobal) {
+        e.preventDefault()
+        const store = useStore.getState()
+        store.setNotesProjectFilter(null)
+        store.setNotesView('global')
+        store.setNotesSelectedPath(null)
+        setActivePanel(activePanel === 'notes' ? null : 'notes')
         return
       }
 
@@ -590,11 +640,19 @@ export function App(): JSX.Element {
 
   // Listen for sessions spawned externally (via MCP)
   useEffect(() => {
-    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath }) => {
-      addSession(id, projectPath)
+    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId }) => {
+      addSession(id, projectPath, claudeSessionId ?? null)
     })
     return unsubscribe
   }, [addSession])
+
+  // Track claudeSessionId updates so the renderer can use the stable ID for assignments
+  useEffect(() => {
+    const unsub = window.api.onSessionClaudeId(({ id, claudeSessionId }) => {
+      useStore.getState().updateSessionClaudeId(id, claudeSessionId)
+    })
+    return unsub
+  }, [])
 
   // Listen for inter-session messages
   useEffect(() => {
@@ -841,6 +899,12 @@ export function App(): JSX.Element {
       {/* Memory panel */}
       <MemoryPanel
         visible={activePanel === 'memory'}
+        onClose={() => setActivePanel(null)}
+      />
+
+      {/* Notes panel */}
+      <NotesPanel
+        visible={activePanel === 'notes'}
         onClose={() => setActivePanel(null)}
       />
 

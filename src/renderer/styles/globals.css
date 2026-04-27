@@ -1,6 +1,192 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;1,400&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ─── Notes aesthetic — Archival Atelier ─────────────────────────────── */
+:root {
+  --ink: #ece4d2;           /* warm off-white */
+  --ink-dim: #a69b86;
+  --ink-faint: #5a5346;
+  --paper: #0b0a08;         /* deep charcoal with warm cast */
+  --paper-raised: #131210;
+  --rule: rgba(236, 228, 210, 0.08);
+  --rule-strong: rgba(236, 228, 210, 0.18);
+  --accent: #d4a574;        /* warm amber */
+  --accent-deep: #a77f49;
+  --danger: #c85a4a;
+}
+
+.notes-surface {
+  font-family: 'Fraunces', Georgia, serif;
+  font-optical-sizing: auto;
+  font-feature-settings: 'liga' 1, 'dlig' 1, 'ss01' 1, 'ss02' 1;
+  color: var(--ink);
+  background: var(--paper);
+  /* position is set by the consumer (e.g. `fixed inset-0`); don't override it */
+}
+
+/* Paper grain — subtle noise via layered radial gradients */
+.notes-grain::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(circle at 20% 30%, rgba(236, 228, 210, 0.015) 0.5px, transparent 1px),
+    radial-gradient(circle at 70% 80%, rgba(236, 228, 210, 0.02) 0.5px, transparent 1px),
+    radial-gradient(circle at 45% 55%, rgba(236, 228, 210, 0.012) 0.5px, transparent 1px);
+  background-size: 3px 3px, 5px 5px, 7px 7px;
+  mix-blend-mode: screen;
+  opacity: 0.8;
+}
+
+.notes-vignette::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.5) 100%);
+}
+
+.font-display { font-family: 'Fraunces', Georgia, serif; font-optical-sizing: auto; }
+.font-mono-ui { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+.smallcaps {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.12em;
+  font-weight: 500;
+}
+
+.hairline {
+  background: linear-gradient(to right, transparent, var(--rule-strong) 20%, var(--rule-strong) 80%, transparent);
+  height: 1px;
+  border: 0;
+}
+
+.hairline-v {
+  background: linear-gradient(to bottom, transparent, var(--rule-strong) 20%, var(--rule-strong) 80%, transparent);
+  width: 1px;
+}
+
+/* Todo bubble — hand-drawn feel */
+.todo-bubble {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.25px solid var(--ink-dim);
+  background: transparent;
+  transition: all 180ms ease;
+  flex-shrink: 0;
+}
+.todo-bubble:hover {
+  border-color: var(--ink);
+  transform: scale(1.08);
+}
+.todo-bubble.done {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(212, 165, 116, 0.12);
+}
+.todo-bubble.done::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  background: var(--paper);
+  clip-path: polygon(15% 50%, 40% 72%, 85% 18%, 92% 30%, 42% 88%, 10% 58%);
+}
+
+/* Subtle ink-press ripple on click */
+.ink-press:active {
+  transform: translateY(1px);
+}
+
+/* Scrollbars inside notes */
+.notes-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.notes-scroll::-webkit-scrollbar-track { background: transparent; }
+.notes-scroll::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: 3px;
+}
+.notes-scroll::-webkit-scrollbar-thumb:hover { background: var(--ink-dim); }
+
+/* Entry animations */
+@keyframes ink-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ink-fade-in {
+  animation: ink-fade-in 380ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes margin-pull {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.margin-pull { animation: margin-pull 280ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+
+/* Fine diagonal texture for sidebar */
+.paper-sidebar {
+  background:
+    linear-gradient(180deg, rgba(212, 165, 116, 0.02), transparent 120px),
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0 24px,
+      rgba(236, 228, 210, 0.015) 24px 25px
+    ),
+    var(--paper);
+}
+
+/* Marginalia rule — for the document body */
+.margin-rule {
+  background-image: linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
+  background-size: 100% 2rem;
+  background-position: 0 1.75rem;
+}
+
+.note-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink);
+  font-family: 'Fraunces', serif;
+  font-optical-sizing: auto;
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.note-input::placeholder {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.ledger-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8125rem;
+}
+
+.ledger-input::placeholder { color: var(--ink-faint); }
+
+/* Amber focus ring */
+.focus-ink:focus-within {
+  box-shadow: inset 0 -1px 0 var(--accent);
+}
+
+/* Decorative glyph */
+.glyph-fleuron::before {
+  content: '❦';
+  color: var(--accent);
+  margin-right: 0.5em;
+  font-size: 0.85em;
+}
 
 html, body, #root {
   height: 100%;

@@ -10,6 +10,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   toggleSkills: 'Toggle skills panel',
   toggleDesign: 'Toggle design panel',
   toggleMemory: 'Toggle memory panel',
+  toggleNotesProject: 'Notes (project view)',
+  toggleNotesGlobal: 'Notes (global todos)',
   openSettings: 'Open settings'
 }
 

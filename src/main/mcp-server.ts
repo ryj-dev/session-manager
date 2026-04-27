@@ -27,6 +27,7 @@ import {
   type MemoryNote,
 } from './memory/core'
 import { createNoteIO, type NoteIO } from './memory/note-io'
+import * as notes from './notes-manager'
 
 // ─── Storage ───────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ const server = new McpServer(
 
 ## Before creating a note
 
-Always search first (search-notes or list-notes) to check if a note on the same topic already exists. **Update the existing note** rather than creating a duplicate.
+Always search first (search-memories or list-memories) to check if a note on the same topic already exists. **Update the existing note** rather than creating a duplicate.
 
 ## Note structure
 
@@ -95,13 +96,13 @@ Not all sections are required. Each note type has recommended sections.
 
 | Tool | Purpose |
 |------|---------|
-| create-note | Create a note with structured sections (type, context, details, outcome) |
-| read-note | Read a note by filename |
-| edit-note | Edit a single section (append/prepend/replace) |
+| create-memory | Create a memory note with structured sections (type, context, details, outcome) |
+| read-memory | Read a memory note by filename |
+| edit-memory | Edit a single section (append/prepend/replace) |
 | batch-section-edit | Edit multiple sections across multiple notes in one call |
-| search-notes | Search by content, filename, or both |
-| list-notes | List all notes, optionally filtered by tag/type |
-| delete-note | Delete a note (cleans up backlinks automatically) |
+| search-memories | Search memory notes by content, filename, or both |
+| list-memories | List memory notes, optionally filtered by tag/type |
+| delete-memory | Delete a memory note (cleans up backlinks automatically) |
 | add-tags / remove-tags | Manage tags on notes |
 | repair-related | Rebuild ## Related from actual wikilinks (for fixing broken backlinks) |
 | spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager) |
@@ -110,9 +111,9 @@ Not all sections are required. Each note type has recommended sections.
 | list-sessions | List all active sessions with IDs, status, and project paths |
 | send-message | Send a message to another session (delivered when idle, queued when busy) |
 
-Use **create-note** with structured section inputs (context, details, outcome) instead of raw markdown.
+Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
-Use **edit-note** for simple single-section edits.
+Use **edit-memory** for simple single-section edits.
 
 ## Linking
 
@@ -160,14 +161,29 @@ Use **send-message** to communicate with another session. Messages are:
 
 All spawned sessions (spawn-session and spawn-agent) automatically have send-message allowed so they can report back without permission prompts.
 
-Notes stored in: ${MEMORIES_DIR}`
+## Notes & todo lists (separate from memory)
+
+The app also hosts a distinct Notes system for user-facing task tracking — free-form markdown notes and structured todo lists, organised by project folder. These are NOT memory notes. Use the following tools when the user wants to jot, track, or manage todos:
+
+| Tool | Purpose |
+|------|---------|
+| create-note / read-note / edit-note | Per-project markdown notes (distinct from create-memory) |
+| create-todo-list | Create an empty todo list (.todo.yaml) |
+| add-todo / set-todo-status / update-todo-text / remove-todo | Mutate items within a todo list |
+| list-todos | Flat view of todos across all projects (filter by project or status) |
+| list-notes / list-projects / search-notes | Discovery |
+| move-note / delete-note | Organisation |
+
+Statuses in v1: \`not-started\` and \`completed\` only. Assignment and agent dispatch come in v2.
+
+Memory notes stored in: ${MEMORIES_DIR}`
   }
 )
 
-// ── create-note ─────────────────────────────────────────────────────────────
+// ── create-memory ───────────────────────────────────────────────────────────
 
 server.tool(
-  'create-note',
+  'create-memory',
   'Create a new memory note with structured sections. Sections are auto-generated based on note type. Backlinks synced automatically.',
   {
     title: z.string().describe('Note title'),
@@ -210,10 +226,10 @@ server.tool(
   }
 )
 
-// ── read-note ───────────────────────────────────────────────────────────────
+// ── read-memory ─────────────────────────────────────────────────────────────
 
 server.tool(
-  'read-note',
+  'read-memory',
   'Read a memory note by filename.',
   { filename: z.string().describe('Note filename (e.g. "my-note.md")') },
   async ({ filename }) => {
@@ -225,10 +241,10 @@ server.tool(
   }
 )
 
-// ── edit-note ───────────────────────────────────────────────────────────────
+// ── edit-memory ─────────────────────────────────────────────────────────────
 
 server.tool(
-  'edit-note',
+  'edit-memory',
   'Edit a single section of a memory note. New sections are inserted in canonical order (Context → Details → Outcome). Cannot edit ## Related (use repair-related for fixes). Backlinks synced automatically.',
   {
     filename: z.string().describe('Note filename'),
@@ -323,10 +339,10 @@ server.tool(
   }
 )
 
-// ── delete-note ─────────────────────────────────────────────────────────────
+// ── delete-memory ───────────────────────────────────────────────────────────
 
 server.tool(
-  'delete-note',
+  'delete-memory',
   'Delete a memory note. By default, refuses if other notes reference it (set force=true to override and clean up refs).',
   {
     filename: z.string().describe('Note filename'),
@@ -358,10 +374,10 @@ server.tool(
   }
 )
 
-// ── search-notes ────────────────────────────────────────────────────────────
+// ── search-memories ─────────────────────────────────────────────────────────
 
 server.tool(
-  'search-notes',
+  'search-memories',
   'Search memory notes by content, filename, or both.',
   {
     query: z.string().describe('Search query'),
@@ -397,10 +413,10 @@ server.tool(
   }
 )
 
-// ── list-notes ──────────────────────────────────────────────────────────────
+// ── list-memories ───────────────────────────────────────────────────────────
 
 server.tool(
-  'list-notes',
+  'list-memories',
   'List all memory notes, optionally filtered by tag or type.',
   {
     tag: z.string().optional().describe('Filter by tag'),
@@ -742,6 +758,201 @@ server.tool(
         isError: true
       }
     }
+  }
+)
+
+// ─── Notes & Todo lists ─────────────────────────────────────────────────────
+
+server.tool(
+  'create-note',
+  'Create a new markdown note in the notes system (distinct from memory). Notes live under a project folder. Pass project=null for a root-level note.',
+  {
+    project: z.string().nullable().describe('Project folder name, or null for root-level'),
+    name: z.string().describe('Note name (without extension)'),
+    subdir: z.array(z.string()).optional().describe('Optional nested subdirectory path inside the project'),
+    content: z.string().optional().describe('Initial markdown content'),
+  },
+  async ({ project, name, subdir, content }) => {
+    const rel = notes.createNote({ project, name, subdir, kind: 'note', content })
+    return { content: [{ type: 'text', text: `Created note: ${rel}` }] }
+  }
+)
+
+server.tool(
+  'read-note',
+  'Read a markdown note by its relative path (e.g. "session-manager/Architecture.md").',
+  { path: z.string().describe('Relative path under the notes root') },
+  async ({ path: p }) => {
+    try {
+      return { content: [{ type: 'text', text: notes.readNote(p) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'edit-note',
+  'Replace the full content of a markdown note. For fine-grained edits use read-note then edit-note with the new full content.',
+  { path: z.string(), content: z.string() },
+  async ({ path: p, content }) => {
+    notes.writeNote(p, content)
+    return { content: [{ type: 'text', text: `Updated ${p}` }] }
+  }
+)
+
+server.tool(
+  'ensure-agenda',
+  'Ensure a project has its single pinned agenda (one todo-list per folio). Idempotent — returns the path whether or not it already existed.',
+  { project: z.string().describe('Project folder name') },
+  async ({ project }) => {
+    notes.ensureProject(project)
+    const rel = notes.getOrCreateAgenda(project)
+    return { content: [{ type: 'text', text: `Agenda: ${rel}` }] }
+  }
+)
+
+server.tool(
+  'add-todo',
+  'Append a todo item to a todo list. Returns the generated id.',
+  { path: z.string().describe('Relative path to the .todo.yaml file'), text: z.string() },
+  async ({ path: p, text }) => {
+    const item = notes.addTodo(p, text)
+    return { content: [{ type: 'text', text: `Added todo ${item.id}: ${item.text}` }] }
+  }
+)
+
+server.tool(
+  'set-todo-status',
+  'Set a todo item\'s status. Supports not-started, agent-todo, in-progress, completed.',
+  {
+    path: z.string(),
+    todoId: z.string(),
+    status: z.enum(['not-started', 'agent-todo', 'in-progress', 'completed']),
+  },
+  async ({ path: p, todoId, status }) => {
+    notes.setTodoStatus(p, todoId, status)
+    return { content: [{ type: 'text', text: `Set ${todoId} → ${status}` }] }
+  }
+)
+
+server.tool(
+  'set-todo-assignee',
+  'Assign a todo item to a session (or null to unassign). assigneeLabel is a human-readable name shown in the UI.',
+  {
+    path: z.string(),
+    todoId: z.string(),
+    assignee: z.string().nullable(),
+    assigneeLabel: z.string().nullable().optional(),
+  },
+  async ({ path: p, todoId, assignee, assigneeLabel }) => {
+    notes.setTodoAssignee(p, todoId, assignee, assigneeLabel ?? null)
+    return { content: [{ type: 'text', text: assignee ? `Assigned ${todoId} → ${assigneeLabel ?? assignee}` : `Unassigned ${todoId}` }] }
+  }
+)
+
+server.tool(
+  'update-todo-text',
+  'Change the text of a todo item.',
+  { path: z.string(), todoId: z.string(), text: z.string() },
+  async ({ path: p, todoId, text }) => {
+    notes.updateTodoText(p, todoId, text)
+    return { content: [{ type: 'text', text: `Updated ${todoId}` }] }
+  }
+)
+
+server.tool(
+  'remove-todo',
+  'Remove a todo item from a todo list.',
+  { path: z.string(), todoId: z.string() },
+  async ({ path: p, todoId }) => {
+    notes.removeTodo(p, todoId)
+    return { content: [{ type: 'text', text: `Removed ${todoId}` }] }
+  }
+)
+
+server.tool(
+  'list-todos',
+  'List todos across all todo-lists, optionally filtered by project, status, or assignee (pass assignee="null" to list only unassigned).',
+  {
+    project: z.string().optional(),
+    status: z.enum(['not-started', 'agent-todo', 'in-progress', 'completed']).optional(),
+    assignee: z.string().optional().describe('Session ID filter, or "null" for unassigned'),
+  },
+  async ({ project, status, assignee }) => {
+    const filter: { project?: string; status?: typeof status; assignee?: string | null } = { project, status }
+    if (assignee !== undefined) filter.assignee = assignee === 'null' ? null : assignee
+    const items = notes.listAllTodos(filter)
+    if (items.length === 0) return { content: [{ type: 'text', text: 'No todos found' }] }
+    const glyph: Record<string, string> = {
+      'not-started': '[ ]',
+      'agent-todo': '[?]',
+      'in-progress': '[~]',
+      'completed': '[x]',
+    }
+    const lines = items.map((i) => {
+      const box = glyph[i.todo.status] ?? '[ ]'
+      const proj = i.project ? `${i.project}/` : ''
+      const assignee = i.todo.assignee ? ` @${i.todo.assigneeLabel ?? i.todo.assignee.slice(0, 8)}` : ''
+      return `${box} ${proj}${i.listTitle} — ${i.todo.text}${assignee} (id: ${i.todo.id})`
+    })
+    return { content: [{ type: 'text', text: `${items.length} todo(s):\n${lines.join('\n')}` }] }
+  }
+)
+
+server.tool(
+  'list-notes',
+  'List all notes and todo-lists, optionally filtered by project.',
+  { project: z.string().optional() },
+  async ({ project }) => {
+    let entries = notes.listAllEntries()
+    if (project) entries = entries.filter((e) => e.project === project)
+    if (entries.length === 0) return { content: [{ type: 'text', text: 'No notes found' }] }
+    const lines = entries.map((e) => `- ${e.relPath} [${e.kind}]`)
+    return { content: [{ type: 'text', text: `${entries.length} entries:\n${lines.join('\n')}` }] }
+  }
+)
+
+server.tool(
+  'list-projects',
+  'List all note project folders.',
+  {},
+  async () => {
+    const projs = notes.listProjects()
+    if (projs.length === 0) return { content: [{ type: 'text', text: 'No projects' }] }
+    return { content: [{ type: 'text', text: projs.map((p) => `- ${p}`).join('\n') }] }
+  }
+)
+
+server.tool(
+  'search-notes',
+  'Full-text search across notes and todo text.',
+  { query: z.string() },
+  async ({ query }) => {
+    const hits = notes.searchNotes(query)
+    if (hits.length === 0) return { content: [{ type: 'text', text: `No matches for "${query}"` }] }
+    const lines = hits.map((h) => `- ${h.relPath} [${h.kind}] — ${h.snippet}`)
+    return { content: [{ type: 'text', text: `${hits.length} result(s):\n${lines.join('\n')}` }] }
+  }
+)
+
+server.tool(
+  'move-note',
+  'Move a note or todo list to a new relative path. The project is implied by the new top-level folder.',
+  { from: z.string(), to: z.string() },
+  async ({ from, to }) => {
+    notes.moveEntry(from, to)
+    return { content: [{ type: 'text', text: `Moved ${from} → ${to}` }] }
+  }
+)
+
+server.tool(
+  'delete-note',
+  'Delete a note or todo list by relative path.',
+  { path: z.string() },
+  async ({ path: p }) => {
+    notes.deleteEntry(p)
+    return { content: [{ type: 'text', text: `Deleted ${p}` }] }
   }
 )
 

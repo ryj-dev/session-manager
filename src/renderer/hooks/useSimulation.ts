@@ -68,9 +68,36 @@ interface SpokeSpring extends SpringNode {
   anchorOffsetY: number
 }
 
-// ── Persistent position cache (survives component unmount/remount) ─────
+// ── Persistent position cache ──────────────────────────────────────────
+// Hub positions are persisted to localStorage so they survive renderer
+// reloads (which happen on GPU crashes — notably during screen lock).
+// Without this, the d3 simulation re-solves from scratch after wake and
+// the whole graph reshuffles.
 
-const hubPositionCache = new Map<string, { x: number; y: number }>()
+const HUB_CACHE_KEY = 'graph.hubPositions.v1'
+
+function loadHubCache(): Map<string, { x: number; y: number }> {
+  try {
+    const raw = localStorage.getItem(HUB_CACHE_KEY)
+    if (!raw) return new Map()
+    const obj = JSON.parse(raw) as Record<string, { x: number; y: number }>
+    return new Map(Object.entries(obj))
+  } catch {
+    return new Map()
+  }
+}
+
+function saveHubCache(cache: Map<string, { x: number; y: number }>): void {
+  try {
+    const obj: Record<string, { x: number; y: number }> = {}
+    for (const [k, v] of cache) obj[k] = v
+    localStorage.setItem(HUB_CACHE_KEY, JSON.stringify(obj))
+  } catch {
+    /* quota or unavailable — ignore */
+  }
+}
+
+const hubPositionCache = loadHubCache()
 const spokeSpringCache = new Map<string, SpokeSpring>()
 
 // ── Hook ───────────────────────────────────────────────────────────────
@@ -208,6 +235,15 @@ export function useSimulation(width: number, height: number): SimulationResult {
         hub.fx = hub.x ?? null
         hub.fy = hub.y ?? null
       }
+      // Persist the settled positions so they survive renderer reloads
+      // (e.g. GPU crashes during screen lock). Drop cached entries for
+      // projects that no longer have a hub — otherwise the cache grows
+      // forever as the user works in new projects.
+      const liveIds = new Set(hubNodes.map((h) => h.id))
+      for (const key of hubPositionCache.keys()) {
+        if (!liveIds.has(key)) hubPositionCache.delete(key)
+      }
+      saveHubCache(hubPositionCache)
       animatingRef.current = false
     }
   }
@@ -282,7 +318,9 @@ export function useSimulation(width: number, height: number): SimulationResult {
         newHubNodes.push(existing)
         newHubMap.set(projectPath, existing)
       } else {
-        // Restore from cache if available, otherwise random position
+        // Restore from cache if available, otherwise random position.
+        // Cached hubs are pinned immediately so initial centering forces
+        // can't drift them from their previous settled position.
         const cached = hubPositionCache.get(projectPath)
         const node: HubNode = {
           id: projectPath,
@@ -291,6 +329,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
           sessionCount: group.sessionIds.length,
           x: cached?.x ?? width / 2 + (Math.random() - 0.5) * 100,
           y: cached?.y ?? height / 2 + (Math.random() - 0.5) * 100
+        }
+        if (cached) {
+          node.fx = cached.x
+          node.fy = cached.y
         }
         newHubNodes.push(node)
         newHubMap.set(projectPath, node)

@@ -228,11 +228,22 @@ export function writeWhenReady(id: string, data: string): void {
   }
 }
 
+type ClaudeIdListener = (id: string, claudeSessionId: string) => void
+const claudeIdListeners = new Set<ClaudeIdListener>()
+
+export function onClaudeSessionIdChange(cb: ClaudeIdListener): () => void {
+  claudeIdListeners.add(cb)
+  return () => { claudeIdListeners.delete(cb) }
+}
+
 export function updateClaudeSessionId(id: string, claudeSessionId: string): void {
   const session = sessions.get(id)
   if (session && session.claudeSessionId !== claudeSessionId) {
     console.log(`[pty] session ${id} claude session changed: ${session.claudeSessionId} → ${claudeSessionId}`)
     session.claudeSessionId = claudeSessionId
+    for (const cb of claudeIdListeners) {
+      try { cb(id, claudeSessionId) } catch { /* listener error */ }
+    }
   }
 }
 

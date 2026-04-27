@@ -68,7 +68,35 @@ export function GraphView(): JSX.Element {
   const viewMode = useStore((s) => s.viewMode)
   const activePanel = useStore((s) => s.activePanel)
   const hotkeys = useStore((s) => s.hotkeys)
+  const setActivePanel = useStore((s) => s.setActivePanel)
+  const setNotesView = useStore((s) => s.setNotesView)
+  const setNotesProjectFilter = useStore((s) => s.setNotesProjectFilter)
+  const setNotesSelectedPath = useStore((s) => s.setNotesSelectedPath)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // Agent-todo counts per project for hub badges
+  const [agentTodoCounts, setAgentTodoCounts] = useState<Map<string, { unassigned: number; assigned: number }>>(new Map())
+  useEffect(() => {
+    let cancelled = false
+    const load = async (): Promise<void> => {
+      try {
+        const items = await window.api.notesListAllTodos({ status: 'agent-todo' })
+        if (cancelled) return
+        const counts = new Map<string, { unassigned: number; assigned: number }>()
+        for (const it of items) {
+          if (!it.project) continue
+          const c = counts.get(it.project) ?? { unassigned: 0, assigned: 0 }
+          if (it.todo.assignee) c.assigned++
+          else c.unassigned++
+          counts.set(it.project, c)
+        }
+        setAgentTodoCounts(counts)
+      } catch { /* ignore */ }
+    }
+    load()
+    const unsub = window.api.onNotesChanged(() => load())
+    return () => { cancelled = true; unsub() }
+  }, [])
 
   // Track container size so the simulation re-centers on window resize.
   // Reading clientWidth directly during render would go stale (React doesn't
@@ -351,18 +379,22 @@ export function GraphView(): JSX.Element {
         {/* Hub nodes */}
         {hubs.map((hub) => {
           const isActiveProject = selectedSession?.projectPath === hub.id
+          const counts = agentTodoCounts.get(hub.projectName)
+          const total = (counts?.unassigned ?? 0) + (counts?.assigned ?? 0)
+          const hasUnassigned = (counts?.unassigned ?? 0) > 0
           return (
             <div
               key={hub.id}
-              className="absolute pointer-events-none select-none"
+              className="absolute select-none"
               style={{
                 left: hub.x,
                 top: hub.y,
-                transform: 'translate(-50%, -50%)'
+                transform: 'translate(-50%, -50%)',
+                pointerEvents: 'auto',
               }}
             >
               <div
-                className="px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap border transition-shadow duration-300"
+                className="px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap border transition-shadow duration-300 relative"
                 style={{
                   backgroundColor: projectColorDim(hub.id),
                   borderColor: hub.color,
@@ -371,6 +403,37 @@ export function GraphView(): JSX.Element {
                 }}
               >
                 {hub.projectName}
+                {total > 0 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setNotesProjectFilter(hub.projectName)
+                      setNotesView('project')
+                      setNotesSelectedPath(null)
+                      setActivePanel('notes')
+                    }}
+                    title={
+                      hasUnassigned
+                        ? `${counts!.unassigned} unassigned agent-todo${counts!.unassigned !== 1 ? 's' : ''}`
+                          + (counts!.assigned ? `, ${counts!.assigned} assigned` : '')
+                        : `${total} agent-todo${total !== 1 ? 's' : ''} assigned`
+                    }
+                    className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center text-[10px] font-bold border transition-transform hover:scale-110"
+                    style={{
+                      padding: '0 5px',
+                      background: hasUnassigned ? '#c85a4a' : '#d4a574',
+                      color: '#0b0a08',
+                      borderColor: '#0a0a0a',
+                      boxShadow: hasUnassigned
+                        ? '0 0 8px rgba(200, 90, 74, 0.6)'
+                        : '0 0 6px rgba(212, 165, 116, 0.5)',
+                      fontFamily: "'JetBrains Mono', monospace",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {total}
+                  </button>
+                )}
               </div>
             </div>
           )

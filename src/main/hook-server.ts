@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto'
 import { spawnSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
+import * as notesManager from './notes-manager'
 
 let server: Server | null = null
 let serverPort = 0
@@ -120,6 +121,21 @@ export function startHookServer(): Promise<number> {
           return
         }
 
+        // ── Synchronous hook endpoint — may inject additionalContext ──
+        if (url.pathname === '/hook-sync') {
+          try {
+            const appSessionId = url.searchParams.get('sid')
+            const payload: HookPayload = JSON.parse(body)
+            const reply = buildSyncHookResponse(appSessionId, payload)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify(reply))
+          } catch {
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end('{}')
+          }
+          return
+        }
+
         // ── Hook event endpoint ──
         res.writeHead(200)
         res.end('ok')
@@ -204,7 +220,7 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     // Notify the renderer to add this session to the UI
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) {
-      win.webContents.send('session:spawned', { id, projectPath: cwd })
+      win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null })
     }
 
     console.log(`[hook-server] spawned session ${id} in ${cwd}`)
@@ -235,6 +251,40 @@ function handleListSessions(res: import('http').ServerResponse): void {
   }
 }
 
+export function deliverSessionMessage(
+  targetSessionId: string,
+  message: string,
+  fromSessionId: string | null,
+): { ok: true } | { ok: false; error: string; status: number } {
+  const session = getSession(targetSessionId)
+  if (!session) return { ok: false, error: `Session ${targetSessionId} not found`, status: 404 }
+
+  const fromLabel = fromSessionId ? `Message from session ${fromSessionId}` : 'Message from another session'
+  const msgDir = join(app.getPath('userData'), 'messages', targetSessionId)
+  mkdirSync(msgDir, { recursive: true })
+  const inboxPath = join(msgDir, 'inbox.txt')
+
+  const MAX_INLINE_LENGTH = 400
+  const escaped = message.replace(/\n/g, '\\n')
+  let line: string
+  if (escaped.length <= MAX_INLINE_LENGTH) {
+    line = `${fromLabel}: ${escaped}\n`
+  } else {
+    const msgFile = join(msgDir, `msg-${randomUUID()}.md`)
+    writeFileSync(msgFile, message)
+    line = `${fromLabel} — full message saved to file (too long for inline delivery). Read it with: ${msgFile}\n`
+  }
+  appendFileSync(inboxPath, line)
+
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('session:message-received', { targetSessionId, fromSessionId: fromSessionId ?? null, message })
+  }
+
+  console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] delivered message to ${targetSessionId}`)
+  return { ok: true }
+}
+
 function handleSendMessage(body: string, res: import('http').ServerResponse): void {
   try {
     const { targetSessionId, message, fromSessionId } = JSON.parse(body) as {
@@ -247,41 +297,13 @@ function handleSendMessage(body: string, res: import('http').ServerResponse): vo
       return
     }
 
-    const session = getSession(targetSessionId)
-    if (!session) {
-      res.writeHead(404, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: `Session ${targetSessionId} not found` }))
+    const result = deliverSessionMessage(targetSessionId, message, fromSessionId ?? null)
+    if (!result.ok) {
+      res.writeHead(result.status, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: result.error }))
       return
     }
 
-    // Append message to the session's inbox file — the monitor (tail -f) picks it up
-    const fromLabel = fromSessionId ? `Message from session ${fromSessionId}` : 'Message from another session'
-    const msgDir = join(app.getPath('userData'), 'messages', targetSessionId)
-    mkdirSync(msgDir, { recursive: true })
-    const inboxPath = join(msgDir, 'inbox.txt')
-
-    // For long messages, write to a file and reference it in the inbox line.
-    // Claude Code truncates monitor notifications at exactly 500 chars.
-    // Reserve room for the "Message from session {uuid}: " prefix (~60 chars).
-    const MAX_INLINE_LENGTH = 400
-    const escaped = message.replace(/\n/g, '\\n')
-    let line: string
-    if (escaped.length <= MAX_INLINE_LENGTH) {
-      line = `${fromLabel}: ${escaped}\n`
-    } else {
-      const msgFile = join(msgDir, `msg-${randomUUID()}.md`)
-      writeFileSync(msgFile, message)
-      line = `${fromLabel} — full message saved to file (too long for inline delivery). Read it with: ${msgFile}\n`
-    }
-    appendFileSync(inboxPath, line)
-
-    // Notify renderer for popup UI
-    const win = BrowserWindow.getAllWindows()[0]
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('session:message-received', { targetSessionId, fromSessionId: fromSessionId ?? null, message })
-    }
-
-    console.log(`[hook-server ${new Date().toISOString().slice(11, 23)}] delivered message to ${targetSessionId}`)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ delivered: true }))
   } catch (err) {
@@ -385,7 +407,7 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
 
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) {
-      win.webContents.send('session:spawned', { id, projectPath: cwd })
+      win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null })
     }
 
     console.log(`[hook-server] spawned agent "${agent.name}" session ${id} in ${cwd}`)
@@ -395,6 +417,62 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     console.error('[hook-server] spawn-agent error:', err)
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+// ── Ambient awareness (UserPromptSubmit → inject agent-todo count) ─────────
+
+/** Last observed agent-todo count per session, for change-detection. */
+const lastAgentTodoCount = new Map<string, number>()
+
+interface SyncHookReply {
+  hookSpecificOutput?: {
+    hookEventName: string
+    additionalContext?: string
+  }
+}
+
+function buildSyncHookResponse(appSessionId: string | null, payload: HookPayload): SyncHookReply {
+  if (!appSessionId || payload.hook_event_name !== 'UserPromptSubmit') return {}
+
+  try {
+    // Stable identifier: prefer Claude Code's conversation UUID (survives reloads)
+    // and fall back to the PTY session ID for legacy assignments.
+    const claudeId = payload.session_id || null
+    const ids = [claudeId, appSessionId].filter((x): x is string => !!x)
+
+    const allAssigned = notesManager.listAllTodos({ status: 'agent-todo' })
+    const count = allAssigned.filter((t) => t.todo.assignee && ids.includes(t.todo.assignee)).length
+
+    // Track against the stable key so we don't lose delta state across reloads.
+    const trackKey = claudeId ?? appSessionId
+    const prev = lastAgentTodoCount.get(trackKey) ?? -1
+    lastAgentTodoCount.set(trackKey, count)
+
+    if (count === 0) return {}
+    if (prev === count) return {}
+
+    const delta = prev === -1 ? count : (count - prev)
+    const deltaText = prev === -1
+      ? `first check of this session`
+      : delta > 0
+        ? `${delta} new since last message`
+        : delta < 0
+          ? `${-delta} cleared since last message`
+          : 'unchanged'
+
+    const lookupId = claudeId ?? appSessionId
+    const context = `You have ${count} agent-todo${count === 1 ? '' : 's'} assigned to this session (${deltaText}). `
+      + `Use the list-todos MCP tool (assignee="${lookupId}") to see them.`
+
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext: context,
+      },
+    }
+  } catch {
+    return {}
   }
 }
 
@@ -448,15 +526,26 @@ function makeHookCommand(port: number): string {
   return `curl -sf "http://127.0.0.1:${port}/hook?sid=$APP_SESSION_ID" -H 'Content-Type: application/json' -d @- > /dev/null 2>&1 # ${HOOK_MARKER}`
 }
 
+/** Synchronous hook command — outputs the server's JSON response to stdout so Claude can consume it. */
+function makeSyncHookCommand(port: number): string {
+  return `curl -sf "http://127.0.0.1:${port}/hook-sync?sid=$APP_SESSION_ID" -H 'Content-Type: application/json' -d @- 2>/dev/null # ${HOOK_MARKER}`
+}
+
 function installHooks(port: number): void {
   const settings = readSettings()
   const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>
 
   const cmd = makeHookCommand(port)
+  const syncCmd = makeSyncHookCommand(port)
   const hookEntry = {
     type: 'command',
     command: cmd,
     timeout: 5
+  }
+  const syncHookEntry = {
+    type: 'command',
+    command: syncCmd,
+    timeout: 3
   }
 
   // Remove any existing session-manager hooks from all event types first
@@ -495,10 +584,12 @@ function installHooks(port: number): void {
     { hooks: [{ ...hookEntry, async: true }] }
   ]
 
-  // UserPromptSubmit — User just submitted a prompt
+  // UserPromptSubmit — fire the async tracker hook plus a sync hook that can inject
+  // a system-reminder about assigned agent-todos.
   hooks.UserPromptSubmit = [
     ...((hooks.UserPromptSubmit ?? []) as Array<Record<string, unknown>>),
-    { hooks: [{ ...hookEntry, async: true }] }
+    { hooks: [{ ...hookEntry, async: true }] },
+    { hooks: [syncHookEntry] },
   ]
 
   settings.hooks = hooks

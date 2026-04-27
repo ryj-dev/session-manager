@@ -8,6 +8,7 @@ import { saveSessions } from './session-store'
 import { startHookServer, stopHookServer } from './hook-server'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
+import { setNotesRoot, startNotesWatcher, stopNotesWatcher } from './notes-manager'
 import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 
@@ -47,6 +48,7 @@ function saveAndCleanup(): void {
   cleanupAllSkillCommands()
   stopHookServer()
   stopMemoryWatcher()
+  stopNotesWatcher()
   unregisterMcpServer()
   uninstallPlugin()
 }
@@ -190,7 +192,17 @@ app.whenReady().then(async () => {
   uninstallPlugin() // Clean stale registration from prior crash before re-installing
   installPlugin()
   startMemoryWatcher()
-  registerMcpServer(getMcpServerScriptPath(), join(app.getPath('userData'), 'memories'), app.getPath('userData'))
+  setNotesRoot(join(app.getPath('userData'), 'notes'))
+  startNotesWatcher(() => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win && !win.isDestroyed()) win.webContents.send('notes:changed')
+  })
+  registerMcpServer(
+    getMcpServerScriptPath(),
+    join(app.getPath('userData'), 'memories'),
+    app.getPath('userData'),
+    join(app.getPath('userData'), 'notes')
+  )
   registerIpcHandlers()
   createWindow()
 
