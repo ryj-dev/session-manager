@@ -305,6 +305,35 @@ const api = {
 
   removeClaudeMdInstructions: (): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('claude:removeClaudeMdInstructions'),
+
+  // Cleanup / Uninstall
+  cleanupStatus: (): Promise<CleanupStatus> => ipcRenderer.invoke('cleanup:status'),
+  cleanupRemoveMcp: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeMcp'),
+  cleanupRemoveHooks: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeHooks'),
+  cleanupRemoveStatusline: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeStatusline'),
+  cleanupRemoveSlashCommands: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSlashCommands'),
+  cleanupRemovePlugin: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removePlugin'),
+  cleanupRemoveMemory: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeMemory'),
+  cleanupRemoveEmbeddings: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeEmbeddings'),
+  cleanupRemoveNotes: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeNotes'),
+  cleanupRemoveSessions: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSessions'),
+  cleanupResetAppSettings: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:resetAppSettings'),
+}
+
+export type CleanupResult = { ok: boolean; error?: string }
+
+export interface CleanupStatus {
+  mcp: { installed: boolean; disabled: boolean }
+  hooks: { installed: boolean; disabled: boolean }
+  statusline: { installed: boolean; managed: boolean; hasCustom: boolean }
+  claudeMd: { installed: boolean }
+  slashCommands: { installed: boolean; count: number }
+  plugin: { pluginDirExists: boolean; disabled: boolean }
+  memory: { exists: boolean; bytes: number; files: number }
+  embeddings: { dbExists: boolean; dbBytes: number; modelCacheExists: boolean; modelCacheBytes: number }
+  notes: { exists: boolean; bytes: number; files: number }
+  sessions: { savedExists: boolean; messagesExists: boolean }
+  appSettings: { exists: boolean }
 }
 
 contextBridge.exposeInMainWorld('api', api)

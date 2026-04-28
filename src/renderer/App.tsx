@@ -6,6 +6,7 @@ import { FileExplorer } from './components/FileExplorer'
 import { Settings } from './components/Settings'
 import { KeyboardShortcuts } from './components/KeyboardShortcuts'
 import { StatuslineEditor } from './components/StatuslineEditor'
+import { CleanupPanel } from './components/CleanupPanel'
 import { SidebarPicker } from './components/SidebarPicker'
 import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
@@ -105,6 +106,7 @@ export function App(): JSX.Element {
   const [showSettings, setShowSettings] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [showStatusline, setShowStatusline] = useState(false)
+  const [showCleanup, setShowCleanup] = useState(false)
 
   // Saved sessions restore prompt
   const [savedSessions, setSavedSessions] = useState<SavedSessionInfo[]>([])
@@ -909,7 +911,7 @@ export function App(): JSX.Element {
       />
 
       {/* Settings overlay */}
-      <Settings visible={showSettings} onClose={() => setShowSettings(false)} onOpenShortcuts={() => setShowShortcuts(true)} onOpenStatusline={() => setShowStatusline(true)} />
+      <Settings visible={showSettings} onClose={() => setShowSettings(false)} onOpenShortcuts={() => setShowShortcuts(true)} onOpenStatusline={() => setShowStatusline(true)} onOpenCleanup={() => setShowCleanup(true)} />
 
       {/* Keyboard shortcuts page */}
       <KeyboardShortcuts visible={showShortcuts} onClose={() => setShowShortcuts(false)} />
@@ -920,6 +922,9 @@ export function App(): JSX.Element {
         onClose={() => setShowStatusline(false)}
         onSpawn={(name, content) => handleSpawnWithSkill(name, content)}
       />
+
+      {/* Cleanup & uninstall page */}
+      <CleanupPanel visible={showCleanup} onClose={() => setShowCleanup(false)} />
 
       {/* Restore sessions prompt */}
       {showRestorePrompt && (

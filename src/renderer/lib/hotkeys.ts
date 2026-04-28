@@ -12,7 +12,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   toggleMemory: 'Toggle memory panel',
   toggleNotesProject: 'Notes (project view)',
   toggleNotesGlobal: 'Notes (global todos)',
-  openSettings: 'Open settings'
+  openSettings: 'Open settings',
+  copyFilePath: 'Copy file path (in file explorer)'
 }
 
 /** All recognized modifier tokens in canonical order */

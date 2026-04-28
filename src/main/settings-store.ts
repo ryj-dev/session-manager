@@ -33,6 +33,12 @@ export const defaultHotkeys: HotkeyMap = {
 
 export type MessagePopupMode = 'manual' | 'timed' | 'disabled'
 
+export interface DisabledIntegrations {
+  mcp?: boolean
+  hooks?: boolean
+  plugin?: boolean
+}
+
 export interface AppSettings {
   baseProjectsDir: string | null
   autoFocusOnSpawn: boolean
@@ -44,6 +50,7 @@ export interface AppSettings {
   notesShowInactive?: boolean
   notesProjectViewDefault?: 'project' | 'global'
   notesZoom?: number
+  disabledIntegrations?: DisabledIntegrations
 }
 
 const defaults: AppSettings = {
@@ -57,6 +64,15 @@ const defaults: AppSettings = {
   notesShowInactive: false,
   notesProjectViewDefault: 'project',
   notesZoom: 1.15,
+  disabledIntegrations: {},
+}
+
+export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {
+  const current = loadSettings()
+  const disabled: DisabledIntegrations = { ...(current.disabledIntegrations ?? {}) }
+  if (value) disabled[key] = true
+  else delete disabled[key]
+  saveSettings({ ...current, disabledIntegrations: disabled })
 }
 
 function getSettingsPath(): string {

@@ -1,5 +1,5 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, rmSync, statSync, readdirSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
@@ -17,9 +17,11 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
-import { loadSettings, saveSettings, type AppSettings } from './settings-store'
+import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
+import { unregisterMcpServer } from './mcp-launcher'
+import { uninstallPlugin } from './plugin-manager'
 import {
   readNote,
   writeNote,
@@ -619,6 +621,245 @@ export function registerIpcHandlers(): void {
     } catch (err) {
       return { ok: false, error: String(err) }
     }
+  })
+
+  // ── Cleanup / Uninstall ─────────────────────────────────────────────
+  registerCleanupHandlers(claudeSettingsPath, statuslineConfigPath, statuslineScriptPath, claudeMdPath, CLAUDE_MD_MARKER)
+}
+
+// ── Cleanup helpers ─────────────────────────────────────────────────
+
+function dirSizeAndCount(dir: string, exts?: string[]): { bytes: number; files: number } {
+  let bytes = 0
+  let files = 0
+  const walk = (current: string): void => {
+    let entries: string[]
+    try { entries = readdirSync(current) } catch { return }
+    for (const entry of entries) {
+      const full = join(current, entry)
+      let st
+      try { st = statSync(full) } catch { continue }
+      if (st.isDirectory()) walk(full)
+      else if (st.isFile()) {
+        if (!exts || exts.some((e) => entry.endsWith(e))) {
+          bytes += st.size
+          files += 1
+        }
+      }
+    }
+  }
+  walk(dir)
+  return { bytes, files }
+}
+
+function fileSize(path: string): number {
+  try { return statSync(path).size } catch { return 0 }
+}
+
+function clearDirContents(dir: string): { bytes: number; files: number } {
+  if (!existsSync(dir)) return { bytes: 0, files: 0 }
+  const stats = dirSizeAndCount(dir)
+  for (const entry of readdirSync(dir)) {
+    rmSync(join(dir, entry), { recursive: true, force: true })
+  }
+  return stats
+}
+
+interface CleanupStatus {
+  mcp: { installed: boolean; disabled: boolean }
+  hooks: { installed: boolean; disabled: boolean }
+  statusline: { installed: boolean; managed: boolean; hasCustom: boolean }
+  claudeMd: { installed: boolean }
+  slashCommands: { installed: boolean; count: number }
+  plugin: { pluginDirExists: boolean; disabled: boolean }
+  memory: { exists: boolean; bytes: number; files: number }
+  embeddings: { dbExists: boolean; dbBytes: number; modelCacheExists: boolean; modelCacheBytes: number }
+  notes: { exists: boolean; bytes: number; files: number }
+  sessions: { savedExists: boolean; messagesExists: boolean }
+  appSettings: { exists: boolean }
+}
+
+function registerCleanupHandlers(
+  claudeSettingsPath: string,
+  statuslineConfigPath: string,
+  statuslineScriptPath: string,
+  claudeMdPath: string,
+  CLAUDE_MD_MARKER: string,
+): void {
+  const userData = app.getPath('userData')
+  const home = app.getPath('home')
+  const mcpJsonPath = join(home, '.claude.json')
+  const slashCommandsDir = join(home, '.claude', 'commands')
+  const memoriesDir = join(userData, 'memories')
+  const notesDir = join(userData, 'notes')
+  const embeddingsDb = join(userData, 'memory-embeddings.db')
+  const modelCacheDir = join(userData, 'models', 'bge-small-en-v1.5')
+  const sessionsFile = join(userData, 'sessions.json')
+  const messagesDir = join(userData, 'messages')
+  const pluginDir = join(userData, 'plugin')
+  const settingsFile = join(userData, 'state', 'settings.json')
+
+  const HOOK_MARKER = 'session-manager-hook'
+  const SKILL_PREFIX = 'sm-'
+
+  function readJsonSafe(path: string): Record<string, unknown> | null {
+    try { return JSON.parse(readFileSync(path, 'utf-8')) } catch { return null }
+  }
+
+  function getStatus(): CleanupStatus {
+    const disabled = loadSettings().disabledIntegrations ?? {}
+
+    const mcpJson = readJsonSafe(mcpJsonPath)
+    const mcpInstalled = !!(mcpJson?.mcpServers && (mcpJson.mcpServers as Record<string, unknown>)['session-manager'])
+
+    const claudeSettings = readJsonSafe(claudeSettingsPath) ?? {}
+    const hooks = (claudeSettings.hooks ?? {}) as Record<string, Array<Record<string, unknown>>>
+    let hooksInstalled = false
+    for (const eventName of Object.keys(hooks)) {
+      for (const entry of hooks[eventName] ?? []) {
+        const entryHooks = entry.hooks as Array<Record<string, unknown>> | undefined
+        if (entryHooks?.some((h) => typeof h.command === 'string' && (h.command as string).includes(HOOK_MARKER))) {
+          hooksInstalled = true
+          break
+        }
+      }
+      if (hooksInstalled) break
+    }
+
+    const statuslineConfig = readJsonSafe(statuslineConfigPath)
+    const hasCustom = !!claudeSettings.statusLine
+    const statuslineManaged = !!(statuslineConfig && statuslineConfig.managed)
+
+    let claudeMdInstalled = false
+    try { claudeMdInstalled = readFileSync(claudeMdPath, 'utf-8').includes(CLAUDE_MD_MARKER) } catch { /* missing */ }
+
+    let slashCount = 0
+    try {
+      slashCount = readdirSync(slashCommandsDir).filter((f) => f.startsWith(SKILL_PREFIX) && f.endsWith('.md')).length
+    } catch { /* missing dir */ }
+
+    const memoryStats = existsSync(memoriesDir) ? dirSizeAndCount(memoriesDir, ['.md']) : { bytes: 0, files: 0 }
+    const notesStats = existsSync(notesDir) ? dirSizeAndCount(notesDir) : { bytes: 0, files: 0 }
+    const modelCacheBytes = existsSync(modelCacheDir) ? dirSizeAndCount(modelCacheDir).bytes : 0
+
+    return {
+      mcp: { installed: mcpInstalled, disabled: !!disabled.mcp },
+      hooks: { installed: hooksInstalled, disabled: !!disabled.hooks },
+      statusline: {
+        installed: statuslineManaged || hasCustom,
+        managed: statuslineManaged,
+        hasCustom,
+      },
+      claudeMd: { installed: claudeMdInstalled },
+      slashCommands: { installed: slashCount > 0, count: slashCount },
+      plugin: { pluginDirExists: existsSync(pluginDir), disabled: !!disabled.plugin },
+      memory: { exists: existsSync(memoriesDir) && memoryStats.files > 0, bytes: memoryStats.bytes, files: memoryStats.files },
+      embeddings: {
+        dbExists: existsSync(embeddingsDb),
+        dbBytes: fileSize(embeddingsDb),
+        modelCacheExists: existsSync(modelCacheDir),
+        modelCacheBytes,
+      },
+      notes: { exists: existsSync(notesDir) && notesStats.files > 0, bytes: notesStats.bytes, files: notesStats.files },
+      sessions: { savedExists: existsSync(sessionsFile), messagesExists: existsSync(messagesDir) },
+      appSettings: { exists: existsSync(settingsFile) },
+    }
+  }
+
+  ipcMain.handle('cleanup:status', (): CleanupStatus => getStatus())
+
+  ipcMain.handle('cleanup:removeMcp', () => {
+    try {
+      unregisterMcpServer()
+      setDisabledIntegration('mcp', true)
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeHooks', () => {
+    try {
+      removeHooks()
+      setDisabledIntegration('hooks', true)
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeStatusline', () => {
+    try {
+      try { unlinkSync(statuslineConfigPath) } catch { /* missing */ }
+      try { unlinkSync(statuslineScriptPath) } catch { /* missing */ }
+      try {
+        const settings = readJsonSafe(claudeSettingsPath)
+        if (settings && 'statusLine' in settings) {
+          delete settings.statusLine
+          writeFileSync(claudeSettingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8')
+        }
+      } catch { /* ignore */ }
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeSlashCommands', () => {
+    try {
+      cleanupAllSkillCommands()
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removePlugin', () => {
+    try {
+      uninstallPlugin()
+      try { rmSync(pluginDir, { recursive: true, force: true }) } catch { /* missing */ }
+      setDisabledIntegration('plugin', true)
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeMemory', () => {
+    try {
+      const stats = clearDirContents(memoriesDir)
+      sendToRenderer('memory:changed', [])
+      return { ok: true, ...stats }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeEmbeddings', () => {
+    try {
+      let bytes = 0
+      if (existsSync(embeddingsDb)) {
+        bytes += fileSize(embeddingsDb)
+        try { unlinkSync(embeddingsDb) } catch { /* file locked? */ }
+      }
+      if (existsSync(modelCacheDir)) {
+        bytes += dirSizeAndCount(modelCacheDir).bytes
+        rmSync(modelCacheDir, { recursive: true, force: true })
+      }
+      return { ok: true, bytes }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeNotes', () => {
+    try {
+      const stats = clearDirContents(notesDir)
+      sendToRenderer('notes:changed')
+      return { ok: true, ...stats }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeSessions', () => {
+    try {
+      try { unlinkSync(sessionsFile) } catch { /* missing */ }
+      try { rmSync(messagesDir, { recursive: true, force: true }) } catch { /* missing */ }
+      clearSavedSessions()
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:resetAppSettings', () => {
+    try {
+      try { unlinkSync(settingsFile) } catch { /* missing */ }
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
   })
 }
 

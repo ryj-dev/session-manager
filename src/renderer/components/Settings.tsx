@@ -7,9 +7,10 @@ interface SettingsProps {
   onClose: () => void
   onOpenShortcuts: () => void
   onOpenStatusline: () => void
+  onOpenCleanup: () => void
 }
 
-export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }: SettingsProps): JSX.Element {
+export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, onOpenCleanup }: SettingsProps): JSX.Element {
   const baseProjectsDir = useStore((s) => s.baseProjectsDir)
   const setBaseProjectsDir = useStore((s) => s.setBaseProjectsDir)
   const autoFocusOnSpawn = useStore((s) => s.autoFocusOnSpawn)
@@ -236,6 +237,21 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline }
                     <line x1="9.5" y1="7" x2="11" y2="7" stroke="currentColor" strokeWidth="0.8" strokeLinecap="round" />
                   </svg>
                   <span className="text-xs text-zinc-300">Statusline</span>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="text-zinc-600 group-hover:text-zinc-400 transition-colors">
+                  <path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+
+              <button
+                onClick={() => { onClose(); onOpenCleanup() }}
+                className="w-full flex items-center justify-between px-3 py-2.5 bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 hover:border-zinc-600 rounded-lg transition-colors group"
+              >
+                <div className="flex items-center gap-2.5">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="text-zinc-400">
+                    <path d="M3 4h8M5.5 4V2.5h3V4M4.5 4l.5 7.5a1 1 0 001 1h3a1 1 0 001-1L9.5 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <span className="text-xs text-zinc-300">Cleanup &amp; uninstall</span>
                 </div>
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="none" className="text-zinc-600 group-hover:text-zinc-400 transition-colors">
                   <path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />

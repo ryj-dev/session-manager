@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store'
-import { formatHotkey } from '../lib/hotkeys'
+import { formatHotkey, comboFromEvent } from '../lib/hotkeys'
 
 interface FsEntry {
   name: string
@@ -95,14 +95,17 @@ export function FileExplorer({
     if (!visible) return
 
     const handleKeyDown = (e: KeyboardEvent): void => {
-      const meta = e.metaKey || e.ctrlKey
-
-      // Cmd+Opt+C — copy selected entry path (or current directory if nothing selected)
-      if (meta && e.altKey && e.code === 'KeyC') {
-        e.preventDefault()
-        const pathToCopy = entries[selectedIndex]?.path || currentPath
-        navigator.clipboard.writeText(pathToCopy)
-        return
+      // Configurable copy-path hotkey: requires the app base modifier (Cmd on Mac, Alt on Windows).
+      const isMac = navigator.platform.startsWith('Mac')
+      const baseMeta = isMac ? e.metaKey : e.altKey
+      if (baseMeta) {
+        const combo = comboFromEvent(e)
+        if (combo && combo === hotkeys.copyFilePath) {
+          e.preventDefault()
+          const pathToCopy = entries[selectedIndex]?.path || currentPath
+          navigator.clipboard.writeText(pathToCopy)
+          return
+        }
       }
 
       switch (e.key) {
@@ -139,7 +142,7 @@ export function FileExplorer({
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [visible, entries, selectedIndex, currentPath, onClose])
+  }, [visible, entries, selectedIndex, currentPath, onClose, hotkeys.copyFilePath])
 
   return (
     <AnimatePresence>
@@ -161,7 +164,7 @@ export function FileExplorer({
           {/* Breadcrumb hint */}
           <div className="px-3 py-1.5 border-b border-zinc-800/30">
             <span className="text-[10px] text-zinc-600">
-              ← back · → enter · {formatHotkey(hotkeys.spawnSession)} spawn here · ⌘⌥C copy path
+              ← back · → enter · {formatHotkey(hotkeys.spawnSession)} spawn here · {formatHotkey(hotkeys.copyFilePath)} copy path
             </span>
           </div>
 

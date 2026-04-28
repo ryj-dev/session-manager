@@ -83,7 +83,7 @@ function removePortFile(): void {
   } catch { /* non-critical */ }
 }
 
-export function startHookServer(): Promise<number> {
+export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
   return new Promise((resolve, reject) => {
     server = createServer((req, res) => {
       let body = ''
@@ -159,7 +159,7 @@ export function startHookServer(): Promise<number> {
         serverPort = addr.port
         console.log(`[hook-server] listening on port ${serverPort}`)
         writePortFile(serverPort)
-        installHooks(serverPort)
+        if (!opts.skipInstall) installHooks(serverPort)
         resolve(serverPort)
       } else {
         reject(new Error('Failed to bind hook server'))
@@ -597,7 +597,7 @@ function installHooks(port: number): void {
   console.log('[hook-server] installed hooks in', SETTINGS_PATH)
 }
 
-function removeHooks(): void {
+export function removeHooks(): void {
   try {
     const settings = readSettings()
     const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>

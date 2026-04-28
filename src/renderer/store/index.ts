@@ -14,6 +14,7 @@ export interface HotkeyMap {
   toggleMemory: string
   toggleNotesProject: string
   toggleNotesGlobal: string
+  copyFilePath: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -28,6 +29,9 @@ export const defaultHotkeys: HotkeyMap = {
   toggleMemory: 'm',
   toggleNotesProject: 'n',
   toggleNotesGlobal: 'shift+n',
+  // Mac: Cmd+Opt+C. Windows: Alt+Shift+C (Alt is the base app modifier on Windows,
+  // so 'alt' isn't expressible as an extra; use shift instead).
+  copyFilePath: typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac') ? 'alt+c' : 'shift+c',
 }
 
 export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | null
