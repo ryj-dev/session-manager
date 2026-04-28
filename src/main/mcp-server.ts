@@ -27,6 +27,12 @@ import {
   type MemoryNote,
 } from './memory/core'
 import { createNoteIO, type NoteIO } from './memory/note-io'
+import { rrf } from './memory/embeddings'
+import {
+  configureEmbedClient,
+  isAvailable as isEmbedClientAvailable,
+  searchSemantic as embedClientSearch
+} from './memory/embed-client'
 import * as notes from './notes-manager'
 
 // ─── Storage ───────────────────────────────────────────────────────────────
@@ -39,6 +45,12 @@ const MEMORIES_DIR = process.env.SM_MEMORIES_DIR || path.join(
 )
 
 const io: NoteIO = createNoteIO(MEMORIES_DIR)
+
+// Connect to the main process's embed-server for semantic search. The model
+// is loaded once in the main process; this child sends queries over a Unix
+// socket / named pipe instead of loading its own copy. Falls back to
+// keyword-only if the socket is unreachable.
+configureEmbedClient(process.env.SM_EMBED_SOCKET || null)
 
 function today(): string {
   return new Date().toISOString().split('T')[0]
@@ -378,7 +390,7 @@ server.tool(
 
 server.tool(
   'search-memories',
-  'Search memory notes by content, filename, or both.',
+  'Search memory notes by content, filename, or both. Uses hybrid keyword + semantic search when the local embedding index is available; falls back to keyword-only otherwise.',
   {
     query: z.string().describe('Search query'),
     searchType: z.enum(['content', 'filename', 'both']).optional().describe('Where to search (default: both)')
@@ -386,8 +398,9 @@ server.tool(
   async ({ query, searchType }) => {
     const type = searchType || 'both'
     const q = query.toLowerCase()
-    const results: string[] = []
 
+    // Keyword pass over all notes.
+    const keyword: string[] = []
     for (const fn of io.listNotes()) {
       const note = io.readNote(fn)
       if (!note) continue
@@ -395,9 +408,35 @@ server.tool(
       const matchesFilename = fn.toLowerCase().includes(q)
       const matchesContent = note.rawBody.toLowerCase().includes(q)
 
-      if (type === 'filename' && matchesFilename) results.push(fn)
-      else if (type === 'content' && matchesContent) results.push(fn)
-      else if (type === 'both' && (matchesFilename || matchesContent)) results.push(fn)
+      if (type === 'filename' && matchesFilename) keyword.push(fn)
+      else if (type === 'content' && matchesContent) keyword.push(fn)
+      else if (type === 'both' && (matchesFilename || matchesContent)) keyword.push(fn)
+    }
+
+    let results: string[] = keyword
+
+    // Semantic pass — only when index is available and we're searching content.
+    if (
+      query.trim().length > 0 &&
+      type !== 'filename' &&
+      (await isEmbedClientAvailable())
+    ) {
+      const semanticHits = await embedClientSearch(query, 50)
+      const semanticByFile: string[] = []
+      const seen = new Set<string>()
+      for (const hit of semanticHits) {
+        if (seen.has(hit.filename)) continue
+        seen.add(hit.filename)
+        semanticByFile.push(hit.filename)
+      }
+      const fused = rrf<string>(
+        [
+          { items: keyword },
+          { items: semanticByFile }
+        ],
+        (fn) => fn
+      )
+      results = fused.map((f) => f.item)
     }
 
     if (results.length === 0) {

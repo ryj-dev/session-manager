@@ -8,9 +8,12 @@ import { saveSessions } from './session-store'
 import { startHookServer, stopHookServer } from './hook-server'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
+import { initMemoryEmbeddings, reindexAll } from './memory/embeddings-runtime'
+import { startEmbedServer, stopEmbedServer } from './memory/embed-server'
 import { setNotesRoot, startNotesWatcher, stopNotesWatcher } from './notes-manager'
 import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
 import { installPlugin, uninstallPlugin } from './plugin-manager'
+import { loadSettings } from './settings-store'
 
 // Register design:// as a privileged scheme (must be done before app ready)
 protocol.registerSchemesAsPrivileged([
@@ -48,6 +51,7 @@ function saveAndCleanup(): void {
   cleanupAllSkillCommands()
   stopHookServer()
   stopMemoryWatcher()
+  stopEmbedServer()
   stopNotesWatcher()
   unregisterMcpServer()
   uninstallPlugin()
@@ -188,21 +192,43 @@ app.whenReady().then(async () => {
   cleanupAllSkillCommands() // Remove stale skill commands from previous sessions
   // Wipe stale inbox files from previous sessions/crashes (may fail on Windows if files are still locked)
   try { rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true }) } catch { /* best-effort */ }
-  await startHookServer()
-  uninstallPlugin() // Clean stale registration from prior crash before re-installing
-  installPlugin()
+  const disabled = loadSettings().disabledIntegrations ?? {}
+  await startHookServer({ skipInstall: !!disabled.hooks })
+  if (!disabled.plugin) {
+    uninstallPlugin() // Clean stale registration from prior crash before re-installing
+    installPlugin()
+  }
+  // Start the embed-server socket immediately so MCP children that connect
+  // before the model finishes loading get a definitive "not yet" via ping.
+  const embedHandle = await startEmbedServer().catch((err) => {
+    console.error('[memory] embed-server failed to start:', err)
+    return null
+  })
+  // Kick off model resolution (bundled or downloaded). Doesn't block UI.
+  // The bootstrap reindex awaits this internally.
+  void initMemoryEmbeddings().then(() =>
+    reindexAll((p) => {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('memory:index-progress', p)
+      }
+    }).catch((err) => console.error('[memory] bootstrap reindex failed:', err))
+  )
   startMemoryWatcher()
   setNotesRoot(join(app.getPath('userData'), 'notes'))
   startNotesWatcher(() => {
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) win.webContents.send('notes:changed')
   })
-  registerMcpServer(
-    getMcpServerScriptPath(),
-    join(app.getPath('userData'), 'memories'),
-    app.getPath('userData'),
-    join(app.getPath('userData'), 'notes')
-  )
+  if (!disabled.mcp) {
+    registerMcpServer(
+      getMcpServerScriptPath(),
+      join(app.getPath('userData'), 'memories'),
+      app.getPath('userData'),
+      join(app.getPath('userData'), 'notes'),
+      embedHandle?.socketPath
+    )
+  }
   registerIpcHandlers()
   createWindow()
 

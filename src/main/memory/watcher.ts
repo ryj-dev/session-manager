@@ -6,6 +6,7 @@
 import fs from 'fs'
 import { getMemoriesDir } from './store'
 import { invalidate } from './index'
+import { reindexNote } from './embeddings-runtime'
 
 let watcher: fs.FSWatcher | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -30,6 +31,8 @@ export function startMemoryWatcher(): void {
 
         for (const fn of changed) {
           invalidate(fn)
+          // Fire-and-forget; embedding errors are logged inside.
+          void reindexNote(fn)
         }
       }, DEBOUNCE_MS)
     })

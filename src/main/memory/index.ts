@@ -9,6 +9,7 @@ import {
   readNote,
   type MemoryNote
 } from './store'
+import { searchSemantic, rrf, isEmbeddingsAvailable } from './embeddings'
 
 export interface IndexedNote {
   filename: string
@@ -140,6 +141,57 @@ export function searchNotes(
     if (searchType === 'content') return matchesContent
     return matchesFilename || matchesContent
   })
+}
+
+/**
+ * Hybrid keyword + semantic search, fused via reciprocal rank fusion.
+ * Falls back to keyword-only if the embeddings index is unavailable
+ * or the query is empty.
+ */
+export async function searchNotesHybrid(
+  query: string,
+  opts: {
+    searchType?: 'content' | 'filename' | 'both'
+    tagFilter?: string
+    typeFilter?: string
+    limit?: number
+  } = {}
+): Promise<IndexedNote[]> {
+  const limit = opts.limit ?? 20
+  const keyword = searchNotes(
+    query,
+    opts.searchType ?? 'both',
+    opts.tagFilter,
+    opts.typeFilter
+  )
+
+  if (!query.trim() || !isEmbeddingsAvailable()) {
+    return keyword.slice(0, limit)
+  }
+
+  const idx = getIndex()
+  const semanticHits = await searchSemantic(query, 50)
+  // Collapse multi-chunk hits down to per-file (best chunk wins position).
+  const seenFiles = new Set<string>()
+  const semanticByFile: IndexedNote[] = []
+  for (const hit of semanticHits) {
+    if (seenFiles.has(hit.filename)) continue
+    const note = idx.get(hit.filename)
+    if (!note) continue
+    if (opts.tagFilter && !note.tags.includes(opts.tagFilter)) continue
+    if (opts.typeFilter && note.type !== opts.typeFilter) continue
+    seenFiles.add(hit.filename)
+    semanticByFile.push(note)
+  }
+
+  const fused = rrf<IndexedNote>(
+    [
+      { items: keyword, weight: 1 },
+      { items: semanticByFile, weight: 1 }
+    ],
+    (n) => n.filename
+  )
+  return fused.slice(0, limit).map((f) => f.item)
 }
 
 // ─── Graph data ─────────────────────────────────────────────────────────────
