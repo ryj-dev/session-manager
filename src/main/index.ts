@@ -220,7 +220,7 @@ app.whenReady().then(async () => {
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) win.webContents.send('notes:changed')
   })
-  if (!disabled.mcp) {
+  const doRegisterMcp = (): void => {
     registerMcpServer(
       getMcpServerScriptPath(),
       join(app.getPath('userData'), 'memories'),
@@ -229,7 +229,8 @@ app.whenReady().then(async () => {
       embedHandle?.socketPath
     )
   }
-  registerIpcHandlers()
+  if (!disabled.mcp) doRegisterMcp()
+  registerIpcHandlers({ reinstallMcp: doRegisterMcp })
   createWindow()
 
   app.on('activate', () => {

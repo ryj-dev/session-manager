@@ -170,6 +170,10 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
   })
 }
 
+export function reinstallHooks(): void {
+  if (serverPort > 0) installHooks(serverPort)
+}
+
 export function stopHookServer(): void {
   removeHooks()
   removePortFile()

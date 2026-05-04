@@ -17,11 +17,11 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
 import { unregisterMcpServer } from './mcp-launcher'
-import { uninstallPlugin } from './plugin-manager'
+import { uninstallPlugin, installPlugin } from './plugin-manager'
 import {
   readNote,
   writeNote,
@@ -78,7 +78,7 @@ function attachSessionListeners(
   })
 }
 
-export function registerIpcHandlers(): void {
+export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Register the attach-listeners callback for hook-server spawned sessions
   setAttachListeners((id, session) => attachSessionListeners(id, session))
 
@@ -624,7 +624,7 @@ export function registerIpcHandlers(): void {
   })
 
   // ── Cleanup / Uninstall ─────────────────────────────────────────────
-  registerCleanupHandlers(claudeSettingsPath, statuslineConfigPath, statuslineScriptPath, claudeMdPath, CLAUDE_MD_MARKER)
+  registerCleanupHandlers(claudeSettingsPath, statuslineConfigPath, statuslineScriptPath, claudeMdPath, CLAUDE_MD_MARKER, opts.reinstallMcp)
 }
 
 // ── Cleanup helpers ─────────────────────────────────────────────────
@@ -670,7 +670,6 @@ interface CleanupStatus {
   hooks: { installed: boolean; disabled: boolean }
   statusline: { installed: boolean; managed: boolean; hasCustom: boolean }
   claudeMd: { installed: boolean }
-  slashCommands: { installed: boolean; count: number }
   plugin: { pluginDirExists: boolean; disabled: boolean }
   memory: { exists: boolean; bytes: number; files: number }
   embeddings: { dbExists: boolean; dbBytes: number; modelCacheExists: boolean; modelCacheBytes: number }
@@ -685,11 +684,11 @@ function registerCleanupHandlers(
   statuslineScriptPath: string,
   claudeMdPath: string,
   CLAUDE_MD_MARKER: string,
+  reinstallMcp: () => void,
 ): void {
   const userData = app.getPath('userData')
   const home = app.getPath('home')
   const mcpJsonPath = join(home, '.claude.json')
-  const slashCommandsDir = join(home, '.claude', 'commands')
   const memoriesDir = join(userData, 'memories')
   const notesDir = join(userData, 'notes')
   const embeddingsDb = join(userData, 'memory-embeddings.db')
@@ -700,7 +699,6 @@ function registerCleanupHandlers(
   const settingsFile = join(userData, 'state', 'settings.json')
 
   const HOOK_MARKER = 'session-manager-hook'
-  const SKILL_PREFIX = 'sm-'
 
   function readJsonSafe(path: string): Record<string, unknown> | null {
     try { return JSON.parse(readFileSync(path, 'utf-8')) } catch { return null }
@@ -733,11 +731,6 @@ function registerCleanupHandlers(
     let claudeMdInstalled = false
     try { claudeMdInstalled = readFileSync(claudeMdPath, 'utf-8').includes(CLAUDE_MD_MARKER) } catch { /* missing */ }
 
-    let slashCount = 0
-    try {
-      slashCount = readdirSync(slashCommandsDir).filter((f) => f.startsWith(SKILL_PREFIX) && f.endsWith('.md')).length
-    } catch { /* missing dir */ }
-
     const memoryStats = existsSync(memoriesDir) ? dirSizeAndCount(memoriesDir, ['.md']) : { bytes: 0, files: 0 }
     const notesStats = existsSync(notesDir) ? dirSizeAndCount(notesDir) : { bytes: 0, files: 0 }
     const modelCacheBytes = existsSync(modelCacheDir) ? dirSizeAndCount(modelCacheDir).bytes : 0
@@ -751,7 +744,6 @@ function registerCleanupHandlers(
         hasCustom,
       },
       claudeMd: { installed: claudeMdInstalled },
-      slashCommands: { installed: slashCount > 0, count: slashCount },
       plugin: { pluginDirExists: existsSync(pluginDir), disabled: !!disabled.plugin },
       memory: { exists: existsSync(memoriesDir) && memoryStats.files > 0, bytes: memoryStats.bytes, files: memoryStats.files },
       embeddings: {
@@ -799,18 +791,35 @@ function registerCleanupHandlers(
     } catch (err) { return { ok: false, error: String(err) } }
   })
 
-  ipcMain.handle('cleanup:removeSlashCommands', () => {
-    try {
-      cleanupAllSkillCommands()
-      return { ok: true }
-    } catch (err) { return { ok: false, error: String(err) } }
-  })
-
   ipcMain.handle('cleanup:removePlugin', () => {
     try {
       uninstallPlugin()
       try { rmSync(pluginDir, { recursive: true, force: true }) } catch { /* missing */ }
       setDisabledIntegration('plugin', true)
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:reinstallMcp', () => {
+    try {
+      setDisabledIntegration('mcp', false)
+      reinstallMcp()
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:reinstallHooks', () => {
+    try {
+      setDisabledIntegration('hooks', false)
+      reinstallHooks()
+      return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:reinstallPlugin', () => {
+    try {
+      setDisabledIntegration('plugin', false)
+      installPlugin()
       return { ok: true }
     } catch (err) { return { ok: false, error: String(err) } }
   })

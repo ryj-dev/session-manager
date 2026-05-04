@@ -8,7 +8,7 @@ interface CleanupPanelProps {
 }
 
 type RowKey =
-  | 'mcp' | 'hooks' | 'statusline' | 'claudeMd' | 'slashCommands' | 'plugin'
+  | 'mcp' | 'hooks' | 'statusline' | 'claudeMd' | 'plugin'
   | 'memory' | 'embeddings' | 'notes' | 'sessions' | 'appSettings'
 
 interface RowDef {
@@ -19,6 +19,7 @@ interface RowDef {
   /** Returns badge label, badge variant, optional detail line, and isInstalled. */
   status: (s: CleanupStatus) => { label: string; variant: 'installed' | 'empty' | 'data'; detail?: string; isInstalled: boolean }
   remove: () => Promise<{ ok: boolean; error?: string }>
+  reinstall?: () => Promise<{ ok: boolean; error?: string }>
   confirmTitle?: string
   confirmBody?: (s: CleanupStatus) => string
 }
@@ -42,6 +43,7 @@ const ROWS: RowDef[] = [
       isInstalled: s.mcp.installed,
     }),
     remove: () => window.api.cleanupRemoveMcp(),
+    reinstall: () => window.api.cleanupReinstallMcp(),
   },
   {
     key: 'hooks',
@@ -54,6 +56,7 @@ const ROWS: RowDef[] = [
       isInstalled: s.hooks.installed,
     }),
     remove: () => window.api.cleanupRemoveHooks(),
+    reinstall: () => window.api.cleanupReinstallHooks(),
   },
   {
     key: 'statusline',
@@ -80,18 +83,10 @@ const ROWS: RowDef[] = [
       isInstalled: s.claudeMd.installed,
     }),
     remove: () => window.api.removeClaudeMdInstructions(),
-  },
-  {
-    key: 'slashCommands',
-    title: 'Slash commands',
-    description: 'sm-*.md files in ~/.claude/commands/ (one per skill)',
-    destructive: false,
-    status: (s) => ({
-      label: s.slashCommands.count > 0 ? `${s.slashCommands.count} installed` : 'Not installed',
-      variant: s.slashCommands.installed ? 'installed' : 'empty',
-      isInstalled: s.slashCommands.installed,
-    }),
-    remove: () => window.api.cleanupRemoveSlashCommands(),
+    reinstall: async () => {
+      const r = await window.api.installClaudeMdInstructions()
+      return { ok: r.ok, error: r.error }
+    },
   },
   {
     key: 'plugin',
@@ -104,6 +99,7 @@ const ROWS: RowDef[] = [
       isInstalled: s.plugin.pluginDirExists,
     }),
     remove: () => window.api.cleanupRemovePlugin(),
+    reinstall: () => window.api.cleanupReinstallPlugin(),
   },
   {
     key: 'memory',
@@ -185,7 +181,7 @@ const ROWS: RowDef[] = [
   },
 ]
 
-const INTEGRATION_KEYS: RowKey[] = ['mcp', 'hooks', 'statusline', 'claudeMd', 'slashCommands', 'plugin']
+const INTEGRATION_KEYS: RowKey[] = ['mcp', 'hooks', 'statusline', 'claudeMd', 'plugin']
 const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'sessions', 'appSettings']
 
 export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Element {
@@ -215,10 +211,11 @@ export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Eleme
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [visible, onClose, confirm])
 
-  const runRemove = useCallback(async (row: RowDef) => {
+  const runAction = useCallback(async (row: RowDef, action: 'remove' | 'reinstall') => {
     setBusy(row.key)
     try {
-      await row.remove()
+      if (action === 'remove') await row.remove()
+      else if (row.reinstall) await row.reinstall()
       await refresh()
     } finally {
       setBusy(null)
@@ -228,17 +225,20 @@ export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Eleme
   const handleClick = useCallback((row: RowDef) => {
     if (!status) return
     const st = row.status(status)
-    if (!st.isInstalled) return
-    if (row.confirmTitle && row.confirmBody) {
-      setConfirm({
-        title: row.confirmTitle,
-        body: row.confirmBody(status),
-        onConfirm: () => { setConfirm(null); void runRemove(row) },
-      })
-    } else {
-      void runRemove(row)
+    if (st.isInstalled) {
+      if (row.confirmTitle && row.confirmBody) {
+        setConfirm({
+          title: row.confirmTitle,
+          body: row.confirmBody(status),
+          onConfirm: () => { setConfirm(null); void runAction(row, 'remove') },
+        })
+      } else {
+        void runAction(row, 'remove')
+      }
+    } else if (row.reinstall) {
+      void runAction(row, 'reinstall')
     }
-  }, [status, runRemove])
+  }, [status, runAction])
 
   const removeEverything = useCallback(() => {
     if (!status) return
@@ -270,7 +270,16 @@ export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Eleme
       : st.variant === 'data'
         ? 'text-amber-400 border-amber-800 bg-amber-950/50'
         : 'text-zinc-500 border-zinc-700 bg-zinc-900'
-    const canRemove = st.isInstalled && !isBusy
+    const showReinstall = !st.isInstalled && !!row.reinstall
+    const canClick = !isBusy && (st.isInstalled || showReinstall)
+    const buttonLabel = isBusy ? '...' : showReinstall ? 'Reinstall' : 'Remove'
+    const buttonStyle = !canClick
+      ? 'bg-zinc-900 text-zinc-600 border-zinc-800 cursor-not-allowed'
+      : showReinstall
+        ? 'bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 border-emerald-900'
+        : row.destructive
+          ? 'bg-red-950/40 hover:bg-red-900/60 text-red-300 border-red-900'
+          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
 
     return (
       <div
@@ -289,16 +298,10 @@ export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Eleme
         </div>
         <button
           onClick={() => handleClick(row)}
-          disabled={!canRemove}
-          className={`shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border ${
-            canRemove
-              ? row.destructive
-                ? 'bg-red-950/40 hover:bg-red-900/60 text-red-300 border-red-900'
-                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
-              : 'bg-zinc-900 text-zinc-600 border-zinc-800 cursor-not-allowed'
-          }`}
+          disabled={!canClick}
+          className={`shrink-0 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border ${buttonStyle}`}
         >
-          {isBusy ? '...' : 'Remove'}
+          {buttonLabel}
         </button>
       </div>
     )

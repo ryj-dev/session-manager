@@ -311,8 +311,10 @@ const api = {
   cleanupRemoveMcp: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeMcp'),
   cleanupRemoveHooks: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeHooks'),
   cleanupRemoveStatusline: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeStatusline'),
-  cleanupRemoveSlashCommands: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSlashCommands'),
   cleanupRemovePlugin: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removePlugin'),
+  cleanupReinstallMcp: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:reinstallMcp'),
+  cleanupReinstallHooks: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:reinstallHooks'),
+  cleanupReinstallPlugin: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:reinstallPlugin'),
   cleanupRemoveMemory: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeMemory'),
   cleanupRemoveEmbeddings: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeEmbeddings'),
   cleanupRemoveNotes: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeNotes'),
@@ -327,7 +329,6 @@ export interface CleanupStatus {
   hooks: { installed: boolean; disabled: boolean }
   statusline: { installed: boolean; managed: boolean; hasCustom: boolean }
   claudeMd: { installed: boolean }
-  slashCommands: { installed: boolean; count: number }
   plugin: { pluginDirExists: boolean; disabled: boolean }
   memory: { exists: boolean; bytes: number; files: number }
   embeddings: { dbExists: boolean; dbBytes: number; modelCacheExists: boolean; modelCacheBytes: number }
