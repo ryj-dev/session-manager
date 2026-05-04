@@ -72,6 +72,11 @@ export function GraphView(): JSX.Element {
   const setNotesView = useStore((s) => s.setNotesView)
   const setNotesProjectFilter = useStore((s) => s.setNotesProjectFilter)
   const setNotesSelectedPath = useStore((s) => s.setNotesSelectedPath)
+  const isCmdHeld = useStore((s) => s.isCmdHeld)
+  const setCmdHeld = useStore((s) => s.setCmdHeld)
+  const selectedForGroupingIds = useStore((s) => s.selectedForGroupingIds)
+  const toggleGroupingSelection = useStore((s) => s.toggleGroupingSelection)
+  const clearGroupingSelection = useStore((s) => s.clearGroupingSelection)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Agent-todo counts per project for hub badges
@@ -253,7 +258,12 @@ export function GraphView(): JSX.Element {
     : 0
 
   const handleSessionClick = useCallback(
-    (id: string) => {
+    (id: string, e?: React.MouseEvent) => {
+      // Cmd+click → toggle into pending split-group selection (Phase 1).
+      if (e?.metaKey || e?.ctrlKey) {
+        toggleGroupingSelection(id)
+        return
+      }
       // Sync selectedSessionIndex so spawning from inside the session uses the
       // correct project (resolveProjectPath falls back to selectedIndex).
       const idx = sessions.findIndex((s) => s.id === id)
@@ -261,8 +271,58 @@ export function GraphView(): JSX.Element {
       setFocusedSessionId(id)
       setViewMode('focused')
     },
-    [sessions, setSelectedIndex, setFocusedSessionId, setViewMode]
+    [sessions, setSelectedIndex, setFocusedSessionId, setViewMode, toggleGroupingSelection]
   )
+
+  // Cmd-hold detection (Phase 1). Strict: any non-Meta key cancels the hold,
+  // and the user must release Meta then press it again with no other input.
+  useEffect(() => {
+    if (viewMode !== 'graph') return
+
+    const isMetaKey = (k: string): boolean => k === 'Meta' || k === 'OS' || k === 'Control'
+
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (isMetaKey(e.key)) {
+        // Only arm if no other modifier-cancelling combo has happened recently.
+        // We use a fresh press: ignore auto-repeat.
+        if (!e.repeat) {
+          setCmdHeld(true)
+        }
+      } else {
+        // Any other keypress while meta is held cancels (and clears selection).
+        if (e.metaKey || e.ctrlKey) {
+          // user pressed meta+something → cancel
+          setCmdHeld(false)
+        }
+      }
+    }
+
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (isMetaKey(e.key)) {
+        setCmdHeld(false)
+      }
+    }
+
+    const onBlur = (): void => {
+      setCmdHeld(false)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [viewMode, setCmdHeld])
+
+  // When leaving graph view, drop any pending group selection.
+  useEffect(() => {
+    if (viewMode !== 'graph') {
+      clearGroupingSelection()
+    }
+  }, [viewMode, clearGroupingSelection])
 
   // Keyboard navigation: Left/Right within project, Up/Down between projects
   useEffect(() => {
@@ -450,7 +510,8 @@ export function GraphView(): JSX.Element {
               x={pos.x}
               y={pos.y}
               isSelected={index === selectedIndex}
-              onClick={() => handleSessionClick(session.id)}
+              isGroupingSelected={isCmdHeld && selectedForGroupingIds.includes(session.id)}
+              onClick={(e) => handleSessionClick(session.id, e)}
               onHover={(mouseX, mouseY) => {
                 const sim = screenToSim(mouseX, mouseY)
                 nudge(session.id, sim.x, sim.y)

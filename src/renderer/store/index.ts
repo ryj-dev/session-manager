@@ -89,6 +89,15 @@ export interface AppState {
   designDarkMode: boolean
   toggleDesignDarkMode: () => void
 
+  // Split-view group selection (Phase 1)
+  /** True while the user is holding the platform-meta key (Cmd/Ctrl) without any other key. */
+  isCmdHeld: boolean
+  setCmdHeld: (held: boolean) => void
+  /** Sessions the user has Cmd+clicked while building a group. Cleared on release. */
+  selectedForGroupingIds: string[]
+  toggleGroupingSelection: (id: string) => void
+  clearGroupingSelection: () => void
+
   // Settings
   baseProjectsDir: string | null
   setBaseProjectsDir: (dir: string) => void
@@ -196,6 +205,19 @@ export const useStore = create<AppState>((set) => ({
   setSelectedSessionIndex: (index) => set({ selectedSessionIndex: index }),
   designDarkMode: true,
   toggleDesignDarkMode: () => set((state) => ({ designDarkMode: !state.designDarkMode })),
+
+  // Split-view group selection
+  isCmdHeld: false,
+  setCmdHeld: (held) =>
+    set(() => (held ? { isCmdHeld: true } : { isCmdHeld: false, selectedForGroupingIds: [] })),
+  selectedForGroupingIds: [],
+  toggleGroupingSelection: (id) =>
+    set((state) => ({
+      selectedForGroupingIds: state.selectedForGroupingIds.includes(id)
+        ? state.selectedForGroupingIds.filter((s) => s !== id)
+        : [...state.selectedForGroupingIds, id],
+    })),
+  clearGroupingSelection: () => set({ selectedForGroupingIds: [] }),
 
   // Settings
   baseProjectsDir: null,

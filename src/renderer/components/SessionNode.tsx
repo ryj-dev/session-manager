@@ -8,8 +8,10 @@ interface SessionNodeProps {
   x: number
   y: number
   isSelected: boolean
-  onClick: () => void
+  onClick: (e: React.MouseEvent) => void
   onHover?: (mouseX: number, mouseY: number) => void
+  /** True if the user has Cmd+clicked this node into the pending split-group selection. */
+  isGroupingSelected?: boolean
 }
 
 const THUMB_WIDTH = 192
@@ -30,7 +32,8 @@ export function SessionNode({
   y,
   isSelected,
   onClick,
-  onHover
+  onHover,
+  isGroupingSelected = false,
 }: SessionNodeProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const hasNudgedRef = useRef(false)
@@ -61,7 +64,7 @@ export function SessionNode({
         width: THUMB_WIDTH,
         height: THUMB_HEIGHT
       }}
-      onClick={onClick}
+      onClick={(e) => onClick(e)}
       onMouseEnter={(e) => {
         if (!hasNudgedRef.current) {
           hasNudgedRef.current = true
@@ -94,12 +97,14 @@ export function SessionNode({
           relative w-full h-full rounded-lg overflow-hidden
           border transition-all duration-300
           ${STATUS_STYLES[session.status]?.border ?? 'border-zinc-700/50'}
-          ${!isSelected ? (STATUS_STYLES[session.status]?.glow ?? '') : ''}
-          ${isSelected ? 'ring-2 ring-offset-1 ring-offset-[#0a0a0a]' : ''}
+          ${!isSelected && !isGroupingSelected ? (STATUS_STYLES[session.status]?.glow ?? '') : ''}
+          ${isSelected || isGroupingSelected ? 'ring-2 ring-offset-1 ring-offset-[#0a0a0a]' : ''}
         `}
-        style={isSelected ? {
-          boxShadow: '0 0 12px rgba(255,255,255,0.25)',
-          '--tw-ring-color': 'rgba(255,255,255,0.7)',
+        style={isSelected || isGroupingSelected ? {
+          boxShadow: isGroupingSelected
+            ? '0 0 16px rgba(255,255,255,0.45)'
+            : '0 0 12px rgba(255,255,255,0.25)',
+          '--tw-ring-color': isGroupingSelected ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.7)',
         } as React.CSSProperties : undefined}
       >
         {/* Terminal snapshot */}
