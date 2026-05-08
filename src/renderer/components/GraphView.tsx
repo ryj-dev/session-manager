@@ -4,6 +4,8 @@ import { formatHotkey } from '../lib/hotkeys'
 import { useSimulation, type EdgeData, type ViewportTransform } from '../hooks/useSimulation'
 import { projectColor, projectColorDim, projectColorMid, projectColorGlow, rectEdgePoint } from '../lib/simulation'
 import { SessionNode } from './SessionNode'
+import { CompositeNode } from './CompositeNode'
+import { MAX_SPLIT_N } from '../lib/splitLayouts'
 
 // ── Node dimensions ────────────────────────────────────────────────────
 
@@ -77,6 +79,9 @@ export function GraphView(): JSX.Element {
   const selectedForGroupingIds = useStore((s) => s.selectedForGroupingIds)
   const toggleGroupingSelection = useStore((s) => s.toggleGroupingSelection)
   const clearGroupingSelection = useStore((s) => s.clearGroupingSelection)
+  const splitGroups = useStore((s) => s.splitGroups)
+  const enterSplitGroup = useStore((s) => s.enterSplitGroup)
+  const dissolveSplitGroup = useStore((s) => s.dissolveSplitGroup)
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Agent-todo counts per project for hub badges
@@ -119,10 +124,17 @@ export function GraphView(): JSX.Element {
     return () => observer.disconnect()
   }, [])
 
-  const { hubs, spokes, edges, contentBounds, nudge } = useSimulation(
+  const { hubs, spokes, composites, edges, contentBounds, nudge } = useSimulation(
     size.width || 800,
     size.height || 600
   )
+
+  // Member sessions are rendered inside their composite — hide them from the graph.
+  const memberSessionIds = useMemo(() => {
+    const s = new Set<string>()
+    for (const g of splitGroups) for (const id of g.orderedSessionIds) s.add(id)
+    return s
+  }, [splitGroups])
 
   // ── Viewport: auto-fit from content bounds, overridable by wheel zoom ──
 
@@ -257,11 +269,37 @@ export function GraphView(): JSX.Element {
     ? projectNav[currentGroupIdx]?.sessionIds.indexOf(selectedSession.id) ?? 0
     : 0
 
+  // Stillness timer: when user has Cmd-held still after their last click for this long,
+  // open the reshape preview modal. Resets on every Cmd+click.
+  const STILLNESS_DELAY_MS = 1500
+  const stillnessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearStillness = useCallback(() => {
+    if (stillnessTimerRef.current) {
+      clearTimeout(stillnessTimerRef.current)
+      stillnessTimerRef.current = null
+    }
+  }, [])
+  const armStillness = useCallback(() => {
+    clearStillness()
+    stillnessTimerRef.current = setTimeout(() => {
+      const state = useStore.getState()
+      // Only open the modal if we're still in graph view and selection is intact.
+      // (Guards against the user navigating away during the stillness window.)
+      if (state.viewMode !== 'graph') return
+      if (state.selectedForGroupingIds.length >= 2) {
+        state.openSplitModal()
+      }
+    }, STILLNESS_DELAY_MS)
+  }, [clearStillness])
+
   const handleSessionClick = useCallback(
     (id: string, e?: React.MouseEvent) => {
-      // Cmd+click → toggle into pending split-group selection (Phase 1).
+      // Cmd+click → toggle into pending split-group selection.
       if (e?.metaKey || e?.ctrlKey) {
         toggleGroupingSelection(id)
+        // Restart stillness timer so the modal only appears after the user has
+        // truly stopped clicking.
+        armStillness()
         return
       }
       // Sync selectedSessionIndex so spawning from inside the session uses the
@@ -271,41 +309,74 @@ export function GraphView(): JSX.Element {
       setFocusedSessionId(id)
       setViewMode('focused')
     },
-    [sessions, setSelectedIndex, setFocusedSessionId, setViewMode, toggleGroupingSelection]
+    [sessions, setSelectedIndex, setFocusedSessionId, setViewMode, toggleGroupingSelection, armStillness]
   )
 
-  // Cmd-hold detection (Phase 1). Strict: any non-Meta key cancels the hold,
+  // Cmd-hold detection. Strict: any non-Meta key cancels the hold,
   // and the user must release Meta then press it again with no other input.
   useEffect(() => {
     if (viewMode !== 'graph') return
 
     const isMetaKey = (k: string): boolean => k === 'Meta' || k === 'OS' || k === 'Control'
 
+    const cancel = (): void => {
+      clearStillness()
+      useStore.getState().closeSplitModal()
+      setCmdHeld(false) // also clears selection
+    }
+
     const onKeyDown = (e: KeyboardEvent): void => {
       if (isMetaKey(e.key)) {
-        // Only arm if no other modifier-cancelling combo has happened recently.
-        // We use a fresh press: ignore auto-repeat.
-        if (!e.repeat) {
-          setCmdHeld(true)
-        }
-      } else {
-        // Any other keypress while meta is held cancels (and clears selection).
-        if (e.metaKey || e.ctrlKey) {
-          // user pressed meta+something → cancel
-          setCmdHeld(false)
-        }
+        if (!e.repeat) setCmdHeld(true)
+      } else if (e.metaKey || e.ctrlKey) {
+        // Any other keypress while meta is held cancels.
+        cancel()
       }
     }
 
     const onKeyUp = (e: KeyboardEvent): void => {
       if (isMetaKey(e.key)) {
-        setCmdHeld(false)
+        clearStillness()
+        // Cmd-release commits. Read sessions via getState so the effect deps
+        // can stay stable (otherwise every snapshot update would tear it down).
+        const state = useStore.getState()
+        const ids = state.selectedForGroupingIds
+        const expanding = state.isExpandingExistingGroup
+        const activeId = state.activeSplitGroupId
+
+        if (expanding && activeId) {
+          // We came from "+" in the in-split modal. Append new selection to the
+          // existing group, then re-enter split view.
+          const existing = state.splitGroups.find((g) => g.id === activeId)
+          if (existing) {
+            const merged: string[] = [...existing.orderedSessionIds]
+            for (const id of ids) {
+              if (!merged.includes(id)) merged.push(id)
+            }
+            const clamped = merged.slice(0, MAX_SPLIT_N)
+            state.updateSplitGroupMembers(activeId, clamped)
+            state.enterSplitGroup(activeId)
+          }
+          state.setExpandingExistingGroup(false)
+        } else if (ids.length === 1) {
+          // Single Cmd+click+release → focus that session.
+          const id = ids[0]
+          const idx = state.sessions.findIndex((s) => s.id === id)
+          if (idx !== -1) setSelectedIndex(idx)
+          setFocusedSessionId(id)
+          setViewMode('focused')
+        } else if (ids.length >= 2) {
+          // 2+ → create the group with the (possibly drag-chosen) shape and enter split.
+          const clamped = ids.slice(0, MAX_SPLIT_N)
+          const groupId = state.createSplitGroup(clamped, state.pendingShapeId)
+          state.enterSplitGroup(groupId)
+        }
+        state.closeSplitModal()
+        setCmdHeld(false) // also clears selection
       }
     }
 
-    const onBlur = (): void => {
-      setCmdHeld(false)
-    }
+    const onBlur = (): void => cancel()
 
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
@@ -314,8 +385,11 @@ export function GraphView(): JSX.Element {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', onBlur)
+      // Don't clear the stillness timer here — the effect re-runs on every
+      // sessions change (snapshot/status updates), which would kill the
+      // 1.5s timer before it can fire. The timer self-guards via viewMode.
     }
-  }, [viewMode, setCmdHeld])
+  }, [viewMode, setCmdHeld, setSelectedIndex, setFocusedSessionId, setViewMode])
 
   // When leaving graph view, drop any pending group selection.
   useEffect(() => {
@@ -499,8 +573,9 @@ export function GraphView(): JSX.Element {
           )
         })}
 
-        {/* Session nodes */}
+        {/* Session nodes (members of split groups are hidden — they appear inside their composite) */}
         {sessions.map((session, index) => {
+          if (memberSessionIds.has(session.id)) return null
           const pos = spokeMap.get(session.id)
           if (!pos) return null
           return (
@@ -519,6 +594,25 @@ export function GraphView(): JSX.Element {
             />
           )
         })}
+
+        {/* Composite nodes (one per active split group) */}
+        {composites.map((c) => (
+          <CompositeNode
+            key={c.id}
+            groupId={c.id}
+            x={c.x}
+            y={c.y}
+            isSelected={false}
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey) {
+                // Spec: Cmd+click composite always dissolves the group.
+                dissolveSplitGroup(c.id)
+                return
+              }
+              enterSplitGroup(c.id)
+            }}
+          />
+        ))}
       </div>
 
       {/* Empty state (outside viewport transform) */}

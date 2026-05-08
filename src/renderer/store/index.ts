@@ -1,6 +1,16 @@
 import { create } from 'zustand'
+import { defaultShapeFor } from './../lib/splitLayouts'
 
-export type ViewMode = 'graph' | 'focused'
+export type ViewMode = 'graph' | 'focused' | 'split'
+
+export interface SplitGroup {
+  /** Stable group identifier. */
+  id: string
+  /** Member session IDs in slot order (slot 0 = orderedSessionIds[0], etc.). */
+  orderedSessionIds: string[]
+  /** Shape id from splitLayouts.SHAPES_BY_N. Resolved with the layout helper at render time. */
+  shapeId: string | null
+}
 
 export interface HotkeyMap {
   spawnSession: string
@@ -61,6 +71,9 @@ export interface Session {
   terminalTitle: string | null
   status: SessionStatus
   snapshot: HTMLCanvasElement | null
+  /** Bumped on each snapshot capture. Snapshot canvases are reused (same reference)
+      to avoid GC churn, so consumers must depend on this counter to detect updates. */
+  snapshotVersion: number
   createdAt: number
   /** Stable Claude Code conversation UUID (persists across resumes / app reloads). */
   claudeSessionId: string | null
@@ -97,6 +110,33 @@ export interface AppState {
   selectedForGroupingIds: string[]
   toggleGroupingSelection: (id: string) => void
   clearGroupingSelection: () => void
+  setGroupingSelection: (ids: string[]) => void
+
+  // Split-view groups
+  splitGroups: SplitGroup[]
+  activeSplitGroupId: string | null
+  /** True while the Cmd-hold-still preview modal is shown. Modal reads selection live. */
+  isSplitModalOpen: boolean
+  openSplitModal: () => void
+  closeSplitModal: () => void
+  /** Shape chosen by the user during the modal preview (drag-to-reshape).
+   *  Null = use the default shape for the current member count. Cleared on close. */
+  pendingShapeId: string | null
+  setPendingShapeId: (id: string | null) => void
+  /** Create a new group from the given ordered session IDs and return its id.
+   *  If shapeId is provided, the group is created with that shape. */
+  createSplitGroup: (orderedSessionIds: string[], shapeId?: string | null) => string
+  dissolveSplitGroup: (groupId: string) => void
+  /** Switch to split view on the given group. */
+  enterSplitGroup: (groupId: string) => void
+  /** Update an existing group's ordered session IDs (used by + button expand). */
+  updateSplitGroupMembers: (groupId: string, orderedSessionIds: string[]) => void
+  /** Update an existing group's shape (used by reshape from in-split modal). */
+  updateSplitGroupShape: (groupId: string, shapeId: string) => void
+  /** True when the user clicked + in the modal and is graph-picking more sessions
+   *  to add to the existing active group. */
+  isExpandingExistingGroup: boolean
+  setExpandingExistingGroup: (v: boolean) => void
 
   // Settings
   baseProjectsDir: string | null
@@ -161,6 +201,7 @@ export const useStore = create<AppState>((set) => ({
           terminalTitle: null,
           status: 'seen',
           snapshot: null,
+          snapshotVersion: 0,
           createdAt: Date.now(),
           claudeSessionId,
         }
@@ -183,7 +224,9 @@ export const useStore = create<AppState>((set) => ({
     })),
   updateSessionSnapshot: (id, snapshot) =>
     set((state) => ({
-      sessions: state.sessions.map((s) => (s.id === id ? { ...s, snapshot } : s))
+      sessions: state.sessions.map((s) =>
+        s.id === id ? { ...s, snapshot, snapshotVersion: s.snapshotVersion + 1 } : s
+      )
     })),
   updateSessionTitle: (id, title) =>
     set((state) => ({
@@ -218,6 +261,45 @@ export const useStore = create<AppState>((set) => ({
         : [...state.selectedForGroupingIds, id],
     })),
   clearGroupingSelection: () => set({ selectedForGroupingIds: [] }),
+  setGroupingSelection: (ids) => set({ selectedForGroupingIds: ids }),
+
+  // Split groups
+  splitGroups: [],
+  activeSplitGroupId: null,
+  isSplitModalOpen: false,
+  openSplitModal: () => set({ isSplitModalOpen: true }),
+  closeSplitModal: () => set({ isSplitModalOpen: false, pendingShapeId: null }),
+  pendingShapeId: null,
+  setPendingShapeId: (id) => set({ pendingShapeId: id }),
+  createSplitGroup: (orderedSessionIds, shapeId) => {
+    const id = crypto.randomUUID()
+    const finalShape = shapeId ?? defaultShapeFor(orderedSessionIds.length)?.id ?? null
+    set((state) => ({
+      splitGroups: [...state.splitGroups, { id, orderedSessionIds, shapeId: finalShape }],
+    }))
+    return id
+  },
+  dissolveSplitGroup: (groupId) =>
+    set((state) => ({
+      splitGroups: state.splitGroups.filter((g) => g.id !== groupId),
+      activeSplitGroupId: state.activeSplitGroupId === groupId ? null : state.activeSplitGroupId,
+    })),
+  enterSplitGroup: (groupId) =>
+    set({ activeSplitGroupId: groupId, viewMode: 'split', focusedSessionId: null }),
+  updateSplitGroupMembers: (groupId, orderedSessionIds) =>
+    set((state) => ({
+      splitGroups: state.splitGroups.map((g) =>
+        g.id === groupId ? { ...g, orderedSessionIds } : g
+      ),
+    })),
+  updateSplitGroupShape: (groupId, shapeId) =>
+    set((state) => ({
+      splitGroups: state.splitGroups.map((g) =>
+        g.id === groupId ? { ...g, shapeId } : g
+      ),
+    })),
+  isExpandingExistingGroup: false,
+  setExpandingExistingGroup: (v) => set({ isExpandingExistingGroup: v }),
 
   // Settings
   baseProjectsDir: null,

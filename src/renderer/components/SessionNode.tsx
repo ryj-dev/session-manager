@@ -53,7 +53,7 @@ export function SessionNode({
     if (!ctx) return
 
     ctx.drawImage(session.snapshot, 0, 0, canvas.width, canvas.height)
-  }, [session.snapshot])
+  }, [session.snapshot, session.snapshotVersion])
 
   return (
     <motion.div

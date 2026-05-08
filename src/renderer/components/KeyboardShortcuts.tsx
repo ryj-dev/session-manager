@@ -124,6 +124,10 @@ const FIXED_SHORTCUTS: { keys: string; label: string }[] = IS_MAC
       { keys: 'Esc', label: 'Close overlays / panels' },
       { keys: '⌘Q', label: 'Quit app' },
       { keys: '⌘⇧W', label: 'Force-close session' },
+      { keys: '⌘+click', label: 'Multi-select sessions for split' },
+      { keys: '⌘ hold', label: 'Show / reshape split modal' },
+      { keys: '⌘1–9', label: 'Focus slot N (in split)' },
+      { keys: '⌘[ ⌘]', label: 'Cycle panels (in split)' },
     ]
   : [
       { keys: 'Enter', label: 'Focus selected session' },
@@ -132,6 +136,10 @@ const FIXED_SHORTCUTS: { keys: string; label: string }[] = IS_MAC
       { keys: 'Esc', label: 'Close overlays / panels' },
       { keys: 'Alt+Q', label: 'Quit app' },
       { keys: 'Alt+Shift+W', label: 'Force-close session' },
+      { keys: 'Alt+click', label: 'Multi-select sessions for split' },
+      { keys: 'Alt hold', label: 'Show / reshape split modal' },
+      { keys: 'Alt+1–9', label: 'Focus slot N (in split)' },
+      { keys: 'Alt+[ Alt+]', label: 'Cycle panels (in split)' },
     ]
 
 // Map fixed shortcut display keys to keyboard key IDs for highlighting
@@ -145,6 +153,14 @@ function fixedShortcutKeyIds(keys: string): string[] {
     case '⌘⇧W': return ['Meta', 'Shift', 'W']
     case 'Alt+Q': return ['Alt', 'Q']
     case 'Alt+Shift+W': return ['Alt', 'Shift', 'W']
+    case '⌘+click': return ['Meta']
+    case '⌘ hold': return ['Meta']
+    case '⌘1–9': return ['Meta', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+    case '⌘[ ⌘]': return ['Meta', '[', ']']
+    case 'Alt+click': return ['Alt']
+    case 'Alt hold': return ['Alt']
+    case 'Alt+1–9': return ['Alt', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+    case 'Alt+[ Alt+]': return ['Alt', '[', ']']
     default: return []
   }
 }

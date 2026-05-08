@@ -124,11 +124,29 @@ function seededRandom(seed: number): () => number {
 
 // ── Layout constants ───────────────────────────────────────────────────
 
-const THUMB_WIDTH = 192
-const THUMB_HEIGHT = 120
+export const THUMB_WIDTH = 192
+export const THUMB_HEIGHT = 120
 const MIN_SPOKE_SPACING = 30 // min gap between thumbnail edges
-const BASE_RADIUS = 200
-const RING_GAP = 180
+export const BASE_RADIUS = 200
+export const RING_GAP = 180
+
+/**
+ * Stable, well-distributed hash → 32-bit unsigned integer.
+ * Re-export so consumers can derive deterministic per-group values.
+ */
+export function stableHash(str: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  h ^= h >>> 16
+  h = Math.imul(h, 0x85ebca6b)
+  h ^= h >>> 13
+  h = Math.imul(h, 0xc2b2ae35)
+  h ^= h >>> 16
+  return h >>> 0
+}
 
 // ── Hub simulation (repulsion + collision to keep clusters apart) ──────
 

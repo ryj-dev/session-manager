@@ -548,6 +548,27 @@ export function focusTerminal(sessionId: string): void {
   }
 }
 
+/**
+ * Set the xterm font size for an existing terminal instance and refit so the
+ * PTY is resized to match the new cell grid. Used by SplitView to scale font
+ * down when panels are smaller than a single focused view.
+ *
+ * Idempotent — does nothing if the font size is unchanged.
+ */
+export function setTerminalFontSize(sessionId: string, size: number): void {
+  const instance = terminalInstances.get(sessionId)
+  if (!instance) return
+  if (instance.term.options.fontSize === size) return
+  instance.term.options.fontSize = size
+  // Defer fit to rAF so xterm has a chance to recompute cell metrics.
+  requestAnimationFrame(() => {
+    try {
+      instance.fitAddon.fit()
+      window.api.resizeSession(sessionId, instance.term.cols, instance.term.rows)
+    } catch { /* container not laid out yet — ResizeObserver will retry */ }
+  })
+}
+
 export function disposeTerminal(sessionId: string): void {
   const instance = terminalInstances.get(sessionId)
   if (instance) {

@@ -7,6 +7,8 @@ import { Settings } from './components/Settings'
 import { KeyboardShortcuts } from './components/KeyboardShortcuts'
 import { StatuslineEditor } from './components/StatuslineEditor'
 import { CleanupPanel } from './components/CleanupPanel'
+import { SplitView } from './components/SplitView'
+import { SplitArrangementModal } from './components/SplitArrangementModal'
 import { SidebarPicker } from './components/SidebarPicker'
 import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
@@ -84,6 +86,8 @@ export function App(): JSX.Element {
   const addMessageNotification = useStore((s) => s.addMessageNotification)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)
   const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
+  const splitGroups = useStore((s) => s.splitGroups)
+  const activeSplitGroupId = useStore((s) => s.activeSplitGroupId)
 
   // Panel data
   const { items: designItems } = useDesigns()
@@ -426,6 +430,20 @@ export function App(): JSX.Element {
   // Global hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
+      // Cancel any in-progress split-build selection on the first non-modifier
+      // keydown while Cmd is held. We do this BEFORE per-hotkey processing so
+      // cancel runs even for hotkeys that stopImmediatePropagation later.
+      const splitState = useStore.getState()
+      if (splitState.isCmdHeld) {
+        const MOD_KEYS = ['Meta', 'Control', 'Alt', 'Shift', 'OS']
+        if (!MOD_KEYS.includes(e.key)) {
+          splitState.closeSplitModal()
+          splitState.setCmdHeld(false)
+          splitState.setExpandingExistingGroup(false)
+          // Don't return — let the hotkey still process (e.g. Cmd+T spawn).
+        }
+      }
+
       // macOS: Cmd (metaKey) for app hotkeys — Ctrl passes through to terminal
       // Windows/Linux: Alt for app hotkeys — Ctrl passes through to terminal
       const isMac = navigator.platform.startsWith('Mac')
@@ -756,10 +774,19 @@ export function App(): JSX.Element {
 
   return (
     <div className="h-full w-full relative bg-[#0a0a0a]">
-      {/* Off-screen terminals — in-viewport so WebGL renders, hidden behind opaque UI layers */}
+      {/* Off-screen terminals — in-viewport so WebGL renders, hidden behind opaque UI layers.
+          Split-view members are excluded since SplitView mounts them visibly itself
+          (each xterm instance can only attach to one DOM node at a time). */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
         {sessions
-          .filter((s) => s.id !== focusedSessionId || viewMode !== 'focused')
+          .filter((s) => {
+            if (viewMode === 'focused' && s.id === focusedSessionId) return false
+            if (viewMode === 'split' && activeSplitGroupId) {
+              const group = splitGroups.find((g) => g.id === activeSplitGroupId)
+              if (group && group.orderedSessionIds.includes(s.id)) return false
+            }
+            return true
+          })
           .map((session) => (
             <Terminal
               key={session.id}
@@ -775,6 +802,11 @@ export function App(): JSX.Element {
         <div className="absolute inset-0 bg-[#0a0a0a]" style={{ zIndex: 1 }}>
           <GraphView />
         </div>
+      )}
+
+      {/* Split View */}
+      {viewMode === 'split' && (
+        <SplitView onTitleChange={handleTitleChange} />
       )}
 
       {/* Focused View — titlebar + terminal */}
@@ -925,6 +957,9 @@ export function App(): JSX.Element {
 
       {/* Cleanup & uninstall page */}
       <CleanupPanel visible={showCleanup} onClose={() => setShowCleanup(false)} />
+
+      {/* Split arrangement modal */}
+      <SplitArrangementModal />
 
       {/* Restore sessions prompt */}
       {showRestorePrompt && (
