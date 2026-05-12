@@ -9,6 +9,7 @@ import { spawnSession, writeToSession, getSession, getAllSessions, updateClaudeS
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
 import * as notesManager from './notes-manager'
+import { loadSettings } from './settings-store'
 
 let server: Server | null = null
 let serverPort = 0
@@ -211,6 +212,10 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       args = ['--allowedTools', ...tools]
     }
 
+    if (loadSettings().autoModeForChildSessions) {
+      args = ['--permission-mode', 'auto', ...args]
+    }
+
     // Pass prompt as CLI positional arg — Claude Code parses it on startup,
     // bypassing the PTY paste/timing issues of writing to the TUI.
     // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
@@ -402,7 +407,10 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     // Pass slash command + prompt as CLI positional arg — Claude Code parses
     // skill commands from CLI args, bypassing PTY paste/timing issues.
     // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
-    const args = ['--allowedTools', ...allowedTools, '--', `/${commandName} ${prompt}`]
+    const baseArgs = ['--allowedTools', ...allowedTools, '--', `/${commandName} ${prompt}`]
+    const args = loadSettings().autoModeForChildSessions
+      ? ['--permission-mode', 'auto', ...baseArgs]
+      : baseArgs
     const session = spawnSession(id, cwd, 'claude', args)
 
     if (attachListenersFn) {

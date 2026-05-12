@@ -80,6 +80,27 @@ export function initEmbeddings(opts: InitOptions): void {
         `SELECT file_mtime FROM chunk_meta WHERE filename = ? LIMIT 1`
       )
     }
+
+    // Self-heal: prior versions of indexNote() only deleted from chunk_meta,
+    // leaking rows in the vec0 chunks table. Purge any chunks rowid that
+    // doesn't have a chunk_meta entry. Cheap on startup.
+    try {
+      const orphans = db
+        .prepare(
+          `SELECT rowid FROM chunks WHERE rowid NOT IN (SELECT rowid FROM chunk_meta)`
+        )
+        .all() as { rowid: number | bigint }[]
+      if (orphans.length > 0) {
+        const delOrphan = db.prepare(`DELETE FROM chunks WHERE rowid = ?`)
+        const purge = db.transaction(() => {
+          for (const r of orphans) delOrphan.run(BigInt(r.rowid))
+        })
+        purge()
+        console.log(`[embeddings] purged ${orphans.length} orphan chunk(s)`)
+      }
+    } catch (purgeErr) {
+      console.warn('[embeddings] orphan purge failed (non-fatal):', purgeErr)
+    }
   } catch (err) {
     console.error('[embeddings] init failed — semantic search disabled:', err)
     handle = {
@@ -239,7 +260,18 @@ export async function indexNote(
   }
 
   const tx = handle.db.transaction(() => {
+    // Delete from both tables to keep their rowid spaces in sync. The vec0
+    // virtual table doesn't cascade from chunk_meta, so failing to delete here
+    // leaks orphan rows that collide on UNIQUE when nextRowid() rewinds after
+    // a process restart (counter is rebuilt from MAX(chunk_meta) but chunks
+    // still holds the old rowids).
+    const existing = handle!.db
+      .prepare(`SELECT rowid FROM chunk_meta WHERE filename = ?`)
+      .all(filename) as { rowid: number | bigint }[]
+    const delVec = handle!.db.prepare(`DELETE FROM chunks WHERE rowid = ?`)
+    for (const r of existing) delVec.run(BigInt(r.rowid))
     handle!.deleteChunks.run(filename)
+
     const insertVec = handle!.db.prepare(
       `INSERT INTO chunks(rowid, embedding) VALUES (?, ?)`
     )
@@ -269,15 +301,22 @@ export function removeNote(filename: string): void {
   tx()
 }
 
-// Globally unique rowid generator. Persists max(rowid) on demand.
+// Globally unique rowid generator. Seeded once per process from the max
+// rowid across BOTH tables — chunk_meta on its own can rewind if files have
+// been deleted, but chunks may still hold higher rowids from earlier
+// indexings that the old (buggy) indexNote() left behind.
 let rowidCounter: number | null = null
 function nextRowid(): number {
   if (!handle) throw new Error('not initialized')
   if (rowidCounter === null) {
-    const row = handle.db
+    const metaRow = handle.db
       .prepare(`SELECT COALESCE(MAX(rowid), 0) AS m FROM chunk_meta`)
       .get() as { m: number }
-    rowidCounter = row.m
+    const chunksRow = handle.db
+      .prepare(`SELECT COALESCE(MAX(rowid), 0) AS m FROM chunks`)
+      .get() as { m: number | bigint }
+    const chunksMax = typeof chunksRow.m === 'bigint' ? Number(chunksRow.m) : chunksRow.m
+    rowidCounter = Math.max(metaRow.m, chunksMax)
   }
   rowidCounter += 1
   return rowidCounter

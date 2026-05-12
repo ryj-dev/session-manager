@@ -28,11 +28,11 @@ export interface MemoryIndexEntry {
 
 const api = {
   // PTY operations
-  spawnSession: (cwd: string, command?: string, args?: string[], allowedTools?: string[]): Promise<PtySpawnResult> =>
-    ipcRenderer.invoke('pty:spawn', { cwd, command, args, allowedTools }),
+  spawnSession: (cwd: string, command?: string, args?: string[], allowedTools?: string[], autoMode?: boolean): Promise<PtySpawnResult> =>
+    ipcRenderer.invoke('pty:spawn', { cwd, command, args, allowedTools, autoMode }),
 
-  resumeSession: (claudeSessionId: string, projectPath: string): Promise<PtySpawnResult> =>
-    ipcRenderer.invoke('pty:resume', { claudeSessionId, projectPath }),
+  resumeSession: (claudeSessionId: string, projectPath: string, autoMode?: boolean): Promise<PtySpawnResult> =>
+    ipcRenderer.invoke('pty:resume', { claudeSessionId, projectPath, autoMode }),
 
   writeSession: (id: string, data: string): void =>
     ipcRenderer.send('pty:write', { id, data }),
@@ -93,11 +93,18 @@ const api = {
   clearSavedSessions: (): Promise<void> =>
     ipcRenderer.invoke('sessions:clearSaved'),
 
+  // Composite/split-view group persistence (members keyed by claudeSessionId)
+  loadSplitGroups: (): Promise<Array<{ id: string; claudeSessionIds: string[]; shapeId: string | null }>> =>
+    ipcRenderer.invoke('splitGroups:load'),
+
+  saveSplitGroups: (groups: Array<{ id: string; claudeSessionIds: string[]; shapeId: string | null }>): void =>
+    ipcRenderer.send('splitGroups:save', groups),
+
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // File system operations

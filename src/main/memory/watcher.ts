@@ -4,7 +4,7 @@
  */
 
 import fs from 'fs'
-import { getMemoriesDir } from './store'
+import { getMemoriesDir, wasRecentlyWritten } from './store'
 import { invalidate } from './index'
 import { reindexNote } from './embeddings-runtime'
 
@@ -12,7 +12,7 @@ let watcher: fs.FSWatcher | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 const pendingChanges = new Set<string>()
 
-const DEBOUNCE_MS = 200
+const DEBOUNCE_MS = 600
 
 export function startMemoryWatcher(): void {
   const dir = getMemoriesDir()
@@ -20,6 +20,8 @@ export function startMemoryWatcher(): void {
   try {
     watcher = fs.watch(dir, (eventType, filename) => {
       if (!filename || !filename.endsWith('.md')) return
+      // Ignore echo events from writes the main process just performed.
+      if (wasRecentlyWritten(filename)) return
 
       pendingChanges.add(filename)
 

@@ -21,6 +21,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { app } from 'electron'
 import { searchSemantic, isEmbeddingsAvailable } from './embeddings'
+import { getIndex } from './index'
 
 export interface EmbedServerHandle {
   socketPath: string
@@ -29,9 +30,29 @@ export interface EmbedServerHandle {
 
 interface Request {
   id: string
-  op: 'ping' | 'search'
+  op: 'ping' | 'search' | 'searchKeyword' | 'listIndexed'
   query?: string
+  tokens?: string[]
   limit?: number
+  bodyChars?: number
+}
+
+const KEYWORD_STOPWORDS = new Set([
+  'the','a','an','and','or','but','is','are','was','were','be','been','being',
+  'have','has','had','do','does','did','will','would','should','could','may',
+  'might','must','can','this','that','these','those','i','you','he','she','it',
+  'we','they','them','their','what','which','who','when','where','why','how',
+  'all','each','every','both','few','more','most','other','some','such','no',
+  'nor','not','only','own','same','so','than','too','very','just','with','from',
+  'into','onto','about','between','through','during','before','after','above',
+  'below','to','of','in','on','at','by','for','as','if','then','else','because',
+  'while','note','notes','see','also','use','used','using','one','two','three'
+])
+
+function tokenize(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) ?? []).filter(
+    (t) => !KEYWORD_STOPWORDS.has(t)
+  )
 }
 
 let active: EmbedServerHandle | null = null
@@ -150,6 +171,45 @@ async function handleLine(socket: net.Socket, line: string): Promise<void> {
       }
       const hits = await searchSemantic(req.query, req.limit ?? 50)
       respond(socket, { id, ok: true, hits })
+      return
+    }
+    if (op === 'searchKeyword') {
+      // Token-overlap scoring against the in-memory IndexedNote map. Scans
+      // title + filename + a leading body slice; counts unique query tokens
+      // present. Returns ranked filename+score pairs.
+      const tokens = (req.tokens ?? (req.query ? tokenize(req.query) : []))
+      if (tokens.length === 0) {
+        respond(socket, { id, ok: true, hits: [] })
+        return
+      }
+      const bodyChars = req.bodyChars ?? 500
+      const limit = req.limit ?? 50
+      const querySet = new Set(tokens)
+      const idx = getIndex()
+      const scored: { filename: string; score: number }[] = []
+      for (const note of idx.values()) {
+        const haystack = `${note.title}\n${note.filename}\n${note.text.slice(0, bodyChars)}`
+        const targetSet = new Set(tokenize(haystack))
+        let overlap = 0
+        for (const t of querySet) if (targetSet.has(t)) overlap++
+        if (overlap > 0) scored.push({ filename: note.filename, score: overlap })
+      }
+      scored.sort((a, b) => b.score - a.score)
+      respond(socket, { id, ok: true, hits: scored.slice(0, limit) })
+      return
+    }
+    if (op === 'listIndexed') {
+      // Metadata-only dump of every indexed note — for orphan audits,
+      // graph analysis, curation. No body text shipped over the wire.
+      const idx = getIndex()
+      const notes = [...idx.values()].map((n) => ({
+        filename: n.filename,
+        title: n.title,
+        type: n.type,
+        tags: n.tags,
+        wikilinks: n.wikilinks,
+      }))
+      respond(socket, { id, ok: true, notes })
       return
     }
     respond(socket, { id, ok: false, error: `unknown op: ${op}` })

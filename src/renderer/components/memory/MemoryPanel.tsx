@@ -47,15 +47,25 @@ export default function MemoryPanel({ visible, onClose }: Props) {
     })
   }, [visible])
 
-  // Listen for memory changes
+  // Listen for memory changes. Coalesce bursts (batch edits, backlink
+  // cascades) into a single refresh — rebuilding the Sigma graph on every
+  // individual write thrashes WebGL contexts and can crash the renderer.
   useEffect(() => {
     if (!visible) return
+    let timer: ReturnType<typeof setTimeout> | null = null
     const unsub = window.api.onMemoryChanged(() => {
-      window.api.memoryGraph().then((data) => {
-        setGraphData(data as GraphData)
-      })
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        window.api.memoryGraph().then((data) => {
+          setGraphData(data as GraphData)
+        })
+      }, 1200)
     })
-    return unsub
+    return () => {
+      if (timer) clearTimeout(timer)
+      unsub()
+    }
   }, [visible])
 
   // Debounced search

@@ -65,6 +65,7 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
   const setFocusedSessionId = useStore((s) => s.setFocusedSessionId)
   const setCmdHeld = useStore((s) => s.setCmdHeld)
   const setGroupingSelection = useStore((s) => s.setGroupingSelection)
+  const markSessionSeen = useStore((s) => s.markSessionSeen)
 
   const group = splitGroups.find((g) => g.id === activeSplitGroupId)
   const N = group?.orderedSessionIds.length ?? 0
@@ -157,6 +158,24 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
     }
   }, [setCmdHeld, setGroupingSelection])
 
+  // Clear a finished pane's green border the moment the user actually types
+  // into the focused panel. Click is handled in SplitPanel.onMouseDown.
+  // Pure modifier-only events (Cmd/Ctrl/Shift/Alt) don't count — they happen
+  // every time the user reaches for a hotkey and shouldn't dismiss the cue.
+  useEffect(() => {
+    const MOD_ONLY = new Set(['Meta', 'Control', 'Shift', 'Alt', 'OS'])
+    const onKey = (e: KeyboardEvent): void => {
+      if (MOD_ONLY.has(e.key)) return
+      const s = useStore.getState()
+      const fid = s.focusedSessionId
+      if (!fid) return
+      const session = s.sessions.find((x) => x.id === fid)
+      if (session?.status === 'finished') markSessionSeen(fid)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [markSessionSeen])
+
   // Cmd+1..9 jump-to-slot, Cmd+]/Cmd+[ cycle next/prev.
   useEffect(() => {
     if (!group) return
@@ -226,7 +245,10 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
               slotIndex={i}
               slot={slot}
               isFocused={session.id === focusedSessionId}
-              onFocus={() => setFocusedSessionId(session.id)}
+              onFocus={() => {
+                setFocusedSessionId(session.id)
+                if (session.status === 'finished') markSessionSeen(session.id)
+              }}
               onTitleChange={onTitleChange}
             />
           )
@@ -283,6 +305,9 @@ function SplitPanel({ session, slotIndex, slot, isFocused, onFocus, onTitleChang
       }}
       onMouseDown={() => {
         if (!isFocused) onFocus()
+        else if (session.status === 'finished') {
+          useStore.getState().markSessionSeen(session.id)
+        }
         focusTerminal(session.id)
       }}
     >

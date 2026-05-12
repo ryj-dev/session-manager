@@ -31,7 +31,8 @@ import { rrf } from './memory/embeddings'
 import {
   configureEmbedClient,
   isAvailable as isEmbedClientAvailable,
-  searchSemantic as embedClientSearch
+  searchSemantic as embedClientSearch,
+  searchKeyword as embedClientKeyword
 } from './memory/embed-client'
 import * as notes from './notes-manager'
 
@@ -192,6 +193,130 @@ Memory notes stored in: ${MEMORIES_DIR}`
   }
 )
 
+// Suggest existing notes that the just-written content seems related to.
+// Uses semantic search (cosine distance from sqlite-vec — lower = more similar).
+// Excludes the source note, existing wikilinks, and anything beyond the cutoff.
+const SUGGEST_DISTANCE_MAX = 1.0
+const SUGGEST_TOP_K = 5
+
+const STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 'be', 'been',
+  'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should',
+  'could', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those', 'i',
+  'you', 'he', 'she', 'it', 'we', 'they', 'them', 'their', 'what', 'which', 'who',
+  'when', 'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few', 'more',
+  'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same',
+  'so', 'than', 'too', 'very', 'just', 'with', 'from', 'into', 'onto', 'about',
+  'between', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'of',
+  'in', 'on', 'at', 'by', 'for', 'as', 'if', 'then', 'else', 'because', 'while',
+  'note', 'notes', 'see', 'also', 'use', 'used', 'using', 'one', 'two', 'three'
+])
+
+function extractKeywords(text: string): Set<string> {
+  const tokens = text.toLowerCase().match(/[a-z][a-z0-9-]{2,}/g) ?? []
+  return new Set(tokens.filter((t) => !STOPWORDS.has(t)))
+}
+
+function scoreKeywordOverlap(query: Set<string>, target: string): number {
+  if (query.size === 0) return 0
+  const targetTokens = extractKeywords(target)
+  let overlap = 0
+  for (const t of query) if (targetTokens.has(t)) overlap++
+  return overlap
+}
+
+async function suggestRelatedNotes(
+  sourceFilename: string,
+  query: string,
+  alreadyLinked: Set<string>
+): Promise<{ filename: string; distance: number; keywordScore: number }[]> {
+  if (!query.trim()) return []
+
+  const queryTokens = extractKeywords(query)
+
+  const embedAvailable = await isEmbedClientAvailable()
+
+  // Semantic candidates (best chunk per file)
+  const semanticByFile = new Map<string, number>()
+  if (embedAvailable) {
+    const hits = await embedClientSearch(query, 50)
+    for (const hit of hits) {
+      if (hit.filename === sourceFilename) continue
+      if (!hit.filename.endsWith('.md')) continue
+      if (hit.distance > SUGGEST_DISTANCE_MAX) continue
+      const prev = semanticByFile.get(hit.filename)
+      if (prev === undefined || hit.distance < prev) semanticByFile.set(hit.filename, hit.distance)
+    }
+  }
+
+  // Keyword candidates. Preferred path: ask the main process's IndexedNote
+  // map over the embed socket (constant-time regardless of corpus size).
+  // Fallback: scan files locally if the socket is unreachable.
+  const keywordByFile = new Map<string, number>()
+  if (embedAvailable) {
+    const hits = await embedClientKeyword([...queryTokens], { limit: 50, bodyChars: 500 })
+    for (const h of hits) {
+      if (h.filename === sourceFilename) continue
+      if (h.score < 2) continue
+      keywordByFile.set(h.filename, h.score)
+    }
+  } else {
+    for (const fn of io.listNotes()) {
+      if (fn === sourceFilename) continue
+      const note = io.readNote(fn)
+      if (!note) continue
+      const haystack = `${note.title}\n${fn}\n${note.body.slice(0, 500)}`
+      const score = scoreKeywordOverlap(queryTokens, haystack)
+      if (score >= 2) keywordByFile.set(fn, score)
+    }
+  }
+
+  // Rank lists for RRF
+  const semanticRanked = [...semanticByFile.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .map(([filename, distance]) => ({ filename, distance }))
+
+  const keywordRanked = [...keywordByFile.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([filename, score]) => ({ filename, score }))
+
+  const fused = rrf<{ filename: string }>(
+    [
+      { items: semanticRanked, weight: 1 },
+      { items: keywordRanked, weight: 1.2 }
+    ],
+    (n) => n.filename
+  )
+
+  const out: { filename: string; distance: number; keywordScore: number }[] = []
+  for (const { item } of fused) {
+    if (alreadyLinked.has(item.filename)) continue
+    if (!io.readNote(item.filename)) continue
+    out.push({
+      filename: item.filename,
+      distance: semanticByFile.get(item.filename) ?? 2,
+      keywordScore: keywordByFile.get(item.filename) ?? 0
+    })
+    if (out.length >= SUGGEST_TOP_K) break
+  }
+  return out
+}
+
+function formatSuggestions(
+  suggestions: { filename: string; distance: number; keywordScore: number }[]
+): string {
+  if (suggestions.length === 0) return ''
+  const lines = suggestions.map((s) => {
+    const sim = (1 - s.distance / 2).toFixed(2)
+    return `  - [[${s.filename.replace(/\.md$/, '')}]] (sim ${sim}, keyword ${s.keywordScore})`
+  })
+  return (
+    `\n\nSuggested related notes (verify before linking):\n` +
+    lines.join('\n') +
+    `\nIf any are genuinely related, add the wikilink in the appropriate body section via edit-memory. Backlinks sync automatically.`
+  )
+}
+
 // ── create-memory ───────────────────────────────────────────────────────────
 
 server.tool(
@@ -234,7 +359,18 @@ server.tool(
       }
     }
 
-    return { content: [{ type: 'text', text: `Created "${fn}" [${note.type || 'context'}] (${note.wikilinks.length} outbound, ${inbound.length} inbound links synced)` }] }
+    const alreadyLinked = new Set<string>()
+    for (const link of note.wikilinks) {
+      const resolved = io.resolveWikilink(link)
+      if (resolved) alreadyLinked.add(resolved)
+    }
+    for (const ref of inbound) alreadyLinked.add(ref)
+
+    const queryText = [title, summary, context, details, outcome].filter(Boolean).join('\n\n')
+    const suggestions = await suggestRelatedNotes(fn, queryText, alreadyLinked)
+
+    const base = `Created "${fn}" [${note.type || 'context'}] (${note.wikilinks.length} outbound, ${inbound.length} inbound links synced)`
+    return { content: [{ type: 'text', text: base + formatSuggestions(suggestions) }] }
   }
 )
 

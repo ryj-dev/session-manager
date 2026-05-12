@@ -51,6 +51,9 @@ export interface AppSettings {
   todosSelectedTags?: string[]
   todosDetailWidth?: number
   disabledIntegrations?: DisabledIntegrations
+  autoModeForChildSessions: boolean
+  autoModeForManualSessions: boolean
+  autoModeForRestoredSessions: boolean
 }
 
 const defaults: AppSettings = {
@@ -65,6 +68,9 @@ const defaults: AppSettings = {
   todosSelectedTags: [],
   todosDetailWidth: 460,
   disabledIntegrations: {},
+  autoModeForChildSessions: false,
+  autoModeForManualSessions: false,
+  autoModeForRestoredSessions: false,
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {

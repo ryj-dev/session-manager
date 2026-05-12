@@ -152,6 +152,12 @@ export interface AppState {
   setMessagePopup: (mode: MessagePopupMode) => void
   messagePopupSeconds: number
   setMessagePopupSeconds: (seconds: number) => void
+  autoModeForChildSessions: boolean
+  setAutoModeForChildSessions: (value: boolean) => void
+  autoModeForManualSessions: boolean
+  setAutoModeForManualSessions: (value: boolean) => void
+  autoModeForRestoredSessions: boolean
+  setAutoModeForRestoredSessions: (value: boolean) => void
 
   // Todos
   todosSelectedTags: string[]
@@ -316,6 +322,12 @@ export const useStore = create<AppState>((set) => ({
   setMessagePopup: (mode) => set({ messagePopup: mode }),
   messagePopupSeconds: 15,
   setMessagePopupSeconds: (seconds) => set({ messagePopupSeconds: seconds }),
+  autoModeForChildSessions: false,
+  setAutoModeForChildSessions: (value) => set({ autoModeForChildSessions: value }),
+  autoModeForManualSessions: false,
+  setAutoModeForManualSessions: (value) => set({ autoModeForManualSessions: value }),
+  autoModeForRestoredSessions: false,
+  setAutoModeForRestoredSessions: (value) => set({ autoModeForRestoredSessions: value }),
 
   // Notes & todos
   todosSelectedTags: [],

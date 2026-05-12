@@ -143,17 +143,22 @@ export default function MemoryGraph({
   useEffect(() => {
     if (!graphData || !containerRef.current) return
 
+    let cancelled = false
     let sigma: import('sigma').default | null = null
     let worker: Worker | null = null
     let wheelCleanup: (() => void) | null = null
+    let resizeCleanup: (() => void) | null = null
 
     async function init() {
       console.log('[MemoryGraph] init start, nodes:', graphData!.nodes.length, 'edges:', graphData!.edges.length)
       const GraphModule = await import('graphology')
+      if (cancelled) return
       const Graph = GraphModule.default ?? GraphModule
       const SigmaModule = await import('sigma')
+      if (cancelled) return
       const Sigma = SigmaModule.default ?? SigmaModule
       const { default: NodeGlowProgram } = await import('./NodeGlowProgram')
+      if (cancelled) return
       console.log('[MemoryGraph] modules loaded, Graph:', typeof Graph, 'Sigma:', typeof Sigma)
 
       const graph = new Graph()
@@ -183,8 +188,8 @@ export default function MemoryGraph({
         }
       }
 
-      const LABEL_ZOOM_START = 0.35
-      const LABEL_ZOOM_FULL = 0.2
+      const LABEL_ZOOM_START = 0.7
+      const LABEL_ZOOM_FULL = 0.4
 
       sigma = new Sigma(graph, containerRef.current!, {
         renderLabels: true,
@@ -273,6 +278,7 @@ export default function MemoryGraph({
         },
       })
 
+      if (cancelled) { sigma.kill(); return }
       sigmaRef.current = sigma
 
       allD3Nodes.current = graphData!.nodes.map((n) => {
@@ -294,6 +300,12 @@ export default function MemoryGraph({
         // Fallback: try without type: module
         worker = new Worker(new URL('../../workers/memory-force.worker.ts', import.meta.url))
         console.log('[MemoryGraph] worker created (fallback)')
+      }
+      if (cancelled) {
+        worker.terminate()
+        sigma.kill()
+        sigmaRef.current = null
+        return
       }
       workerRef.current = worker
 
@@ -440,12 +452,41 @@ export default function MemoryGraph({
       cntr.style.cursor = 'grab'
       sigma.on('downStage', () => { cntr.style.cursor = 'grabbing' })
       sigma.on('upStage', () => { cntr.style.cursor = 'grab' })
+
+      // Keep Sigma's viewport in sync with container size + DPR changes.
+      // Sigma listens to window 'resize' internally, but won't react to
+      // container layout changes or devicePixelRatio shifts (e.g. dragging
+      // the window between monitors with different scale factors). Without
+      // this, the WebGL canvas, hit-testing rects, and pointer-to-graph
+      // mapping drift out of sync — nodes look oversized, clicks miss,
+      // and cursor-anchored zoom targets the wrong point.
+      const si = sigma
+      const triggerResize = () => { si.resize() }
+
+      const ro = new ResizeObserver(triggerResize)
+      ro.observe(cntr)
+
+      let dprMql: MediaQueryList | null = null
+      const watchDpr = () => {
+        if (dprMql) dprMql.removeEventListener('change', onDprChange)
+        dprMql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+        dprMql.addEventListener('change', onDprChange)
+      }
+      function onDprChange() { triggerResize(); watchDpr() }
+      watchDpr()
+
+      resizeCleanup = () => {
+        ro.disconnect()
+        if (dprMql) dprMql.removeEventListener('change', onDprChange)
+      }
     }
 
     init().catch((err) => console.error('[MemoryGraph] init failed:', err))
 
     return () => {
+      cancelled = true
       if (wheelCleanup) wheelCleanup()
+      if (resizeCleanup) resizeCleanup()
       if (worker) { worker.postMessage({ type: 'stop' }); worker.terminate() }
       workerRef.current = null; simRef.current = null
       if (sigma) sigma.kill()

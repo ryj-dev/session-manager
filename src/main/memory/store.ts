@@ -48,12 +48,35 @@ export function readNote(filename: string) {
   return getIO().readNote(filename)
 }
 
+// Track filenames we've written ourselves so the fs.watch listener can ignore
+// the echo events triggered by our own writes. External edits (MCP child
+// process, hand-edits) don't pass through here, so they still flow through
+// the watcher normally.
+const recentlyWritten = new Map<string, number>()
+const RECENT_WRITE_TTL_MS = 500
+
+export function markRecentlyWritten(filename: string): void {
+  recentlyWritten.set(filename, Date.now() + RECENT_WRITE_TTL_MS)
+}
+
+export function wasRecentlyWritten(filename: string): boolean {
+  const expiry = recentlyWritten.get(filename)
+  if (!expiry) return false
+  if (Date.now() > expiry) {
+    recentlyWritten.delete(filename)
+    return false
+  }
+  return true
+}
+
 /** Write a note to disk. Accepts full raw markdown (with frontmatter). */
 export function writeNote(filename: string, rawBody: string): void {
   getIO().writeNote(filename, rawBody)
+  markRecentlyWritten(filename)
 }
 
 /** Delete a note file. */
 export function deleteNoteFile(filename: string): void {
   getIO().deleteNote(filename)
+  markRecentlyWritten(filename)
 }

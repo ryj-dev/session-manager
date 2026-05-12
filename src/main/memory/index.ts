@@ -46,7 +46,7 @@ let batchDepth = 0
 let pendingFilenames = new Set<string>()
 let notifyTimer: ReturnType<typeof setTimeout> | null = null
 
-const NOTIFY_DEBOUNCE_MS = 300
+const NOTIFY_DEBOUNCE_MS = 800
 
 export function getIndex(): Map<string, IndexedNote> {
   if (!index) index = buildIndex()

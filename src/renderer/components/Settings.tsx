@@ -23,6 +23,12 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setMessagePopup = useStore((s) => s.setMessagePopup)
   const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
   const setMessagePopupSeconds = useStore((s) => s.setMessagePopupSeconds)
+  const autoModeForChildSessions = useStore((s) => s.autoModeForChildSessions)
+  const setAutoModeForChildSessions = useStore((s) => s.setAutoModeForChildSessions)
+  const autoModeForManualSessions = useStore((s) => s.autoModeForManualSessions)
+  const setAutoModeForManualSessions = useStore((s) => s.setAutoModeForManualSessions)
+  const autoModeForRestoredSessions = useStore((s) => s.autoModeForRestoredSessions)
+  const setAutoModeForRestoredSessions = useStore((s) => s.setAutoModeForRestoredSessions)
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
   const [claudeMdInstalled, setClaudeMdInstalled] = useState<boolean | null>(null)
   const [claudeMdBusy, setClaudeMdBusy] = useState(false)
@@ -165,6 +171,47 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 When opening explorer from a terminal, start at that project's directory
+              </p>
+            </div>
+
+            {/* Spawn behavior */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Spawn behavior</div>
+              <label className="flex items-center gap-2 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={autoModeForManualSessions}
+                  onChange={(e) => setAutoModeForManualSessions(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Start manual sessions in auto mode</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mb-3 ml-5">
+                Passes <code className="text-zinc-500">--permission-mode auto</code> to sessions you create from the UI
+              </p>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoModeForChildSessions}
+                  onChange={(e) => setAutoModeForChildSessions(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Start child sessions in auto mode</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 mb-3 ml-5">
+                Applies to sessions spawned by other sessions via <code className="text-zinc-500">spawn-session</code> / <code className="text-zinc-500">spawn-agent</code>
+              </p>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoModeForRestoredSessions}
+                  onChange={(e) => setAutoModeForRestoredSessions(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Auto-mode on app restart for restored sessions</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                Passes <code className="text-zinc-500">--permission-mode auto</code> when resuming sessions saved from a previous app launch
               </p>
             </div>
 

@@ -19,6 +19,7 @@ import {
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
 import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
+import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
 import { unregisterMcpServer } from './mcp-launcher'
 import { uninstallPlugin, installPlugin } from './plugin-manager'
@@ -90,14 +91,24 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Spawn a new PTY session
   ipcMain.handle(
     'pty:spawn',
-    (event, { cwd, command, args, allowedTools }: { cwd: string; command?: string; args?: string[]; allowedTools?: string[] }) => {
-      console.log('[main] pty:spawn', { cwd, command, args, allowedTools })
+    (event, { cwd, command, args, allowedTools, autoMode }: { cwd: string; command?: string; args?: string[]; allowedTools?: string[]; autoMode?: boolean }) => {
+      console.log('[main] pty:spawn', { cwd, command, args, allowedTools, autoMode })
       const id = randomUUID()
+
+      const isClaude = command === 'claude' || !command
 
       // Inject --allowedTools for agent sessions
       let finalArgs = args
-      if (allowedTools && allowedTools.length > 0 && (command === 'claude' || !command)) {
+      if (allowedTools && allowedTools.length > 0 && isClaude) {
         finalArgs = [...(args || []), '--allowedTools', ...allowedTools]
+      }
+
+      // Inject --permission-mode auto when requested by the caller, or fall
+      // back to the manual-session setting for callers that don't pass an
+      // explicit value (preserves legacy behavior).
+      const useAuto = isClaude && (autoMode ?? loadSettings().autoModeForManualSessions)
+      if (useAuto) {
+        finalArgs = ['--permission-mode', 'auto', ...(finalArgs || [])]
       }
 
       try {
@@ -115,9 +126,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Resume a saved claude session
   ipcMain.handle(
     'pty:resume',
-    (event, { claudeSessionId, projectPath }: { claudeSessionId: string; projectPath: string }) => {
+    (event, { claudeSessionId, projectPath, autoMode }: { claudeSessionId: string; projectPath: string; autoMode?: boolean }) => {
       const id = randomUUID()
-      const session = spawnSession(id, projectPath, 'claude', ['--resume', claudeSessionId])
+      const resumeArgs = ['--resume', claudeSessionId]
+      const finalArgs = autoMode ? ['--permission-mode', 'auto', ...resumeArgs] : resumeArgs
+      const session = spawnSession(id, projectPath, 'claude', finalArgs)
       // Pre-set the claude session ID since we already know it
       session.claudeSessionId = claudeSessionId
       attachSessionListeners(id, session)
@@ -166,6 +179,16 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
 
   ipcMain.handle('sessions:clearSaved', () => {
     clearSavedSessions()
+  })
+
+  // Composite/split-view groups — persisted across restarts. Renderer pushes
+  // the current set on every change (keyed by claudeSessionId) and loads at
+  // startup once saved PTY sessions are resumed.
+  ipcMain.handle('splitGroups:load', () => {
+    return loadSplitGroups()
+  })
+  ipcMain.on('splitGroups:save', (_e, groups: SavedSplitGroup[]) => {
+    try { saveSplitGroups(groups) } catch (err) { console.warn('[splitGroups] save failed', err) }
   })
 
   // Settings

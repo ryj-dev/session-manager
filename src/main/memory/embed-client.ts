@@ -74,6 +74,61 @@ export async function searchSemantic(
   }
 }
 
+export interface KeywordHit {
+  filename: string
+  score: number
+}
+
+/**
+ * Keyword-overlap search against the main process's IndexedNote map.
+ * Returns ranked filename+score pairs. Empty on unreachable socket — caller
+ * should treat that as "no hits" and either fall back or skip.
+ */
+export async function searchKeyword(
+  tokensOrQuery: string[] | string,
+  opts: { limit?: number; bodyChars?: number } = {}
+): Promise<KeywordHit[]> {
+  if (!socketPath) return []
+  const payload: Record<string, unknown> = {
+    op: 'searchKeyword',
+    limit: opts.limit ?? 50,
+    bodyChars: opts.bodyChars ?? 500,
+  }
+  if (Array.isArray(tokensOrQuery)) payload.tokens = tokensOrQuery
+  else payload.query = tokensOrQuery
+  try {
+    const res = (await request(payload)) as { ok: boolean; hits?: KeywordHit[] }
+    return res.ok && res.hits ? res.hits : []
+  } catch {
+    return []
+  }
+}
+
+export interface IndexedNoteMeta {
+  filename: string
+  title: string
+  type: string
+  tags: string[]
+  wikilinks: string[]
+}
+
+/**
+ * Pull the full metadata-only index from the main process. Used for orphan
+ * audits, graph analysis, and cross-note curation tasks. No body text.
+ */
+export async function listIndexed(): Promise<IndexedNoteMeta[]> {
+  if (!socketPath) return []
+  try {
+    const res = (await request({ op: 'listIndexed' })) as {
+      ok: boolean
+      notes?: IndexedNoteMeta[]
+    }
+    return res.ok && res.notes ? res.notes : []
+  } catch {
+    return []
+  }
+}
+
 // ─── Internals ──────────────────────────────────────────────────────────────
 
 let nextId = 1
