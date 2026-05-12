@@ -86,8 +86,14 @@ function hashToHue(hash: number): number {
   return 0
 }
 
+/** Normalize to the last path segment so a project path and its bare name hash identically. */
+function projectKey(input: string): string {
+  const parts = input.split(/[\\/]/).filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1] : input
+}
+
 export function projectColor(projectPath: string): string {
-  const hash = hashString(projectPath)
+  const hash = hashString(projectKey(projectPath))
   const hue = hashToHue(hash)
   const sat = 50 + (hash >>> 8) % 20
   const lit = 55 + (hash >>> 16) % 10
@@ -95,19 +101,19 @@ export function projectColor(projectPath: string): string {
 }
 
 export function projectColorDim(projectPath: string): string {
-  const hash = hashString(projectPath)
+  const hash = hashString(projectKey(projectPath))
   const hue = hashToHue(hash)
   return `hsl(${hue}, 35%, 18%)`
 }
 
 export function projectColorMid(projectPath: string): string {
-  const hash = hashString(projectPath)
+  const hash = hashString(projectKey(projectPath))
   const hue = hashToHue(hash)
   return `hsl(${hue}, 40%, 35%)`
 }
 
 export function projectColorGlow(projectPath: string): string {
-  const hash = hashString(projectPath)
+  const hash = hashString(projectKey(projectPath))
   const hue = hashToHue(hash)
   return `0 0 14px 2px hsla(${hue}, 60%, 50%, 0.45)`
 }

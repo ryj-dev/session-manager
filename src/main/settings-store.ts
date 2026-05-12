@@ -47,9 +47,9 @@ export interface AppSettings {
   hotkeys: HotkeyMap
   messagePopup: MessagePopupMode
   messagePopupSeconds: number
-  notesShowInactive?: boolean
-  notesProjectViewDefault?: 'project' | 'global'
-  notesZoom?: number
+  todosShowCompleted?: boolean
+  todosSelectedTags?: string[]
+  todosDetailWidth?: number
   disabledIntegrations?: DisabledIntegrations
 }
 
@@ -61,9 +61,9 @@ const defaults: AppSettings = {
   hotkeys: { ...defaultHotkeys },
   messagePopup: 'manual',
   messagePopupSeconds: 15,
-  notesShowInactive: false,
-  notesProjectViewDefault: 'project',
-  notesZoom: 1.15,
+  todosShowCompleted: false,
+  todosSelectedTags: [],
+  todosDetailWidth: 460,
   disabledIntegrations: {},
 }
 

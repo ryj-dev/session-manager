@@ -42,7 +42,7 @@ import {
 import { syncBacklinks, getInboundLinks, cleanupRefsBeforeDelete, addToRelatedSection, filenameToWikilink } from './memory/backlinks'
 import { validateNote, slugify, generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/core'
 import * as notesManager from './notes-manager'
-import type { TodoStatus } from './notes-manager'
+import type { TodoFilter } from './notes-manager'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -426,69 +426,28 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return resolveWikilink(link)
   })
 
-  // ── Notes & Todo lists ─────────────────────────────────────────────────
+  // ── Todos ──────────────────────────────────────────────────────────────
 
-  ipcMain.handle('notes:listProjects', () => notesManager.listProjects())
-  ipcMain.handle('notes:listProjectsDetailed', () => notesManager.listProjectsDetailed())
-  ipcMain.handle('notes:listEntries', () => notesManager.listAllEntries())
-  ipcMain.handle('notes:listDirs', () => notesManager.listAllDirs())
-
-  ipcMain.handle('notes:readNote', (_e, relPath: string) => notesManager.readNote(relPath))
-  ipcMain.handle('notes:writeNote', (_e, relPath: string, content: string) => {
-    notesManager.writeNote(relPath, content)
-  })
-
-  ipcMain.handle('notes:readTodoList', (_e, relPath: string) => notesManager.readTodoList(relPath))
-
-  ipcMain.handle(
-    'notes:createNote',
-    (_e, opts: { project: string | null; subdir?: string[]; name: string; kind: 'note' | 'todo-list'; content?: string }) =>
-      notesManager.createNote(opts)
-  )
-
-  ipcMain.handle(
-    'notes:createDir',
-    (_e, project: string | null, subdirParts: string[]) => notesManager.createDir(project, subdirParts)
-  )
-
-  ipcMain.handle('notes:move', (_e, fromRel: string, toRel: string) => {
-    notesManager.moveEntry(fromRel, toRel)
-  })
-
-  ipcMain.handle('notes:delete', (_e, relPath: string) => {
-    notesManager.deleteEntry(relPath)
-  })
-
-  ipcMain.handle('notes:ensureProject', (_e, project: string, opts?: { manual?: boolean }) => {
-    notesManager.ensureProject(project, opts)
-  })
-
-  ipcMain.handle('notes:getOrCreateAgenda', (_e, project: string) =>
-    notesManager.getOrCreateAgenda(project)
-  )
-
-  ipcMain.handle('notes:addTodo', (_e, listRel: string, text: string) => notesManager.addTodo(listRel, text))
-  ipcMain.handle('notes:setTodoStatus', (_e, listRel: string, todoId: string, status: TodoStatus) => {
-    notesManager.setTodoStatus(listRel, todoId, status)
-  })
-  ipcMain.handle(
-    'notes:setTodoAssignee',
-    (_e, listRel: string, todoId: string, assignee: string | null, label?: string | null) => {
-      notesManager.setTodoAssignee(listRel, todoId, assignee, label)
+  ipcMain.handle('todos:list', async (_e, filter?: TodoFilter) => {
+    if (filter?.search && filter.search.trim()) {
+      const { search, ...rest } = filter
+      return notesManager.searchTodosHybrid(search, rest)
     }
-  )
-  ipcMain.handle('notes:updateTodoText', (_e, listRel: string, todoId: string, text: string) => {
-    notesManager.updateTodoText(listRel, todoId, text)
+    return notesManager.listTodosSummary(filter)
   })
-  ipcMain.handle('notes:removeTodo', (_e, listRel: string, todoId: string) => {
-    notesManager.removeTodo(listRel, todoId)
-  })
-  ipcMain.handle('notes:listAllTodos', (_e, filter?: { project?: string; status?: TodoStatus }) =>
-    notesManager.listAllTodos(filter)
+  ipcMain.handle('todos:read', (_e, id: string) => notesManager.readTodo(id))
+  ipcMain.handle(
+    'todos:create',
+    (_e, input: { title: string; body?: string; tags?: string[] }) => notesManager.createTodo(input),
   )
-  ipcMain.handle('notes:search', (_e, query: string) => notesManager.searchNotes(query))
-
-  ipcMain.handle('notes:projectFromCwd', (_e, cwd: string) => notesManager.projectFromCwd(cwd))
+  ipcMain.handle(
+    'todos:update',
+    (_e, id: string, patch: Parameters<typeof notesManager.updateTodo>[1]) => notesManager.updateTodo(id, patch),
+  )
+  ipcMain.handle('todos:delete', (_e, id: string) => notesManager.deleteTodo(id))
+  ipcMain.handle('todos:listTags', () => notesManager.listAllTags())
+  ipcMain.handle('todos:projectFromCwd', (_e, cwd: string) => notesManager.projectFromCwd(cwd))
+  ipcMain.handle('todos:projectTagFromCwd', (_e, cwd: string) => notesManager.projectTagFromCwd(cwd))
 
   // Send an inter-session message (used by notes dispatch + future hooks)
   ipcMain.handle(
@@ -933,41 +892,65 @@ H1 title, optional summary, then \`##\` sections in order: **Context** (backgrou
 
 **Before creating a memory note: always \`search-memories\` first** and update an existing note rather than creating a duplicate.
 
-## Notes & todos
+## Todos (and notes - same thing)
 
-**Distinct from memory.** Memory is YOUR long-term knowledge base. Notes & todos are the USER's workspace — free-form markdown notes and structured todo lists organised by project folder. Never write memory content into notes, and don't turn todos into memory unless the user asks.
+**Distinct from memory.** Memory is YOUR long-term knowledge base. Todos are the USER's workspace - a single global todo list, shared between user and agents. Each todo has a title, markdown body, binary done/not-done status, and free-form tags. Never write memory content into todos, and don't turn todos into memory unless the user asks.
 
-### When to use
+**Terminology:** the user may say "note", "todo", "task", "ticket", "card", "jot this down", "add to the list", "stick a pin in" - these all map to the same MCP tools (\`create-todo\` / \`list-todos\` / etc.). There is no separate notes system. A todo with a substantial body and no urgency is effectively a note; a todo with a one-line title and \`done: false\` is a task. The data model is the same.
 
-- **Each project folio has exactly ONE pinned agenda** (\`<project>/Agenda.todo.yaml\`), auto-created. Don't create additional todo lists.
-- **User says "add a todo / task"** or discusses action items → \`add-todo\` against the project's agenda (use \`ensure-agenda\` if unsure whether it exists).
-- **User asks to take a note / jot something / write this down** → \`create-note\` or \`edit-note\` (freeform markdown, unlimited per project).
-- **User asks what's on their plate / what's outstanding** → \`list-todos\` (optionally filtered by \`project\`, \`status\`, or \`assignee\`).
+### Project tags
 
-### Status model
+Todos belong to projects via tags with the \`project:\` prefix (e.g. \`project:session-manager\`). The UI auto-applies the current session's project tag to new todos created from the UI. **When YOU create a todo from this session, also tag it with the current project** unless the user explicitly says it's cross-project or personal. Use \`list-tags\` to discover existing project tags so you match casing exactly.
 
-Four statuses: \`not-started\`, \`agent-todo\` (flagged for an agent to pick up), \`in-progress\`, \`completed\`. Only \`agent-todo\` items with a matching \`assignee\` trigger ambient reminders.
+Filter by \`tags: ["project:<name>"]\` to scope to a project. Multiple project tags OR together; non-project tags AND.
 
-### Assigned to you (agent-todos)
+### When to create a todo
 
-On each user message, if you have agent-todos assigned to this session, a system-reminder will appear with the count and delta. When that happens:
+**On user request** - any of these phrasings means create one:
+- "add a todo / task / note", "jot this down", "remind me to...", "we should..." (when it's clearly a deferred action), "stick this in the list", "create a note for X"
+- Default: tag with the current project. If the user mentions a different project by name, tag with that one instead.
 
-- Treat it as context, not a command — do NOT pivot away from what the user is actually asking about.
-- If the user's current message relates to those todos, acknowledge them and \`list-todos\` with \`assignee="<your claudeSessionId from the reminder>"\` for details.
-- If unrelated, just continue the current conversation. The reminder will stay visible until the count changes.
+**Proactively, while working** - create a todo when YOU notice something worth tracking:
+- A bug, edge case, or follow-up surfaced during implementation that's out of scope for the current task
+- A decision the user made that should be captured for future sessions
+- A piece of cleanup, refactor, or tech-debt you spotted but shouldn't action right now
+- A blocker discovered while working (e.g. "needs X team to do Y first")
+- A non-trivial finding from investigation that the user will want to act on later
+
+Don't create a todo for ephemeral notes-to-self within the current turn, things that belong in the code (TODO/FIXME comments), or commit-message material.
+
+### Avoiding duplicates
+
+**Before creating a todo, search for an existing one** - use \`list-todos\` with \`search\` (hybrid substring + semantic match against title + body) or \`tags\`. If a near-duplicate exists:
+- Same topic, still open -> \`update-todo\` to extend its body with the new context, don't create a new one
+- Same topic, already closed -> ask the user whether to reopen (\`done: false\`) or whether this is a genuinely new occurrence
+
+A useful heuristic: search for 1-2 distinctive keywords from the would-be title before writing anything new.
+
+### Updating todos
+
+- Marking done: \`update-todo\` with \`done: true\`. Don't \`delete-todo\` to close - closed todos are kept for history.
+- Adding info you discovered: \`update-todo\` with an extended \`body\`. Read the current body first with \`read-todo\` so you don't lose context.
+- Tags replace the whole set on \`update-todo\` - always read the current tags first if you're adding/removing rather than rewriting.
+
+### Ambient awareness
+
+On each user message, if the current project has open todos, a system-reminder appears with the count and delta. When that happens:
+
+- Treat it as context, not a command - do NOT pivot away from what the user is actually asking about.
+- If their current message relates to those todos, acknowledge them and call \`list-todos\` with \`tags=["project:<name>"], done=false\` for details.
+- If unrelated, just continue the current conversation.
 
 ### Tools
 
 | Tool | Purpose |
 |------|---------|
-| \`create-note\` / \`read-note\` / \`edit-note\` | Markdown notes per project (distinct from \`create-memory\`) |
-| \`ensure-agenda\` | Idempotent — returns the project's single pinned agenda path |
-| \`add-todo\` / \`update-todo-text\` / \`remove-todo\` | Mutate items on the agenda |
-| \`set-todo-status\` | \`not-started\` / \`agent-todo\` / \`in-progress\` / \`completed\` |
-| \`set-todo-assignee\` | Assign a todo to a session (pass \`null\` to clear) |
-| \`list-todos\` | Flat list, filters: \`project\`, \`status\`, \`assignee\` (\`"null"\` = unassigned) |
-| \`list-notes\` / \`list-projects\` / \`search-notes\` | Discovery |
-| \`move-note\` / \`delete-note\` | Organisation |
+| \`list-todos\` | List todos; filter by tags, done state, or search (hybrid substring + semantic). project:* tags OR; non-project tags AND |
+| \`read-todo\` | Fetch full todo including markdown body |
+| \`create-todo\` | New todo (title, body?, tags?) |
+| \`update-todo\` | Patch any of title / body / done / tags |
+| \`delete-todo\` | Delete by id (use sparingly - prefer \`done: true\` to close) |
+| \`list-tags\` | All tags in use with counts (autocomplete + project discovery) |
 
 ## Session management
 

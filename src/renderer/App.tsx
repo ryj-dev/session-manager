@@ -80,9 +80,9 @@ export function App(): JSX.Element {
   const setMessagePopup = useStore((s) => s.setMessagePopup)
   const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
   const setMessagePopupSeconds = useStore((s) => s.setMessagePopupSeconds)
-  const notesZoom = useStore((s) => s.notesZoom)
-  const notesShowInactive = useStore((s) => s.notesShowInactive)
-  const notesProjectViewDefault = useStore((s) => s.notesProjectViewDefault)
+  const todosShowCompleted = useStore((s) => s.todosShowCompleted)
+  const todosSelectedTags = useStore((s) => s.todosSelectedTags)
+  const todosDetailWidth = useStore((s) => s.todosDetailWidth)
   const addMessageNotification = useStore((s) => s.addMessageNotification)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)
   const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
@@ -127,11 +127,9 @@ export function App(): JSX.Element {
       if (settings.hotkeys) setHotkeys({ ...defaultHotkeys, ...settings.hotkeys } as HotkeyMap)
       if (settings.messagePopup) setMessagePopup(settings.messagePopup as 'manual' | 'timed' | 'disabled')
       if (settings.messagePopupSeconds != null) setMessagePopupSeconds(settings.messagePopupSeconds as number)
-      if (settings.notesShowInactive != null) useStore.getState().setNotesShowInactive(settings.notesShowInactive as boolean)
-      if (settings.notesProjectViewDefault) {
-        useStore.getState().setNotesProjectViewDefault(settings.notesProjectViewDefault as 'project' | 'global')
-      }
-      if (typeof settings.notesZoom === 'number') useStore.getState().setNotesZoom(settings.notesZoom as number)
+      if (typeof settings.todosShowCompleted === 'boolean') useStore.getState().setTodosShowCompleted(settings.todosShowCompleted)
+      if (Array.isArray(settings.todosSelectedTags)) useStore.getState().setTodosSelectedTags(settings.todosSelectedTags as string[])
+      if (typeof settings.todosDetailWidth === 'number') useStore.getState().setTodosDetailWidth(settings.todosDetailWidth)
       settingsLoadedRef.current = true
     })
   }, [])
@@ -139,8 +137,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, notesShowInactive, notesProjectViewDefault, notesZoom } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds, notesShowInactive, notesProjectViewDefault, notesZoom])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth])
 
   // On startup: reconnect to active PTY sessions (renderer crash recovery),
   // then check for saved sessions from a previous clean quit.
@@ -547,22 +545,23 @@ export function App(): JSX.Element {
           setActivePanel(null)
         } else {
           const store = useStore.getState()
-          const focused = store.focusedSessionId ? store.sessions.find((s) => s.id === store.focusedSessionId) : null
-          const projectPath = focused?.projectPath ?? store.sessions[store.selectedSessionIndex]?.projectPath ?? null
+          // Only inherit project context when the user is actually inside a session,
+          // not hovering one on the graph. focusedSessionId is the authoritative signal.
+          const focused = store.focusedSessionId
+            ? store.sessions.find((s) => s.id === store.focusedSessionId)
+            : null
+          const projectPath = focused?.projectPath ?? null
           if (projectPath) {
-            window.api.notesProjectFromCwd(projectPath).then((project) => {
-              window.api.notesEnsureProject(project).then(() => {
-                store.setNotesProjectFilter(project)
-                store.setNotesView('project')
-                store.setNotesSelectedPath(null)
-                setActivePanel('notes')
-              })
+            window.api.todosProjectTagFromCwd(projectPath).then((projectTag) => {
+              store.setTodosSessionProjectTag(projectTag)
+              store.setTodosSelectedTags([projectTag])
+              store.setTodosSelectedId(null)
+              setActivePanel('notes')
             })
           } else {
-            // No session context → open global view
-            store.setNotesProjectFilter(null)
-            store.setNotesView('global')
-            store.setNotesSelectedPath(null)
+            store.setTodosSessionProjectTag(null)
+            store.setTodosSelectedTags([])
+            store.setTodosSelectedId(null)
             setActivePanel('notes')
           }
         }
@@ -572,9 +571,9 @@ export function App(): JSX.Element {
       if (key === hotkeys.toggleNotesGlobal) {
         e.preventDefault()
         const store = useStore.getState()
-        store.setNotesProjectFilter(null)
-        store.setNotesView('global')
-        store.setNotesSelectedPath(null)
+        store.setTodosSessionProjectTag(null)
+        store.setTodosSelectedTags([])
+        store.setTodosSelectedId(null)
         setActivePanel(activePanel === 'notes' ? null : 'notes')
         return
       }

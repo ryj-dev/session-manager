@@ -71,9 +71,9 @@ export function GraphView(): JSX.Element {
   const activePanel = useStore((s) => s.activePanel)
   const hotkeys = useStore((s) => s.hotkeys)
   const setActivePanel = useStore((s) => s.setActivePanel)
-  const setNotesView = useStore((s) => s.setNotesView)
-  const setNotesProjectFilter = useStore((s) => s.setNotesProjectFilter)
-  const setNotesSelectedPath = useStore((s) => s.setNotesSelectedPath)
+  const setTodosSelectedTags = useStore((s) => s.setTodosSelectedTags)
+  const setTodosSessionProjectTag = useStore((s) => s.setTodosSessionProjectTag)
+  const setTodosSelectedId = useStore((s) => s.setTodosSelectedId)
   const isCmdHeld = useStore((s) => s.isCmdHeld)
   const setCmdHeld = useStore((s) => s.setCmdHeld)
   const selectedForGroupingIds = useStore((s) => s.selectedForGroupingIds)
@@ -84,23 +84,23 @@ export function GraphView(): JSX.Element {
   const dissolveSplitGroup = useStore((s) => s.dissolveSplitGroup)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  // Agent-todo counts per project for hub badges
-  const [agentTodoCounts, setAgentTodoCounts] = useState<Map<string, { unassigned: number; assigned: number }>>(new Map())
+  // Open-todo counts per project for hub badges (uses `project:<name>` tags).
+  const [openTodoCounts, setOpenTodoCounts] = useState<Map<string, number>>(new Map())
   useEffect(() => {
     let cancelled = false
     const load = async (): Promise<void> => {
       try {
-        const items = await window.api.notesListAllTodos({ status: 'agent-todo' })
+        const items = await window.api.todosList({ done: false })
         if (cancelled) return
-        const counts = new Map<string, { unassigned: number; assigned: number }>()
-        for (const it of items) {
-          if (!it.project) continue
-          const c = counts.get(it.project) ?? { unassigned: 0, assigned: 0 }
-          if (it.todo.assignee) c.assigned++
-          else c.unassigned++
-          counts.set(it.project, c)
+        const counts = new Map<string, number>()
+        for (const t of items) {
+          for (const tag of t.tags) {
+            if (!tag.startsWith('project:')) continue
+            const project = tag.slice('project:'.length)
+            counts.set(project, (counts.get(project) ?? 0) + 1)
+          }
         }
-        setAgentTodoCounts(counts)
+        setOpenTodoCounts(counts)
       } catch { /* ignore */ }
     }
     load()
@@ -513,9 +513,7 @@ export function GraphView(): JSX.Element {
         {/* Hub nodes */}
         {hubs.map((hub) => {
           const isActiveProject = selectedSession?.projectPath === hub.id
-          const counts = agentTodoCounts.get(hub.projectName)
-          const total = (counts?.unassigned ?? 0) + (counts?.assigned ?? 0)
-          const hasUnassigned = (counts?.unassigned ?? 0) > 0
+          const total = openTodoCounts.get(hub.projectName) ?? 0
           return (
             <div
               key={hub.id}
@@ -541,26 +539,20 @@ export function GraphView(): JSX.Element {
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      setNotesProjectFilter(hub.projectName)
-                      setNotesView('project')
-                      setNotesSelectedPath(null)
+                      const projectTag = `project:${hub.projectName}`
+                      setTodosSessionProjectTag(projectTag)
+                      setTodosSelectedTags([projectTag])
+                      setTodosSelectedId(null)
                       setActivePanel('notes')
                     }}
-                    title={
-                      hasUnassigned
-                        ? `${counts!.unassigned} unassigned agent-todo${counts!.unassigned !== 1 ? 's' : ''}`
-                          + (counts!.assigned ? `, ${counts!.assigned} assigned` : '')
-                        : `${total} agent-todo${total !== 1 ? 's' : ''} assigned`
-                    }
+                    title={`${total} open todo${total !== 1 ? 's' : ''}`}
                     className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center text-[10px] font-bold border transition-transform hover:scale-110"
                     style={{
                       padding: '0 5px',
-                      background: hasUnassigned ? '#c85a4a' : '#d4a574',
-                      color: '#0b0a08',
+                      background: '#7aa2f7',
+                      color: '#0b1220',
                       borderColor: '#0a0a0a',
-                      boxShadow: hasUnassigned
-                        ? '0 0 8px rgba(200, 90, 74, 0.6)'
-                        : '0 0 6px rgba(212, 165, 116, 0.5)',
+                      boxShadow: '0 0 6px rgba(122, 162, 247, 0.5)',
                       fontFamily: "'JetBrains Mono', monospace",
                       lineHeight: 1,
                     }}

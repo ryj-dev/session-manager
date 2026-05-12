@@ -800,199 +800,144 @@ server.tool(
   }
 )
 
-// ─── Notes & Todo lists ─────────────────────────────────────────────────────
+// ─── Todos ──────────────────────────────────────────────────────────────────
 
-server.tool(
-  'create-note',
-  'Create a new markdown note in the notes system (distinct from memory). Notes live under a project folder. Pass project=null for a root-level note.',
-  {
-    project: z.string().nullable().describe('Project folder name, or null for root-level'),
-    name: z.string().describe('Note name (without extension)'),
-    subdir: z.array(z.string()).optional().describe('Optional nested subdirectory path inside the project'),
-    content: z.string().optional().describe('Initial markdown content'),
-  },
-  async ({ project, name, subdir, content }) => {
-    const rel = notes.createNote({ project, name, subdir, kind: 'note', content })
-    return { content: [{ type: 'text', text: `Created note: ${rel}` }] }
-  }
-)
+const TODO_KEY_PREFIX = 'todo:'
+const TODO_SEMANTIC_DISTANCE_THRESHOLD = 0.8
 
-server.tool(
-  'read-note',
-  'Read a markdown note by its relative path (e.g. "session-manager/Architecture.md").',
-  { path: z.string().describe('Relative path under the notes root') },
-  async ({ path: p }) => {
-    try {
-      return { content: [{ type: 'text', text: notes.readNote(p) }] }
-    } catch (err) {
-      return { content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
-    }
-  }
-)
+async function listTodosWithSemantic(opts: {
+  tags?: string[]
+  done?: boolean
+  search?: string
+}): Promise<ReturnType<typeof notes.listTodosSummary>> {
+  const { tags, done, search } = opts
+  const query = search?.trim() ?? ''
+  if (!query) return notes.listTodosSummary({ tags, done })
 
-server.tool(
-  'edit-note',
-  'Replace the full content of a markdown note. For fine-grained edits use read-note then edit-note with the new full content.',
-  { path: z.string(), content: z.string() },
-  async ({ path: p, content }) => {
-    notes.writeNote(p, content)
-    return { content: [{ type: 'text', text: `Updated ${p}` }] }
-  }
-)
+  // Substring half — uses the existing in-process filter.
+  const substring = notes.listTodosSummary({ tags, done, search: query })
+  const substringIds = new Set(substring.map((t) => t.id))
 
-server.tool(
-  'ensure-agenda',
-  'Ensure a project has its single pinned agenda (one todo-list per folio). Idempotent — returns the path whether or not it already existed.',
-  { project: z.string().describe('Project folder name') },
-  async ({ project }) => {
-    notes.ensureProject(project)
-    const rel = notes.getOrCreateAgenda(project)
-    return { content: [{ type: 'text', text: `Agenda: ${rel}` }] }
-  }
-)
+  // Semantic half — main process owns the model; we query over the socket
+  // and filter to todo: keys with an acceptable distance.
+  if (!(await isEmbedClientAvailable())) return substring
 
-server.tool(
-  'add-todo',
-  'Append a todo item to a todo list. Returns the generated id.',
-  { path: z.string().describe('Relative path to the .todo.yaml file'), text: z.string() },
-  async ({ path: p, text }) => {
-    const item = notes.addTodo(p, text)
-    return { content: [{ type: 'text', text: `Added todo ${item.id}: ${item.text}` }] }
+  const hits = await embedClientSearch(query, 120)
+  const semanticIds: string[] = []
+  const seen = new Set<string>()
+  for (const h of hits) {
+    if (!h.filename.startsWith(TODO_KEY_PREFIX)) continue
+    if (h.distance > TODO_SEMANTIC_DISTANCE_THRESHOLD) continue
+    const id = h.filename.slice(TODO_KEY_PREFIX.length)
+    if (substringIds.has(id) || seen.has(id)) continue
+    seen.add(id)
+    semanticIds.push(id)
   }
-)
+  if (semanticIds.length === 0) return substring
 
-server.tool(
-  'set-todo-status',
-  'Set a todo item\'s status. Supports not-started, agent-todo, in-progress, completed.',
-  {
-    path: z.string(),
-    todoId: z.string(),
-    status: z.enum(['not-started', 'agent-todo', 'in-progress', 'completed']),
-  },
-  async ({ path: p, todoId, status }) => {
-    notes.setTodoStatus(p, todoId, status)
-    return { content: [{ type: 'text', text: `Set ${todoId} → ${status}` }] }
-  }
-)
+  // Re-apply tag/done filters via a fresh listing (semanticIds came from the
+  // full corpus, including todos that don't match the current filter).
+  const baseFiltered = notes.listTodosSummary({ tags, done })
+  const baseById = new Map(baseFiltered.map((t) => [t.id, t] as const))
+  const extras = semanticIds.map((id) => baseById.get(id)).filter((t): t is NonNullable<typeof t> => Boolean(t))
 
-server.tool(
-  'set-todo-assignee',
-  'Assign a todo item to a session (or null to unassign). assigneeLabel is a human-readable name shown in the UI.',
-  {
-    path: z.string(),
-    todoId: z.string(),
-    assignee: z.string().nullable(),
-    assigneeLabel: z.string().nullable().optional(),
-  },
-  async ({ path: p, todoId, assignee, assigneeLabel }) => {
-    notes.setTodoAssignee(p, todoId, assignee, assigneeLabel ?? null)
-    return { content: [{ type: 'text', text: assignee ? `Assigned ${todoId} → ${assigneeLabel ?? assignee}` : `Unassigned ${todoId}` }] }
-  }
-)
-
-server.tool(
-  'update-todo-text',
-  'Change the text of a todo item.',
-  { path: z.string(), todoId: z.string(), text: z.string() },
-  async ({ path: p, todoId, text }) => {
-    notes.updateTodoText(p, todoId, text)
-    return { content: [{ type: 'text', text: `Updated ${todoId}` }] }
-  }
-)
-
-server.tool(
-  'remove-todo',
-  'Remove a todo item from a todo list.',
-  { path: z.string(), todoId: z.string() },
-  async ({ path: p, todoId }) => {
-    notes.removeTodo(p, todoId)
-    return { content: [{ type: 'text', text: `Removed ${todoId}` }] }
-  }
-)
+  return [...substring, ...extras]
+}
 
 server.tool(
   'list-todos',
-  'List todos across all todo-lists, optionally filtered by project, status, or assignee (pass assignee="null" to list only unassigned).',
+  'List todos. Filter by tags, done state, or search. Search is hybrid: case-insensitive substring (title + body) + semantic (bge-small embeddings with a similarity threshold), deduped. Tag semantics: project:* tags OR with each other, non-project tags AND with each other; the two groups AND together. Returns summary lines without the body - use read-todo to fetch full body.',
   {
-    project: z.string().optional(),
-    status: z.enum(['not-started', 'agent-todo', 'in-progress', 'completed']).optional(),
-    assignee: z.string().optional().describe('Session ID filter, or "null" for unassigned'),
+    tags: z.array(z.string()).optional().describe('Filter tags. project:* tags use OR; other tags use AND.'),
+    done: z.boolean().optional().describe('Filter by done state'),
+    search: z.string().optional().describe('Hybrid substring + semantic search against title + body'),
   },
-  async ({ project, status, assignee }) => {
-    const filter: { project?: string; status?: typeof status; assignee?: string | null } = { project, status }
-    if (assignee !== undefined) filter.assignee = assignee === 'null' ? null : assignee
-    const items = notes.listAllTodos(filter)
+  async ({ tags, done, search }) => {
+    const items = await listTodosWithSemantic({ tags, done, search })
     if (items.length === 0) return { content: [{ type: 'text', text: 'No todos found' }] }
-    const glyph: Record<string, string> = {
-      'not-started': '[ ]',
-      'agent-todo': '[?]',
-      'in-progress': '[~]',
-      'completed': '[x]',
-    }
-    const lines = items.map((i) => {
-      const box = glyph[i.todo.status] ?? '[ ]'
-      const proj = i.project ? `${i.project}/` : ''
-      const assignee = i.todo.assignee ? ` @${i.todo.assigneeLabel ?? i.todo.assignee.slice(0, 8)}` : ''
-      return `${box} ${proj}${i.listTitle} — ${i.todo.text}${assignee} (id: ${i.todo.id})`
+    const lines = items.map((t) => {
+      const box = t.done ? '[x]' : '[ ]'
+      const tagStr = t.tags.length ? `  {${t.tags.join(', ')}}` : ''
+      return `${box} ${t.title}${tagStr}  (id: ${t.id})`
     })
     return { content: [{ type: 'text', text: `${items.length} todo(s):\n${lines.join('\n')}` }] }
-  }
+  },
 )
 
 server.tool(
-  'list-notes',
-  'List all notes and todo-lists, optionally filtered by project.',
-  { project: z.string().optional() },
-  async ({ project }) => {
-    let entries = notes.listAllEntries()
-    if (project) entries = entries.filter((e) => e.project === project)
-    if (entries.length === 0) return { content: [{ type: 'text', text: 'No notes found' }] }
-    const lines = entries.map((e) => `- ${e.relPath} [${e.kind}]`)
-    return { content: [{ type: 'text', text: `${entries.length} entries:\n${lines.join('\n')}` }] }
-  }
+  'read-todo',
+  'Read a todo\'s full content including its markdown body.',
+  { id: z.string() },
+  async ({ id }) => {
+    try {
+      const t = notes.readTodo(id)
+      const fm = `id: ${t.id}\ntitle: ${t.title}\ndone: ${t.done}\ntags: [${t.tags.join(', ')}]\ncreated: ${t.created}\nupdated: ${t.updated}`
+      return { content: [{ type: 'text', text: `${fm}\n\n---\n${t.body}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
 )
 
 server.tool(
-  'list-projects',
-  'List all note project folders.',
+  'create-todo',
+  'Create a new todo. Tags are free-form strings; use `project:<name>` for project membership.',
+  {
+    title: z.string(),
+    body: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+  },
+  async ({ title, body, tags }) => {
+    const t = notes.createTodo({ title, body, tags })
+    return { content: [{ type: 'text', text: `Created todo ${t.id}: ${t.title}` }] }
+  },
+)
+
+server.tool(
+  'update-todo',
+  'Update fields on a todo. Pass only the fields to change. Replacing `tags` replaces the entire tag set.',
+  {
+    id: z.string(),
+    title: z.string().optional(),
+    body: z.string().optional(),
+    done: z.boolean().optional(),
+    tags: z.array(z.string()).optional(),
+  },
+  async ({ id, title, body, done, tags }) => {
+    try {
+      const patch: { title?: string; body?: string; done?: boolean; tags?: string[] } = {}
+      if (title !== undefined) patch.title = title
+      if (body !== undefined) patch.body = body
+      if (done !== undefined) patch.done = done
+      if (tags !== undefined) patch.tags = tags
+      const t = notes.updateTodo(id, patch)
+      return { content: [{ type: 'text', text: `Updated ${t.id}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'delete-todo',
+  'Delete a todo by id.',
+  { id: z.string() },
+  async ({ id }) => {
+    notes.deleteTodo(id)
+    return { content: [{ type: 'text', text: `Deleted ${id}` }] }
+  },
+)
+
+server.tool(
+  'list-tags',
+  'List all tags in use, with counts. Useful for autocomplete and discovering project tags.',
   {},
   async () => {
-    const projs = notes.listProjects()
-    if (projs.length === 0) return { content: [{ type: 'text', text: 'No projects' }] }
-    return { content: [{ type: 'text', text: projs.map((p) => `- ${p}`).join('\n') }] }
-  }
-)
-
-server.tool(
-  'search-notes',
-  'Full-text search across notes and todo text.',
-  { query: z.string() },
-  async ({ query }) => {
-    const hits = notes.searchNotes(query)
-    if (hits.length === 0) return { content: [{ type: 'text', text: `No matches for "${query}"` }] }
-    const lines = hits.map((h) => `- ${h.relPath} [${h.kind}] — ${h.snippet}`)
-    return { content: [{ type: 'text', text: `${hits.length} result(s):\n${lines.join('\n')}` }] }
-  }
-)
-
-server.tool(
-  'move-note',
-  'Move a note or todo list to a new relative path. The project is implied by the new top-level folder.',
-  { from: z.string(), to: z.string() },
-  async ({ from, to }) => {
-    notes.moveEntry(from, to)
-    return { content: [{ type: 'text', text: `Moved ${from} → ${to}` }] }
-  }
-)
-
-server.tool(
-  'delete-note',
-  'Delete a note or todo list by relative path.',
-  { path: z.string() },
-  async ({ path: p }) => {
-    notes.deleteEntry(p)
-    return { content: [{ type: 'text', text: `Deleted ${p}` }] }
-  }
+    const tags = notes.listAllTags()
+    if (tags.length === 0) return { content: [{ type: 'text', text: 'No tags' }] }
+    const lines = tags.map((t) => `- ${t.tag} (${t.count})`)
+    return { content: [{ type: 'text', text: lines.join('\n') }] }
+  },
 )
 
 // ─── Start server ───────────────────────────────────────────────────────────

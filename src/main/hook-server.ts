@@ -424,10 +424,10 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
   }
 }
 
-// ── Ambient awareness (UserPromptSubmit → inject agent-todo count) ─────────
+// ── Ambient awareness (UserPromptSubmit → inject project-todo count) ───────
 
-/** Last observed agent-todo count per session, for change-detection. */
-const lastAgentTodoCount = new Map<string, number>()
+/** Last observed project-open-todo count per session, for change-detection. */
+const lastProjectTodoCount = new Map<string, number>()
 
 interface SyncHookReply {
   hookSpecificOutput?: {
@@ -440,18 +440,17 @@ function buildSyncHookResponse(appSessionId: string | null, payload: HookPayload
   if (!appSessionId || payload.hook_event_name !== 'UserPromptSubmit') return {}
 
   try {
-    // Stable identifier: prefer Claude Code's conversation UUID (survives reloads)
-    // and fall back to the PTY session ID for legacy assignments.
+    const session = getSession(appSessionId)
+    if (!session?.projectPath) return {}
+
+    const projectTag = notesManager.projectTagFromCwd(session.projectPath)
+    const open = notesManager.listTodosSummary({ tags: [projectTag], done: false })
+    const count = open.length
+
     const claudeId = payload.session_id || null
-    const ids = [claudeId, appSessionId].filter((x): x is string => !!x)
-
-    const allAssigned = notesManager.listAllTodos({ status: 'agent-todo' })
-    const count = allAssigned.filter((t) => t.todo.assignee && ids.includes(t.todo.assignee)).length
-
-    // Track against the stable key so we don't lose delta state across reloads.
     const trackKey = claudeId ?? appSessionId
-    const prev = lastAgentTodoCount.get(trackKey) ?? -1
-    lastAgentTodoCount.set(trackKey, count)
+    const prev = lastProjectTodoCount.get(trackKey) ?? -1
+    lastProjectTodoCount.set(trackKey, count)
 
     if (count === 0) return {}
     if (prev === count) return {}
@@ -462,12 +461,11 @@ function buildSyncHookResponse(appSessionId: string | null, payload: HookPayload
       : delta > 0
         ? `${delta} new since last message`
         : delta < 0
-          ? `${-delta} cleared since last message`
+          ? `${-delta} closed since last message`
           : 'unchanged'
 
-    const lookupId = claudeId ?? appSessionId
-    const context = `You have ${count} agent-todo${count === 1 ? '' : 's'} assigned to this session (${deltaText}). `
-      + `Use the list-todos MCP tool (assignee="${lookupId}") to see them.`
+    const context = `You have ${count} open todo${count === 1 ? '' : 's'} tagged \`${projectTag}\` (${deltaText}). `
+      + `Use the list-todos MCP tool with tags=["${projectTag}"], done=false to see them.`
 
     return {
       hookSpecificOutput: {
@@ -589,7 +587,7 @@ function installHooks(port: number): void {
   ]
 
   // UserPromptSubmit — fire the async tracker hook plus a sync hook that can inject
-  // a system-reminder about assigned agent-todos.
+  // a system-reminder about open todos for this session's project.
   hooks.UserPromptSubmit = [
     ...((hooks.UserPromptSubmit ?? []) as Array<Record<string, unknown>>),
     { hooks: [{ ...hookEntry, async: true }] },

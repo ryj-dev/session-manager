@@ -10,7 +10,8 @@ import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
 import { initMemoryEmbeddings, reindexAll } from './memory/embeddings-runtime'
 import { startEmbedServer, stopEmbedServer } from './memory/embed-server'
-import { setNotesRoot, startNotesWatcher, stopNotesWatcher } from './notes-manager'
+import { setNotesRoot, startNotesWatcher, stopNotesWatcher, setEmbedHooks } from './notes-manager'
+import { indexTodo, removeTodoFromIndex, searchTodosSemantic, reindexAllTodos } from './todos-embeddings'
 import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 import { loadSettings } from './settings-store'
@@ -206,15 +207,26 @@ app.whenReady().then(async () => {
   })
   // Kick off model resolution (bundled or downloaded). Doesn't block UI.
   // The bootstrap reindex awaits this internally.
-  void initMemoryEmbeddings().then(() =>
-    reindexAll((p) => {
-      const win = BrowserWindow.getAllWindows()[0]
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('memory:index-progress', p)
-      }
-    }).catch((err) => console.error('[memory] bootstrap reindex failed:', err))
-  )
+  void initMemoryEmbeddings().then(async () => {
+    try {
+      await reindexAll((p) => {
+        const win = BrowserWindow.getAllWindows()[0]
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('memory:index-progress', p)
+        }
+      })
+    } catch (err) {
+      console.error('[memory] bootstrap reindex failed:', err)
+    }
+    // Todo embeddings live in the same DB; reindex after memory.
+    try { await reindexAllTodos() } catch (err) { console.error('[todos:embed] bootstrap reindex failed:', err) }
+  })
   startMemoryWatcher()
+  setEmbedHooks({
+    index: indexTodo,
+    remove: removeTodoFromIndex,
+    searchSemantic: searchTodosSemantic,
+  })
   setNotesRoot(join(app.getPath('userData'), 'notes'))
   startNotesWatcher(() => {
     const win = BrowserWindow.getAllWindows()[0]

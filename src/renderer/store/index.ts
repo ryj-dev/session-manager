@@ -46,7 +46,6 @@ export const defaultHotkeys: HotkeyMap = {
 
 export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | null
 
-export type NotesView = 'project' | 'global'
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
 
@@ -154,21 +153,22 @@ export interface AppState {
   messagePopupSeconds: number
   setMessagePopupSeconds: (seconds: number) => void
 
-  // Notes & todos
-  notesView: NotesView
-  setNotesView: (v: NotesView) => void
-  notesProjectFilter: string | null
-  setNotesProjectFilter: (p: string | null) => void
-  notesSelectedPath: string | null
-  setNotesSelectedPath: (p: string | null) => void
-  notesExpandedProjects: Record<string, boolean>
-  toggleNotesProjectExpanded: (p: string) => void
-  notesShowInactive: boolean
-  setNotesShowInactive: (v: boolean) => void
-  notesProjectViewDefault: NotesView
-  setNotesProjectViewDefault: (v: NotesView) => void
-  notesZoom: number
-  setNotesZoom: (z: number) => void
+  // Todos
+  todosSelectedTags: string[]
+  setTodosSelectedTags: (tags: string[]) => void
+  toggleTodosTag: (tag: string) => void
+  todosSearch: string
+  setTodosSearch: (s: string) => void
+  todosShowCompleted: boolean
+  setTodosShowCompleted: (v: boolean) => void
+  todosSelectedId: string | null
+  setTodosSelectedId: (id: string | null) => void
+  /** Session-project tag auto-applied when the panel is opened from a session (e.g. `project:session-manager`). */
+  todosSessionProjectTag: string | null
+  setTodosSessionProjectTag: (tag: string | null) => void
+  /** Persisted width (px) of the todo detail pane when a todo is selected. */
+  todosDetailWidth: number
+  setTodosDetailWidth: (w: number) => void
 
   // Message notifications
   pendingMessages: MessageNotification[]
@@ -318,23 +318,23 @@ export const useStore = create<AppState>((set) => ({
   setMessagePopupSeconds: (seconds) => set({ messagePopupSeconds: seconds }),
 
   // Notes & todos
-  notesView: 'project',
-  setNotesView: (v) => set({ notesView: v }),
-  notesProjectFilter: null,
-  setNotesProjectFilter: (p) => set({ notesProjectFilter: p }),
-  notesSelectedPath: null,
-  setNotesSelectedPath: (p) => set({ notesSelectedPath: p }),
-  notesExpandedProjects: {},
-  toggleNotesProjectExpanded: (p) =>
-    set((state) => ({
-      notesExpandedProjects: { ...state.notesExpandedProjects, [p]: !state.notesExpandedProjects[p] },
-    })),
-  notesShowInactive: false,
-  setNotesShowInactive: (v) => set({ notesShowInactive: v }),
-  notesProjectViewDefault: 'project',
-  setNotesProjectViewDefault: (v) => set({ notesProjectViewDefault: v }),
-  notesZoom: 1.15,
-  setNotesZoom: (z) => set({ notesZoom: Math.min(2.0, Math.max(0.7, Math.round(z * 100) / 100)) }),
+  todosSelectedTags: [],
+  setTodosSelectedTags: (tags) => set({ todosSelectedTags: [...new Set(tags)] }),
+  toggleTodosTag: (tag) => set((state) => ({
+    todosSelectedTags: state.todosSelectedTags.includes(tag)
+      ? state.todosSelectedTags.filter((t) => t !== tag)
+      : [...state.todosSelectedTags, tag],
+  })),
+  todosSearch: '',
+  setTodosSearch: (s) => set({ todosSearch: s }),
+  todosShowCompleted: false,
+  setTodosShowCompleted: (v) => set({ todosShowCompleted: v }),
+  todosSelectedId: null,
+  setTodosSelectedId: (id) => set({ todosSelectedId: id }),
+  todosSessionProjectTag: null,
+  setTodosSessionProjectTag: (tag) => set({ todosSessionProjectTag: tag }),
+  todosDetailWidth: 460,
+  setTodosDetailWidth: (w) => set({ todosDetailWidth: Math.max(320, Math.min(1100, Math.round(w))) }),
 
   // Message notifications
   pendingMessages: [],
