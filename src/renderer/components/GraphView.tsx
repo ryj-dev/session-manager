@@ -62,7 +62,12 @@ function Hotkey({ keys, label, small }: { keys: string; label: string; small?: b
 // ── Main component ─────────────────────────────────────────────────────
 
 export function GraphView(): JSX.Element {
-  const sessions = useStore((s) => s.sessions)
+  // Hide attached overlay terminals from the graph — they exist as PTYs but
+  // are visible only via the right-edge hover sidebar. Filter via useMemo so
+  // the reference is stable: a selector that calls .filter() returns a new
+  // array each render and triggers an infinite Zustand re-render loop.
+  const allSessions = useStore((s) => s.sessions)
+  const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached), [allSessions])
   const setViewMode = useStore((s) => s.setViewMode)
   const setFocusedSessionId = useStore((s) => s.setFocusedSessionId)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)

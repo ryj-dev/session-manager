@@ -147,7 +147,12 @@ const spokeSpringCache = new Map<string, SpokeSpring>()
 // ── Hook ───────────────────────────────────────────────────────────────
 
 export function useSimulation(width: number, height: number): SimulationResult {
-  const sessions = useStore((s) => s.sessions)
+  // Attached (overlay) terminals are UI-only children of their parent Claude session —
+  // they have a live PTY but no graph presence. Filter via useMemo: a selector
+  // that calls .filter() returns a new array each render and triggers an infinite
+  // Zustand re-render loop (Object.is on the array never matches).
+  const allSessions = useStore((s) => s.sessions)
+  const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached), [allSessions])
   const splitGroups = useStore((s) => s.splitGroups)
   const hubSimRef = useRef<Simulation<HubNode, never> | null>(null)
   const hubNodesRef = useRef<HubNode[]>([])

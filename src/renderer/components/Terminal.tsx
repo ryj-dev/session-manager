@@ -10,6 +10,10 @@ interface TerminalProps {
   sessionId: string
   visible: boolean
   onTitleChange?: (title: string) => void
+  /** Steal keyboard focus on initial fit. Default true. Overlay/attached terminals
+   *  pass false so they never auto-focus on mount or first reveal — focus only on
+   *  explicit click. */
+  autoFocus?: boolean
 }
 
 // Global xterm instances — persist across React renders and remounts
@@ -236,7 +240,7 @@ function installScrollGuard(sessionId: string, term: XTerm, duration = 300, onDo
   activeScrollGuards.set(sessionId, cleanup)
 }
 
-export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): JSX.Element {
+export function Terminal({ sessionId, visible, onTitleChange, autoFocus = true }: TerminalProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   // Ref so the title change listener always calls the latest callback
   const onTitleChangeRef = useRef(onTitleChange)
@@ -490,7 +494,7 @@ export function Terminal({ sessionId, visible, onTitleChange }: TerminalProps): 
         // window after fit() where reflow can desync the viewport before any
         // PTY data arrives.
         installScrollGuard(sessionId, instance.term, 300, () => {
-          if (wasInitial) instance.term.focus()
+          if (wasInitial && autoFocus) instance.term.focus()
         })
       }
     }

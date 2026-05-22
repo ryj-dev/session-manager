@@ -29,6 +29,12 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setAutoModeForManualSessions = useStore((s) => s.setAutoModeForManualSessions)
   const autoModeForRestoredSessions = useStore((s) => s.autoModeForRestoredSessions)
   const setAutoModeForRestoredSessions = useStore((s) => s.setAutoModeForRestoredSessions)
+  const ambientTodoNudge = useStore((s) => s.ambientTodoNudge)
+  const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
+  const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
+  const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
+  const terminalPairingMode = useStore((s) => s.terminalPairingMode)
+  const setTerminalPairingMode = useStore((s) => s.setTerminalPairingMode)
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
   const [claudeMdInstalled, setClaudeMdInstalled] = useState<boolean | null>(null)
   const [claudeMdBusy, setClaudeMdBusy] = useState(false)
@@ -212,6 +218,57 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 Passes <code className="text-zinc-500">--permission-mode auto</code> when resuming sessions saved from a previous app launch
+              </p>
+            </div>
+
+            {/* Todo nudges */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Todo nudges</div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={ambientTodoNudge}
+                  onChange={(e) => setAmbientTodoNudge(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Nudge sessions about unfinished todos</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                Periodically reminds Claude to surface open todos at natural stopping points (throttled to ~once every 8 turns)
+              </p>
+            </div>
+
+            {/* Terminal pairing */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Terminal pairing</div>
+              <label className="flex items-center gap-2 mb-1">
+                <span className="text-xs text-zinc-300 w-32 shrink-0">Pair a shell with each new Claude session:</span>
+                <select
+                  value={terminalPairingMode}
+                  onChange={(e) => setTerminalPairingMode(e.target.value as 'off' | 'split' | 'overlay')}
+                  className="text-xs bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200"
+                >
+                  <option value="off">Off</option>
+                  <option value="split">Split view</option>
+                  <option value="overlay">Hover overlay</option>
+                </select>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 mb-3 ml-1">
+                {terminalPairingMode === 'split' && 'A shell opens alongside in a 2-pane split view.'}
+                {terminalPairingMode === 'overlay' && 'A hidden shell attaches per session, revealed by hovering the right edge. Pin to keep open side-by-side.'}
+                {terminalPairingMode === 'off' && 'No shell is spawned alongside new Claude sessions.'}
+              </p>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={spawnIntoCurrentSplit}
+                  onChange={(e) => setSpawnIntoCurrentSplit(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Spawn new sessions into current split</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                While in a split view, new Claude/terminal sessions become extra panes instead of standalone graph nodes.
               </p>
             </div>
 

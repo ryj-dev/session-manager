@@ -21,6 +21,9 @@ const sessionStatus = new Map<string, 'working' | 'idle'>()
 export function cleanupSession(appSessionId: string): void {
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
+  lastProjectTodoCount.delete(appSessionId)
+  sessionTurnCount.delete(appSessionId)
+  lastNudgeTurn.delete(appSessionId)
   // Clean up the session's inbox directory (may fail on Windows if files are still locked by exiting PTY)
   try {
     rmSync(join(app.getPath('userData'), 'messages', appSessionId), { recursive: true, force: true })
@@ -437,6 +440,15 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
 /** Last observed project-open-todo count per session, for change-detection. */
 const lastProjectTodoCount = new Map<string, number>()
 
+/** UserPromptSubmit count per session (used to throttle the ambient nudge). */
+const sessionTurnCount = new Map<string, number>()
+
+/** Turn number at which the ambient nudge last fired for each session. */
+const lastNudgeTurn = new Map<string, number>()
+
+/** Turns between ambient todo nudges. */
+const NUDGE_INTERVAL = 8
+
 interface SyncHookReply {
   hookSpecificOutput?: {
     hookEventName: string
@@ -460,25 +472,47 @@ function buildSyncHookResponse(appSessionId: string | null, payload: HookPayload
     const prev = lastProjectTodoCount.get(trackKey) ?? -1
     lastProjectTodoCount.set(trackKey, count)
 
+    const turn = (sessionTurnCount.get(trackKey) ?? 0) + 1
+    sessionTurnCount.set(trackKey, turn)
+
     if (count === 0) return {}
-    if (prev === count) return {}
 
-    const delta = prev === -1 ? count : (count - prev)
-    const deltaText = prev === -1
-      ? `first check of this session`
-      : delta > 0
-        ? `${delta} new since last message`
-        : delta < 0
-          ? `${-delta} closed since last message`
-          : 'unchanged'
+    const countChanged = prev !== count
 
-    const context = `You have ${count} open todo${count === 1 ? '' : 's'} tagged \`${projectTag}\` (${deltaText}). `
-      + `Use the list-todos MCP tool with tags=["${projectTag}"], done=false to see them.`
+    if (countChanged) {
+      const delta = prev === -1 ? count : (count - prev)
+      const deltaText = prev === -1
+        ? `first check of this session`
+        : delta > 0
+          ? `${delta} new since last message`
+          : `${-delta} closed since last message`
+
+      const context = `You have ${count} open todo${count === 1 ? '' : 's'} tagged \`${projectTag}\` (${deltaText}). `
+        + `Use the list-todos MCP tool with tags=["${projectTag}"], done=false to see them.`
+
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit',
+          additionalContext: context,
+        },
+      }
+    }
+
+    // Ambient nudge: throttled, opt-in, only when count is unchanged this turn.
+    if (!loadSettings().ambientTodoNudge) return {}
+    const lastNudge = lastNudgeTurn.get(trackKey) ?? -Infinity
+    if (turn - lastNudge < NUDGE_INTERVAL) return {}
+    lastNudgeTurn.set(trackKey, turn)
+
+    const nudge = `This project still has ${count} unfinished todo${count === 1 ? '' : 's'} tagged \`${projectTag}\`. `
+      + `If you're at a natural stopping point in this reply (and not mid-task on something unrelated), `
+      + `add a soft closing line inviting the user to pick one up — e.g. "by the way, there are still N todos open for this project, want me to list them?". `
+      + `Do not pivot, do not list them unprompted, and skip the nudge if it would feel forced.`
 
     return {
       hookSpecificOutput: {
         hookEventName: 'UserPromptSubmit',
-        additionalContext: context,
+        additionalContext: nudge,
       },
     }
   } catch {

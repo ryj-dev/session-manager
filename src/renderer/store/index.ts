@@ -76,18 +76,28 @@ export interface Session {
   createdAt: number
   /** Stable Claude Code conversation UUID (persists across resumes / app reloads). */
   claudeSessionId: string | null
+  /** True when this session is a hidden terminal attached to a Claude session as a
+   *  hover-overlay sidebar. Attached sessions are excluded from the graph and from
+   *  graph navigation but still mount as real PTYs. */
+  isAttached: boolean
+  /** For Claude sessions with `terminalPairingMode === 'overlay'`: the id of the hidden
+   *  terminal session attached to this one. Null on attached sessions and on
+   *  Claude sessions without an attachment. */
+  attachedTerminalId: string | null
 }
 
 export interface AppState {
   // Sessions
   sessions: Session[]
-  addSession: (id: string, projectPath: string, claudeSessionId?: string | null) => void
+  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean }) => void
   removeSession: (id: string) => void
   updateSessionStatus: (id: string, status: SessionStatus) => void
   markSessionSeen: (id: string) => void
   updateSessionSnapshot: (id: string, snapshot: HTMLCanvasElement) => void
   updateSessionTitle: (id: string, title: string) => void
   updateSessionClaudeId: (id: string, claudeSessionId: string) => void
+  /** Bind a hidden terminal session as the attached overlay terminal for a Claude session. */
+  setAttachedTerminal: (parentId: string, attachedId: string | null) => void
 
   // UI state
   viewMode: ViewMode
@@ -158,6 +168,18 @@ export interface AppState {
   setAutoModeForManualSessions: (value: boolean) => void
   autoModeForRestoredSessions: boolean
   setAutoModeForRestoredSessions: (value: boolean) => void
+  ambientTodoNudge: boolean
+  setAmbientTodoNudge: (value: boolean) => void
+  spawnIntoCurrentSplit: boolean
+  setSpawnIntoCurrentSplit: (value: boolean) => void
+  /** How spawned Claude sessions are paired with a shell. Mutually exclusive. */
+  terminalPairingMode: 'off' | 'split' | 'overlay'
+  setTerminalPairingMode: (value: 'off' | 'split' | 'overlay') => void
+
+  // Hover-overlay attached-terminal pin state (per-parent-Claude-session ids).
+  // When pinned, the overlay sticks open and lays side-by-side instead of overlaying.
+  pinnedAttachedTerminalIds: string[]
+  togglePinnedAttachedTerminal: (parentId: string) => void
 
   // Todos
   todosSelectedTags: string[]
@@ -196,7 +218,7 @@ function projectNameFromPath(projectPath: string): string {
 export const useStore = create<AppState>((set) => ({
   // Sessions
   sessions: [],
-  addSession: (id, projectPath, claudeSessionId = null) =>
+  addSession: (id, projectPath, claudeSessionId = null, opts) =>
     set((state) => ({
       sessions: [
         ...state.sessions,
@@ -210,8 +232,16 @@ export const useStore = create<AppState>((set) => ({
           snapshotVersion: 0,
           createdAt: Date.now(),
           claudeSessionId,
+          isAttached: !!opts?.isAttached,
+          attachedTerminalId: null,
         }
       ]
+    })),
+  setAttachedTerminal: (parentId, attachedId) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === parentId ? { ...s, attachedTerminalId: attachedId } : s
+      ),
     })),
   removeSession: (id) =>
     set((state) => ({
@@ -328,6 +358,20 @@ export const useStore = create<AppState>((set) => ({
   setAutoModeForManualSessions: (value) => set({ autoModeForManualSessions: value }),
   autoModeForRestoredSessions: false,
   setAutoModeForRestoredSessions: (value) => set({ autoModeForRestoredSessions: value }),
+  ambientTodoNudge: false,
+  setAmbientTodoNudge: (value) => set({ ambientTodoNudge: value }),
+  spawnIntoCurrentSplit: false,
+  setSpawnIntoCurrentSplit: (value) => set({ spawnIntoCurrentSplit: value }),
+  terminalPairingMode: 'off',
+  setTerminalPairingMode: (value) => set({ terminalPairingMode: value }),
+
+  pinnedAttachedTerminalIds: [],
+  togglePinnedAttachedTerminal: (parentId) =>
+    set((state) => ({
+      pinnedAttachedTerminalIds: state.pinnedAttachedTerminalIds.includes(parentId)
+        ? state.pinnedAttachedTerminalIds.filter((id) => id !== parentId)
+        : [...state.pinnedAttachedTerminalIds, parentId],
+    })),
 
   // Notes & todos
   todosSelectedTags: [],

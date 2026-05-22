@@ -964,6 +964,12 @@ On each user message, if the current project has open todos, a system-reminder a
 - If their current message relates to those todos, acknowledge them and call \`list-todos\` with \`tags=["project:<name>"], done=false\` for details.
 - If unrelated, just continue the current conversation.
 
+**Ambient nudge reminder (opt-in setting).** Separately, when the user has \`Nudge sessions about unfinished todos\` enabled, a different system-reminder may appear every ~8 turns when the count is stable. It tells you to add a soft closing line inviting the user to review todos. When you receive that reminder:
+
+- Only act on it if you're at a natural stopping point in your current reply (a task complete, a question to the user, end of a unit of work). If the user is mid-flow on something unrelated, ignore it.
+- Append a single soft closing line — never list todos unprompted, never pivot the response.
+- If acting on it would feel forced or interrupt the user's flow, skip silently. The throttle assumes you'll skip sometimes.
+
 ### Tools
 
 | Tool | Purpose |

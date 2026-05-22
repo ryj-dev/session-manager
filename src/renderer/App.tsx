@@ -17,6 +17,7 @@ import { SkillsGallery } from './components/SkillsGallery'
 import MemoryPanel from './components/memory/MemoryPanel'
 import { NotesPanel } from './components/notes/NotesPanel'
 import { MessagePopup } from './components/MessagePopup'
+import { AttachedTerminalOverlay, PINNED_WIDTH_PCT } from './components/AttachedTerminalOverlay'
 import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
 import { Terminal } from './components/Terminal'
 import { useDesigns } from './hooks/useDesigns'
@@ -92,6 +93,17 @@ export function App(): JSX.Element {
   const setAutoModeForManualSessions = useStore((s) => s.setAutoModeForManualSessions)
   const autoModeForRestoredSessions = useStore((s) => s.autoModeForRestoredSessions)
   const setAutoModeForRestoredSessions = useStore((s) => s.setAutoModeForRestoredSessions)
+  const ambientTodoNudge = useStore((s) => s.ambientTodoNudge)
+  const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
+  const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
+  const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
+  const terminalPairingMode = useStore((s) => s.terminalPairingMode)
+  const setTerminalPairingMode = useStore((s) => s.setTerminalPairingMode)
+  const setAttachedTerminal = useStore((s) => s.setAttachedTerminal)
+  const createSplitGroup = useStore((s) => s.createSplitGroup)
+  const enterSplitGroup = useStore((s) => s.enterSplitGroup)
+  const updateSplitGroupMembers = useStore((s) => s.updateSplitGroupMembers)
+  const updateSplitGroupShape = useStore((s) => s.updateSplitGroupShape)
   const todosShowCompleted = useStore((s) => s.todosShowCompleted)
   const todosSelectedTags = useStore((s) => s.todosSelectedTags)
   const todosDetailWidth = useStore((s) => s.todosDetailWidth)
@@ -100,6 +112,7 @@ export function App(): JSX.Element {
   const setSelectedIndex = useStore((s) => s.setSelectedSessionIndex)
   const splitGroups = useStore((s) => s.splitGroups)
   const activeSplitGroupId = useStore((s) => s.activeSplitGroupId)
+  const pinnedAttachedTerminalIds = useStore((s) => s.pinnedAttachedTerminalIds)
 
   // Panel data
   const { items: designItems } = useDesigns()
@@ -144,6 +157,11 @@ export function App(): JSX.Element {
       if (typeof settings.autoModeForChildSessions === 'boolean') setAutoModeForChildSessions(settings.autoModeForChildSessions)
       if (typeof settings.autoModeForManualSessions === 'boolean') setAutoModeForManualSessions(settings.autoModeForManualSessions)
       if (typeof settings.autoModeForRestoredSessions === 'boolean') setAutoModeForRestoredSessions(settings.autoModeForRestoredSessions)
+      if (typeof settings.ambientTodoNudge === 'boolean') setAmbientTodoNudge(settings.ambientTodoNudge)
+      if (typeof settings.spawnIntoCurrentSplit === 'boolean') setSpawnIntoCurrentSplit(settings.spawnIntoCurrentSplit)
+      if (settings.terminalPairingMode === 'off' || settings.terminalPairingMode === 'split' || settings.terminalPairingMode === 'overlay') {
+        setTerminalPairingMode(settings.terminalPairingMode)
+      }
       if (typeof settings.todosShowCompleted === 'boolean') useStore.getState().setTodosShowCompleted(settings.todosShowCompleted)
       if (Array.isArray(settings.todosSelectedTags)) useStore.getState().setTodosSelectedTags(settings.todosSelectedTags as string[])
       if (typeof settings.todosDetailWidth === 'number') useStore.getState().setTodosDetailWidth(settings.todosDetailWidth)
@@ -154,21 +172,28 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
   // whose members lack a claudeSessionId (raw shells, not resumable) are
   // skipped — they couldn't be restored anyway.
-  const splitGroupsPersistRef = useRef(false)
+  //
+  // Skip empty-array writes until we've observed at least one non-empty
+  // state. A one-shot "skip first fire" ref isn't enough: StrictMode's
+  // dev-mode double mount-effect invocation (setup → cleanup → setup)
+  // preserves refs, so the second invocation would clobber the persisted
+  // file with [] before restoreSplitGroups has had a chance to rebuild
+  // groups from disk.
+  const hasSeenGroupsRef = useRef(false)
   const splitGroupsForPersist = useStore((s) => s.splitGroups)
   useEffect(() => {
-    // Skip the very first effect fire so an empty store doesn't clobber the
-    // persisted file before restoration has had a chance to run.
-    if (!splitGroupsPersistRef.current) {
-      splitGroupsPersistRef.current = true
+    if (splitGroupsForPersist.length === 0 && !hasSeenGroupsRef.current) {
       return
+    }
+    if (splitGroupsForPersist.length > 0) {
+      hasSeenGroupsRef.current = true
     }
     const state = useStore.getState()
     const cidById = new Map<string, string>()
@@ -306,6 +331,25 @@ export function App(): JSX.Element {
     return baseProjectsDir || (await window.api.getHomeDir())
   }, [sessions, selectedIndex, focusedSessionId, baseProjectsDir])
 
+  // Add a freshly-spawned session to the active split group (or create one).
+  // Returns true if the session was absorbed into a split — callers should skip
+  // their normal focus path when this returns true.
+  const addToCurrentSplitIfActive = useCallback(
+    (newId: string): boolean => {
+      const state = useStore.getState()
+      if (state.viewMode !== 'split' || !state.activeSplitGroupId) return false
+      const group = state.splitGroups.find((g) => g.id === state.activeSplitGroupId)
+      if (!group) return false
+      const newMembers = [...group.orderedSessionIds, newId]
+      updateSplitGroupMembers(state.activeSplitGroupId, newMembers)
+      const newShape = defaultShapeFor(newMembers.length)?.id ?? null
+      if (newShape) updateSplitGroupShape(state.activeSplitGroupId, newShape)
+      setFocusedSessionId(newId)
+      return true
+    },
+    [updateSplitGroupMembers, updateSplitGroupShape, setFocusedSessionId]
+  )
+
   // Spawn a new claude session
   const spawnSession = useCallback(
     async (cwd?: string) => {
@@ -316,12 +360,32 @@ export function App(): JSX.Element {
       console.log('[spawn] session created:', result)
       addSession(result.id, result.projectPath, result.claudeSessionId ?? null)
 
+      // Feature 2 — spawn into current split. Takes precedence over pairing/attach.
+      if (spawnIntoCurrentSplit && addToCurrentSplitIfActive(result.id)) {
+        return
+      }
+
+      // Terminal pairing — single mutually-exclusive mode.
+      if (terminalPairingMode === 'split') {
+        const term = await window.api.spawnSession(projectPath, 'shell')
+        addSession(term.id, term.projectPath)
+        const groupId = createSplitGroup([result.id, term.id])
+        enterSplitGroup(groupId)
+        setFocusedSessionId(result.id)
+        return
+      }
+      if (terminalPairingMode === 'overlay') {
+        const term = await window.api.spawnSession(projectPath, 'shell')
+        addSession(term.id, term.projectPath, null, { isAttached: true })
+        setAttachedTerminal(result.id, term.id)
+      }
+
       if (autoFocusOnSpawn) {
         setFocusedSessionId(result.id)
         setViewMode('focused')
       }
     },
-    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn]
+    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, terminalPairingMode, spawnIntoCurrentSplit, createSplitGroup, enterSplitGroup, addToCurrentSplitIfActive, setAttachedTerminal]
   )
 
   // Spawn a plain terminal
@@ -333,12 +397,17 @@ export function App(): JSX.Element {
       const result = await window.api.spawnSession(projectPath, 'shell')
       addSession(result.id, result.projectPath)
 
+      // Feature 2 — spawn into current split (terminals too).
+      if (spawnIntoCurrentSplit && addToCurrentSplitIfActive(result.id)) {
+        return
+      }
+
       if (autoFocusOnSpawn) {
         setFocusedSessionId(result.id)
         setViewMode('focused')
       }
     },
-    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn]
+    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, spawnIntoCurrentSplit, addToCurrentSplitIfActive]
   )
 
   // Handle spawning from file explorer
@@ -532,25 +601,35 @@ export function App(): JSX.Element {
   )
 
   // Force-close the focused session (kills PTY, returns to graph)
+  // Tear down a single session (PTY, terminal, store) without touching focus/view state.
+  // Used both for the primary close and to cascade-kill an attached overlay terminal.
+  const teardownSession = useCallback((sessionId: string): void => {
+    captureSnapshot(sessionId)
+    window.api.killSession(sessionId)
+    disposeTerminal(sessionId)
+    removeSession(sessionId)
+    snapshotCanvases.current.delete(sessionId)
+    firstSnapshotSubs.current.delete(sessionId)
+    clearTerminalReady(sessionId)
+    const pendingFinish = postFinishTimers.current.get(sessionId)
+    if (pendingFinish) {
+      clearTimeout(pendingFinish)
+      postFinishTimers.current.delete(sessionId)
+    }
+  }, [captureSnapshot, removeSession])
+
   const forceCloseSession = useCallback(
     (sessionId: string) => {
-      captureSnapshot(sessionId)
-      window.api.killSession(sessionId)
-      disposeTerminal(sessionId)
+      // Cascade-kill any attached overlay terminal owned by this Claude session.
+      const closing = useStore.getState().sessions.find((s) => s.id === sessionId)
+      const attachedId = closing?.attachedTerminalId ?? null
       selectNextAfterRemoval(sessionId)
-      removeSession(sessionId)
-      snapshotCanvases.current.delete(sessionId)
-      firstSnapshotSubs.current.delete(sessionId)
-      clearTerminalReady(sessionId)
-      const pendingFinish = postFinishTimers.current.get(sessionId)
-      if (pendingFinish) {
-        clearTimeout(pendingFinish)
-        postFinishTimers.current.delete(sessionId)
-      }
+      teardownSession(sessionId)
+      if (attachedId) teardownSession(attachedId)
       setFocusedSessionId(null)
       setViewMode('graph')
     },
-    [captureSnapshot, selectNextAfterRemoval, removeSession, setFocusedSessionId, setViewMode]
+    [selectNextAfterRemoval, teardownSession, setFocusedSessionId, setViewMode]
   )
 
   // Snapshot capture helper
@@ -655,17 +734,17 @@ export function App(): JSX.Element {
       }
 
       if (key === hotkeys.toggleAgents) {
-        // Bail when an editable element is focused so Cmd+A performs native
+        // Bail when a real editable element is focused so Cmd+A performs native
         // select-all (notes panel, settings inputs, any textarea/contenteditable).
-        // Exception: in focused/split session views the editable target is the
-        // Claude prompt — Cmd+A should open the agent sidebar, not select-all.
-        if (viewMode !== 'focused' && viewMode !== 'split') {
-          const ae = document.activeElement as HTMLElement | null
-          const tag = ae?.tagName
-          const isEditable =
-            !!ae && (tag === 'INPUT' || tag === 'TEXTAREA' || ae.isContentEditable)
-          if (isEditable) return
-        }
+        // xterm.js uses a hidden <textarea class="xterm-helper-textarea"> for input;
+        // that element lives inside .xterm so we exclude it from the bail-out so
+        // Cmd+A still opens the agent sidebar when the terminal has focus.
+        const ae = document.activeElement as HTMLElement | null
+        const tag = ae?.tagName
+        const isXtermInput = !!ae?.closest?.('.xterm')
+        const isEditable =
+          !!ae && (tag === 'INPUT' || tag === 'TEXTAREA' || ae.isContentEditable) && !isXtermInput
+        if (isEditable) return
         e.preventDefault()
         e.stopImmediatePropagation()
         setActivePanel(activePanel === 'agents' ? null : 'agents')
@@ -774,6 +853,17 @@ export function App(): JSX.Element {
       updateSessionStatus(id, 'exited')
 
       const store = useStore.getState()
+      // Cascade an attached-terminal exit when its parent dies — and vice versa,
+      // remove the binding if just the attached terminal exited so we don't try
+      // to render it later.
+      const exited = store.sessions.find((s) => s.id === id)
+      const attachedId = exited?.attachedTerminalId ?? null
+      if (attachedId) {
+        teardownSession(attachedId)
+      } else if (exited?.isAttached) {
+        const parent = store.sessions.find((s) => s.attachedTerminalId === id)
+        if (parent) setAttachedTerminal(parent.id, null)
+      }
       const wasFocused = store.focusedSessionId === id && store.viewMode === 'focused'
 
       if (wasFocused) {
@@ -962,6 +1052,10 @@ export function App(): JSX.Element {
         {sessions
           .filter((s) => {
             if (viewMode === 'focused' && s.id === focusedSessionId) return false
+            // Attached overlay terminal of the currently focused Claude session is
+            // mounted by AttachedTerminalOverlay itself — exclude it from the
+            // hidden layer so xterm doesn't try to attach to two DOM nodes.
+            if (viewMode === 'focused' && focusedSession?.attachedTerminalId === s.id) return false
             if (viewMode === 'split' && activeSplitGroupId) {
               const group = splitGroups.find((g) => g.id === activeSplitGroupId)
               if (group && group.orderedSessionIds.includes(s.id)) return false
@@ -1021,12 +1115,36 @@ export function App(): JSX.Element {
             </div>
           </div>
           <div className="flex-1 min-h-0 relative">
-            <Terminal
-              key={`focused-${focusedSessionId}`}
-              sessionId={focusedSessionId!}
-              visible={true}
-              onTitleChange={(title) => handleTitleChange(focusedSessionId!, title)}
-            />
+            {/* When an attached terminal is pinned, the main Terminal shrinks to leave room
+                for the side-by-side overlay panel. When unpinned (or no attachment), the
+                main Terminal fills the body and the overlay (if any) floats over it. */}
+            {(() => {
+              const attachedId = focusedSession?.attachedTerminalId ?? null
+              const isPinned = attachedId
+                ? pinnedAttachedTerminalIds.includes(focusedSessionId!)
+                : false
+              return (
+                <>
+                  <div
+                    className="absolute top-0 left-0 h-full"
+                    style={{ width: isPinned ? `${100 - PINNED_WIDTH_PCT}%` : '100%' }}
+                  >
+                    <Terminal
+                      key={`focused-${focusedSessionId}`}
+                      sessionId={focusedSessionId!}
+                      visible={true}
+                      onTitleChange={(title) => handleTitleChange(focusedSessionId!, title)}
+                    />
+                  </div>
+                  {attachedId && (
+                    <AttachedTerminalOverlay
+                      parentSessionId={focusedSessionId!}
+                      attachedId={attachedId}
+                    />
+                  )}
+                </>
+              )
+            })()}
             <MessagePopup focusedSessionId={focusedSessionId} />
           </div>
         </div>

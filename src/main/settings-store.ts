@@ -54,6 +54,15 @@ export interface AppSettings {
   autoModeForChildSessions: boolean
   autoModeForManualSessions: boolean
   autoModeForRestoredSessions: boolean
+  ambientTodoNudge: boolean
+  spawnIntoCurrentSplit: boolean
+  /**
+   * How a freshly-spawned Claude session is paired with a shell:
+   *   - 'off'     : no shell spawned
+   *   - 'split'   : shell opens alongside in a 2-pane split view
+   *   - 'overlay' : shell attached as a hidden right-edge hover sidebar
+   */
+  terminalPairingMode: 'off' | 'split' | 'overlay'
 }
 
 const defaults: AppSettings = {
@@ -71,6 +80,9 @@ const defaults: AppSettings = {
   autoModeForChildSessions: false,
   autoModeForManualSessions: false,
   autoModeForRestoredSessions: false,
+  ambientTodoNudge: false,
+  spawnIntoCurrentSplit: false,
+  terminalPairingMode: 'off',
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {
