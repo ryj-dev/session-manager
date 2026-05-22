@@ -681,6 +681,80 @@ export function useSimulation(width: number, height: number): SimulationResult {
       }
     }
 
+    // Emit a synchronous snapshot of positions before the next paint.
+    // Without this, React's render after `sessions` changes uses the previous
+    // tick's `spokes`/`edges`/`composites` state — which still includes nodes
+    // that were just removed. That one-frame gap leaves a ghost of the closed
+    // session (and its stale spoke slot can collide with the next-selected
+    // session's new slot, producing overlapping renders). The next tick will
+    // overwrite these values anyway; we're just front-running it.
+    {
+      const hubNodes = hubNodesRef.current
+      const springArray = [...newSprings.values()]
+      const compositeArray = [...newComposites.values()]
+      const hubMap = newHubMap
+
+      const hubPositions: HubPosition[] = hubNodes.map((h) => ({
+        id: h.id,
+        projectName: h.projectName,
+        x: h.x ?? 0,
+        y: h.y ?? 0,
+        color: h.color,
+      }))
+      const spokePositions: SpokePosition[] = springArray.map((s) => ({
+        id: s.id,
+        hubId: s.hubId,
+        x: s.x,
+        y: s.y,
+      }))
+      const compositePositions: CompositePosition[] = compositeArray.map((c) => ({
+        id: c.groupId,
+        hubIds: c.hubIds,
+        memberIds: c.memberIds,
+        x: c.x,
+        y: c.y,
+      }))
+      const edgeData: EdgeData[] = []
+      for (const spring of springArray) {
+        const hub = hubMap.get(spring.hubId)
+        if (!hub) continue
+        edgeData.push({
+          hubX: hub.x ?? 0,
+          hubY: hub.y ?? 0,
+          spokeX: spring.x,
+          spokeY: spring.y,
+          spokeAnchorX: spring.x + spring.anchorOffsetX,
+          spokeAnchorY: spring.y + spring.anchorOffsetY,
+          hubId: spring.hubId,
+        })
+      }
+      for (const c of compositeArray) {
+        for (const hubId of c.hubIds) {
+          const hub = hubMap.get(hubId)
+          if (!hub) continue
+          const anchor = rectEdgePoint(
+            c.x, c.y,
+            hub.x ?? 0, hub.y ?? 0,
+            COMPOSITE_WIDTH / 2, COMPOSITE_HEIGHT / 2
+          )
+          edgeData.push({
+            hubX: hub.x ?? 0,
+            hubY: hub.y ?? 0,
+            spokeX: c.x,
+            spokeY: c.y,
+            spokeAnchorX: anchor.x,
+            spokeAnchorY: anchor.y,
+            hubId,
+            isComposite: true,
+          })
+        }
+      }
+      setHubsRef.current(hubPositions)
+      setSpokesRef.current(spokePositions)
+      setCompositesRef.current(compositePositions)
+      setEdgesRef.current(edgeData)
+    }
+
     startAnimation()
   }, [sessions, width, height, activeComposites, memberIdSet])
 
