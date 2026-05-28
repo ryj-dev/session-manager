@@ -119,6 +119,7 @@ function singleHubOffsetFor(groupId: string): { x: number; y: number } {
 // the whole graph reshuffles.
 
 const HUB_CACHE_KEY = 'graph.hubPositions.v1'
+const SPOKE_CACHE_KEY = 'graph.spokePositions.v1'
 
 function loadHubCache(): Map<string, { x: number; y: number }> {
   try {
@@ -141,8 +142,66 @@ function saveHubCache(cache: Map<string, { x: number; y: number }>): void {
   }
 }
 
+// Subset of SpokeSpring sufficient to restore visual position on next load.
+// Targets/offsets are recomputed from current sessions+projectPath, so we
+// only need x/y (and vx/vy for a tiny bit of liveness on restore).
+type SpokeCacheEntry = { x: number; y: number; vx: number; vy: number }
+
+function loadSpokeCache(): Map<string, SpokeCacheEntry> {
+  try {
+    const raw = localStorage.getItem(SPOKE_CACHE_KEY)
+    if (!raw) return new Map()
+    const obj = JSON.parse(raw) as Record<string, SpokeCacheEntry>
+    return new Map(Object.entries(obj))
+  } catch {
+    return new Map()
+  }
+}
+
+function saveSpokeCache(cache: Map<string, SpokeSpring>): void {
+  try {
+    const obj: Record<string, SpokeCacheEntry> = {}
+    for (const [k, v] of cache) obj[k] = { x: v.x, y: v.y, vx: v.vx, vy: v.vy }
+    localStorage.setItem(SPOKE_CACHE_KEY, JSON.stringify(obj))
+  } catch {
+    /* quota or unavailable — ignore */
+  }
+}
+
 const hubPositionCache = loadHubCache()
+const spokePositionCache = loadSpokeCache()
 const spokeSpringCache = new Map<string, SpokeSpring>()
+
+// Seed the in-memory spring cache from persisted positions so the very first
+// sync after a renderer reload restores spokes instead of re-springing them
+// from the hub center. We don't have targetX/targetY/offsets yet — the sync
+// effect overwrites those — we just need x/y/vx/vy to be honoured.
+for (const [id, p] of spokePositionCache) {
+  spokeSpringCache.set(id, {
+    id,
+    hubId: '',
+    offsetX: 0, offsetY: 0,
+    anchorOffsetX: 0, anchorOffsetY: 0,
+    x: p.x, y: p.y,
+    vx: p.vx, vy: p.vy,
+    targetX: p.x, targetY: p.y,
+  })
+}
+
+// Persist on tab hide / unload as well as at settle time. Screen lock often
+// causes a renderer GPU crash + reload before the simulation has time to
+// settle, so settle-time persistence alone loses the latest positions.
+if (typeof window !== 'undefined') {
+  const flush = (): void => {
+    saveHubCache(hubPositionCache)
+    saveSpokeCache(spokeSpringCache)
+  }
+  window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush()
+  })
+  window.addEventListener('beforeunload', flush)
+  window.addEventListener('pagehide', flush)
+}
 
 // ── Hook ───────────────────────────────────────────────────────────────
 
@@ -423,6 +482,11 @@ export function useSimulation(width: number, height: number): SimulationResult {
         if (!liveIds.has(key)) hubPositionCache.delete(key)
       }
       saveHubCache(hubPositionCache)
+      const liveSpokeIds = new Set(springArray.map((s) => s.id))
+      for (const key of spokeSpringCache.keys()) {
+        if (!liveSpokeIds.has(key)) spokeSpringCache.delete(key)
+      }
+      saveSpokeCache(spokeSpringCache)
       animatingRef.current = false
     }
   }
@@ -663,13 +727,22 @@ export function useSimulation(width: number, height: number): SimulationResult {
     prevSessionCountRef.current = sessions.length
 
     if (hubCountChanged) {
-      // Layout genuinely needs to change — unpin so hubs can re-solve,
-      // then reheat.
+      // Hub set changed (added/removed project, OR first sync after a
+      // renderer reload when existingHubMap was empty). Only unpin hubs
+      // that aren't restored from cache — pinned cached hubs should stay
+      // exactly where the user last saw them. New hubs without a cached
+      // position participate in the d3 layout to find a spot.
+      let hasUncachedNew = false
       for (const h of newHubNodes) {
-        h.fx = null
-        h.fy = null
+        if (!hubPositionCache.has(h.id)) {
+          h.fx = null
+          h.fy = null
+          hasUncachedNew = true
+        }
       }
-      sim.alpha(hadCachedPositions ? 0.05 : 0.3)
+      if (hasUncachedNew) {
+        sim.alpha(hadCachedPositions ? 0.05 : 0.3)
+      }
     } else if (countChanged) {
       // Same projects, different spoke counts — nudge, don't uproot.
       sim.alpha(0.05)
