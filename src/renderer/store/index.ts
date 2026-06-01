@@ -219,24 +219,32 @@ export const useStore = create<AppState>((set) => ({
   // Sessions
   sessions: [],
   addSession: (id, projectPath, claudeSessionId = null, opts) =>
-    set((state) => ({
-      sessions: [
-        ...state.sessions,
-        {
-          id,
-          projectPath: normalizePath(projectPath),
-          projectName: projectNameFromPath(projectPath),
-          terminalTitle: null,
-          status: 'seen',
-          snapshot: null,
-          snapshotVersion: 0,
-          createdAt: Date.now(),
-          claudeSessionId,
-          isAttached: !!opts?.isAttached,
-          attachedTerminalId: null,
-        }
-      ]
-    })),
+    set((state) => {
+      // Guard against duplicate ids. Multiple paths can fire for the same
+      // session (crash-recovery, restoreSessions, onSessionSpawned IPC,
+      // local spawn handlers), and StrictMode double-invokes the recovery
+      // effect in dev. Without this, the graph view stacks N SessionNode
+      // elements at the same spoke position for each duplicated id.
+      if (state.sessions.some((s) => s.id === id)) return state
+      return {
+        sessions: [
+          ...state.sessions,
+          {
+            id,
+            projectPath: normalizePath(projectPath),
+            projectName: projectNameFromPath(projectPath),
+            terminalTitle: null,
+            status: 'seen',
+            snapshot: null,
+            snapshotVersion: 0,
+            createdAt: Date.now(),
+            claudeSessionId,
+            isAttached: !!opts?.isAttached,
+            attachedTerminalId: null,
+          }
+        ]
+      }
+    }),
   setAttachedTerminal: (parentId, attachedId) =>
     set((state) => ({
       sessions: state.sessions.map((s) =>
