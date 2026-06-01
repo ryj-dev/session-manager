@@ -567,12 +567,14 @@ function writeSettings(settings: Record<string, unknown>): void {
 function makeHookCommand(port: number): string {
   // Reads Claude's JSON payload from stdin, posts to our server with the app session ID.
   // The APP_SESSION_ID env var is injected when we spawn the PTY process.
-  return `curl -sf "http://127.0.0.1:${port}/hook?sid=$APP_SESSION_ID" -H 'Content-Type: application/json' -d @- > /dev/null 2>&1 # ${HOOK_MARKER}`
+  // Swallow curl exit 7 (couldn't connect) so shutdown races don't surface as hook errors;
+  // other failures still propagate.
+  return `curl -sf "http://127.0.0.1:${port}/hook?sid=$APP_SESSION_ID" -H 'Content-Type: application/json' -d @- > /dev/null 2>&1; c=$?; [ $c -eq 7 ] && exit 0 || exit $c # ${HOOK_MARKER}`
 }
 
 /** Synchronous hook command — outputs the server's JSON response to stdout so Claude can consume it. */
 function makeSyncHookCommand(port: number): string {
-  return `curl -sf "http://127.0.0.1:${port}/hook-sync?sid=$APP_SESSION_ID" -H 'Content-Type: application/json' -d @- 2>/dev/null # ${HOOK_MARKER}`
+  return `curl -sf "http://127.0.0.1:${port}/hook-sync?sid=$APP_SESSION_ID" -H 'Content-Type: application/json' -d @- 2>/dev/null; c=$?; [ $c -eq 7 ] && exit 0 || exit $c # ${HOOK_MARKER}`
 }
 
 function installHooks(port: number): void {
