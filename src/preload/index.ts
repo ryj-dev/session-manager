@@ -101,10 +101,10 @@ const api = {
     ipcRenderer.send('splitGroups:save', groups),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay' }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay' }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay' }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay' }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // File system operations

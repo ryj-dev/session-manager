@@ -81,6 +81,7 @@ export function App(): JSX.Element {
   const setPersistExplorerPath = useStore((s) => s.setPersistExplorerPath)
   const explorerFollowsProject = useStore((s) => s.explorerFollowsProject)
   const setExplorerFollowsProject = useStore((s) => s.setExplorerFollowsProject)
+  const colorExplorerByProject = useStore((s) => s.colorExplorerByProject)
   const hotkeys = useStore((s) => s.hotkeys)
   const setHotkeys = useStore((s) => s.setHotkeys)
   const messagePopup = useStore((s) => s.messagePopup)
@@ -151,6 +152,7 @@ export function App(): JSX.Element {
       setAutoFocusOnSpawn(settings.autoFocusOnSpawn as boolean)
       setPersistExplorerPath(settings.persistExplorerPath as boolean)
       setExplorerFollowsProject(settings.explorerFollowsProject as boolean)
+      if (typeof settings.colorExplorerByProject === 'boolean') useStore.getState().setColorExplorerByProject(settings.colorExplorerByProject as boolean)
       if (settings.hotkeys) setHotkeys({ ...defaultHotkeys, ...settings.hotkeys } as HotkeyMap)
       if (settings.messagePopup) setMessagePopup(settings.messagePopup as 'manual' | 'timed' | 'disabled')
       if (settings.messagePopupSeconds != null) setMessagePopupSeconds(settings.messagePopupSeconds as number)
@@ -172,8 +174,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups

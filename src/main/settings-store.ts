@@ -44,6 +44,7 @@ export interface AppSettings {
   autoFocusOnSpawn: boolean
   persistExplorerPath: boolean
   explorerFollowsProject: boolean
+  colorExplorerByProject: boolean
   hotkeys: HotkeyMap
   messagePopup: MessagePopupMode
   messagePopupSeconds: number
@@ -70,6 +71,7 @@ const defaults: AppSettings = {
   autoFocusOnSpawn: true,
   persistExplorerPath: true,
   explorerFollowsProject: true,
+  colorExplorerByProject: false,
   hotkeys: { ...defaultHotkeys },
   messagePopup: 'manual',
   messagePopupSeconds: 15,

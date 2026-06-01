@@ -19,6 +19,8 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setPersistExplorerPath = useStore((s) => s.setPersistExplorerPath)
   const explorerFollowsProject = useStore((s) => s.explorerFollowsProject)
   const setExplorerFollowsProject = useStore((s) => s.setExplorerFollowsProject)
+  const colorExplorerByProject = useStore((s) => s.colorExplorerByProject)
+  const setColorExplorerByProject = useStore((s) => s.setColorExplorerByProject)
   const messagePopup = useStore((s) => s.messagePopup)
   const setMessagePopup = useStore((s) => s.setMessagePopup)
   const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
@@ -165,7 +167,7 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
             </div>
 
             {/* Explorer follows project */}
-            <div className="mb-6">
+            <div className="mb-4">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -177,6 +179,22 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 When opening explorer from a terminal, start at that project's directory
+              </p>
+            </div>
+
+            {/* Color explorer by project */}
+            <div className="mb-6">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={colorExplorerByProject}
+                  onChange={(e) => setColorExplorerByProject(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Color directories by project</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                Tint each directory in the file explorer with the same hash-based color as its graph hub
               </p>
             </div>
 

@@ -156,6 +156,8 @@ export interface AppState {
   setPersistExplorerPath: (value: boolean) => void
   explorerFollowsProject: boolean
   setExplorerFollowsProject: (value: boolean) => void
+  colorExplorerByProject: boolean
+  setColorExplorerByProject: (value: boolean) => void
   hotkeys: HotkeyMap
   setHotkeys: (hotkeys: HotkeyMap) => void
   messagePopup: MessagePopupMode
@@ -354,6 +356,8 @@ export const useStore = create<AppState>((set) => ({
   setPersistExplorerPath: (value) => set({ persistExplorerPath: value }),
   explorerFollowsProject: true,
   setExplorerFollowsProject: (value) => set({ explorerFollowsProject: value }),
+  colorExplorerByProject: false,
+  setColorExplorerByProject: (value) => set({ colorExplorerByProject: value }),
   hotkeys: { ...defaultHotkeys },
   setHotkeys: (hotkeys) => set({ hotkeys }),
   messagePopup: 'manual',

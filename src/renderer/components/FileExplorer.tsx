@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store'
 import { formatHotkey, comboFromEvent } from '../lib/hotkeys'
+import { projectColor, projectColorDim } from '../lib/simulation'
 
 interface FsEntry {
   name: string
@@ -29,6 +30,7 @@ export function FileExplorer({
   const baseProjectsDir = useStore((s) => s.baseProjectsDir)
   const setBaseProjectsDir = useStore((s) => s.setBaseProjectsDir)
   const hotkeys = useStore((s) => s.hotkeys)
+  const colorExplorerByProject = useStore((s) => s.colorExplorerByProject)
   const [currentPath, setCurrentPath] = useState<string>('')
   const [entries, setEntries] = useState<FsEntry[]>([])
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -170,26 +172,40 @@ export function FileExplorer({
 
           {/* Directory listing */}
           <div ref={listRef} className="flex-1 overflow-y-auto py-1">
-            {entries.map((entry, index) => (
-              <div
-                key={entry.path}
-                className={`
-                  px-3 py-1.5 flex items-center gap-2 cursor-pointer text-sm
-                  ${index === selectedIndex ? 'bg-blue-500/20 text-blue-300' : 'text-zinc-400 hover:bg-zinc-800/50'}
-                `}
-                onClick={() => {
-                  setSelectedIndex(index)
-                  if (entry.isDirectory) {
-                    setCurrentPath(entry.path)
+            {entries.map((entry, index) => {
+              const isSelected = index === selectedIndex
+              const colored = colorExplorerByProject && entry.isDirectory
+              const style = colored
+                ? {
+                    backgroundColor: projectColorDim(entry.name),
+                    color: projectColor(entry.name),
+                    boxShadow: isSelected ? `inset 0 0 0 1px ${projectColor(entry.name)}` : undefined
                   }
-                }}
-              >
-                <span className="text-zinc-600 text-xs">
-                  {entry.isDirectory ? '📁' : '📄'}
-                </span>
-                <span className="truncate">{entry.name}</span>
-              </div>
-            ))}
+                : undefined
+              const classes = colored
+                ? 'px-3 py-1.5 flex items-center gap-2 cursor-pointer text-sm'
+                : `px-3 py-1.5 flex items-center gap-2 cursor-pointer text-sm ${
+                    isSelected ? 'bg-blue-500/20 text-blue-300' : 'text-zinc-400 hover:bg-zinc-800/50'
+                  }`
+              return (
+                <div
+                  key={entry.path}
+                  className={classes}
+                  style={style}
+                  onClick={() => {
+                    setSelectedIndex(index)
+                    if (entry.isDirectory) {
+                      setCurrentPath(entry.path)
+                    }
+                  }}
+                >
+                  <span className={colored ? 'text-xs opacity-70' : 'text-zinc-600 text-xs'}>
+                    {entry.isDirectory ? '📁' : '📄'}
+                  </span>
+                  <span className="truncate">{entry.name}</span>
+                </div>
+              )
+            })}
             {entries.length === 0 && (
               <div className="px-3 py-4 text-xs text-zinc-600 text-center">
                 Empty directory
