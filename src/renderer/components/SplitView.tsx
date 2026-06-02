@@ -132,9 +132,23 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
       if (isMetaKey(e.key)) {
         clearStillness()
         const state = useStore.getState()
-        // Apply any drag-chosen shape to the active group.
-        if (state.pendingShapeId && state.activeSplitGroupId) {
-          state.updateSplitGroupShape(state.activeSplitGroupId, state.pendingShapeId)
+        const activeId = state.activeSplitGroupId
+        if (activeId) {
+          // Apply any drag-chosen member order (slot swaps) to the group.
+          const activeGroup = state.splitGroups.find((g) => g.id === activeId)
+          const selection = state.selectedForGroupingIds
+          if (
+            activeGroup &&
+            selection.length === activeGroup.orderedSessionIds.length &&
+            selection.some((id, i) => id !== activeGroup.orderedSessionIds[i]) &&
+            selection.every((id) => activeGroup.orderedSessionIds.includes(id))
+          ) {
+            state.updateSplitGroupMembers(activeId, selection)
+          }
+          // Apply any drag-chosen shape to the active group.
+          if (state.pendingShapeId) {
+            state.updateSplitGroupShape(activeId, state.pendingShapeId)
+          }
         }
         state.closeSplitModal()
         setCmdHeld(false) // also clears selection
