@@ -48,7 +48,14 @@ export function initEmbeddings(opts: InitOptions): void {
     fs.mkdirSync(path.dirname(opts.dbPath), { recursive: true })
     const db = new Database(opts.dbPath)
     db.pragma('journal_mode = WAL')
-    sqliteVec.load(db)
+    // In a packaged Electron app, sqlite-vec's index.mjs resolves the dylib
+    // to a path inside app.asar — but dlopen can't see into asar. Resolve the
+    // path ourselves and redirect to app.asar.unpacked, where electron-builder
+    // unpacks the binary.
+    const loadablePath = sqliteVec
+      .getLoadablePath()
+      .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`)
+    db.loadExtension(loadablePath)
 
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING vec0(
