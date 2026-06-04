@@ -354,12 +354,12 @@ export function GraphView(): JSX.Element {
           // existing group, then re-enter split view.
           const existing = state.splitGroups.find((g) => g.id === activeId)
           if (existing) {
-            const merged: string[] = [...existing.orderedSessionIds]
             for (const id of ids) {
-              if (!merged.includes(id)) merged.push(id)
+              if (existing.orderedSessionIds.length + 1 > MAX_SPLIT_N) break
+              if (!existing.orderedSessionIds.includes(id)) {
+                state.addSessionToSplitGroup(activeId, id)
+              }
             }
-            const clamped = merged.slice(0, MAX_SPLIT_N)
-            state.updateSplitGroupMembers(activeId, clamped)
             state.enterSplitGroup(activeId)
           }
           state.setExpandingExistingGroup(false)
@@ -371,9 +371,9 @@ export function GraphView(): JSX.Element {
           setFocusedSessionId(id)
           setViewMode('focused')
         } else if (ids.length >= 2) {
-          // 2+ → create the group with the (possibly drag-chosen) shape and enter split.
+          // 2+ → create the group with the (possibly drag-chosen) layout and enter split.
           const clamped = ids.slice(0, MAX_SPLIT_N)
-          const groupId = state.createSplitGroup(clamped, state.pendingShapeId)
+          const groupId = state.createSplitGroup(clamped, state.pendingLayout)
           state.enterSplitGroup(groupId)
         }
         state.closeSplitModal()

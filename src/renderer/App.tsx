@@ -1,6 +1,12 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
 import { useStore, defaultHotkeys, type HotkeyMap } from './store'
-import { defaultShapeFor } from './lib/splitLayouts'
+import {
+  getLeafIds,
+  layoutFromBsp,
+  layoutFromShapeId,
+  reconcileLayout,
+  type Layout,
+} from './lib/splitLayouts'
 import { formatHotkey, comboFromEvent } from './lib/hotkeys'
 import { GraphView } from './components/GraphView'
 import { FileExplorer } from './components/FileExplorer'
@@ -23,6 +29,30 @@ import { Terminal } from './components/Terminal'
 import { useDesigns } from './hooks/useDesigns'
 import { useAgents } from './hooks/useAgents'
 import { useSkills } from './hooks/useSkills'
+
+/** Remap a persisted layout (leaves keyed by claudeSessionId) to live PTY ids.
+ *  Returns null if no leaves survive. Collapses containers that lose all but
+ *  one child to that child. */
+function remapLayout(layout: Layout, lookup: Map<string, string>): Layout | null {
+  if (layout.kind === 'leaf') {
+    const id = lookup.get(layout.id)
+    return id ? { kind: 'leaf', id } : null
+  }
+  const kept: { node: Layout; weight: number }[] = []
+  for (let i = 0; i < layout.children.length; i++) {
+    const child = remapLayout(layout.children[i], lookup)
+    if (child) kept.push({ node: child, weight: layout.weights[i] })
+  }
+  if (kept.length === 0) return null
+  if (kept.length === 1) return kept[0].node
+  const sum = kept.reduce((a, b) => a + b.weight, 0) || 1
+  return {
+    kind: 'container',
+    dir: layout.dir,
+    children: kept.map((k) => k.node),
+    weights: kept.map((k) => k.weight / sum),
+  }
+}
 
 /** Returns true if a terminal title is a default/empty Claude session title. */
 function isDefaultTitle(titleClean: string): boolean {
@@ -103,8 +133,6 @@ export function App(): JSX.Element {
   const setAttachedTerminal = useStore((s) => s.setAttachedTerminal)
   const createSplitGroup = useStore((s) => s.createSplitGroup)
   const enterSplitGroup = useStore((s) => s.enterSplitGroup)
-  const updateSplitGroupMembers = useStore((s) => s.updateSplitGroupMembers)
-  const updateSplitGroupShape = useStore((s) => s.updateSplitGroupShape)
   const todosShowCompleted = useStore((s) => s.todosShowCompleted)
   const todosSelectedTags = useStore((s) => s.todosSelectedTags)
   const todosDetailWidth = useStore((s) => s.todosDetailWidth)
@@ -203,14 +231,37 @@ export function App(): JSX.Element {
       if (s.claudeSessionId) cidById.set(s.id, s.claudeSessionId)
     }
     const out = splitGroupsForPersist
-      .map((g) => ({
-        id: g.id,
-        shapeId: g.shapeId,
-        claudeSessionIds: g.orderedSessionIds
+      .map((g) => {
+        // Re-key the in-memory layout (whose leaves are PTY session ids) onto
+        // claudeSessionIds so it survives a restart. Drop any leaves whose
+        // session has no claudeSessionId yet — happens momentarily on spawn.
+        const remap = (node: Layout): Layout | null => {
+          if (node.kind === 'leaf') {
+            const cid = cidById.get(node.id)
+            return cid ? { kind: 'leaf', id: cid } : null
+          }
+          const kept: { node: Layout; weight: number }[] = []
+          for (let i = 0; i < node.children.length; i++) {
+            const child = remap(node.children[i])
+            if (child) kept.push({ node: child, weight: node.weights[i] })
+          }
+          if (kept.length === 0) return null
+          if (kept.length === 1) return kept[0].node
+          const sum = kept.reduce((a, b) => a + b.weight, 0) || 1
+          return {
+            kind: 'container',
+            dir: node.dir,
+            children: kept.map((k) => k.node),
+            weights: kept.map((k) => k.weight / sum),
+          }
+        }
+        const layout = remap(g.layout)
+        const claudeSessionIds = g.orderedSessionIds
           .map((id) => cidById.get(id))
-          .filter((cid): cid is string => !!cid),
-      }))
-      .filter((g) => g.claudeSessionIds.length >= 2)
+          .filter((cid): cid is string => !!cid)
+        return { id: g.id, layout, claudeSessionIds }
+      })
+      .filter((g) => g.claudeSessionIds.length >= 2 && g.layout)
     window.api.saveSplitGroups(out)
   }, [splitGroupsForPersist])
 
@@ -278,7 +329,26 @@ export function App(): JSX.Element {
         .map((cid) => byClaudeId.get(cid))
         .filter((id): id is string => !!id)
       if (members.length < 2) continue
-      state.createSplitGroup(members, g.shapeId ?? null)
+      // Build a layout in PTY-id space. Prefer the persisted layout (re-key
+      // claudeSessionId → live PTY id); fall back to a legacy shapeId; fall
+      // back to a default tree if neither survived.
+      const aliveSet = new Set(members)
+      let layout: Layout | null = null
+      if (g.layout) {
+        // Persisted layouts may be BSP (old) or container (new) — `layoutFromBsp`
+        // normalises both into the current container model.
+        const normalised = layoutFromBsp(g.layout)
+        if (normalised) {
+          const remapped = remapLayout(normalised, byClaudeId)
+          if (remapped) layout = reconcileLayout(remapped, aliveSet)
+        }
+      }
+      if (!layout && typeof g.shapeId === 'string') {
+        layout = layoutFromShapeId(g.shapeId, members)
+      }
+      // Final order honours the restored layout when present.
+      const orderedIds = layout ? getLeafIds(layout) : members
+      state.createSplitGroup(orderedIds, layout)
     }
   }, [])
 
@@ -342,14 +412,12 @@ export function App(): JSX.Element {
       if (state.viewMode !== 'split' || !state.activeSplitGroupId) return false
       const group = state.splitGroups.find((g) => g.id === state.activeSplitGroupId)
       if (!group) return false
-      const newMembers = [...group.orderedSessionIds, newId]
-      updateSplitGroupMembers(state.activeSplitGroupId, newMembers)
-      const newShape = defaultShapeFor(newMembers.length)?.id ?? null
-      if (newShape) updateSplitGroupShape(state.activeSplitGroupId, newShape)
+      if (group.orderedSessionIds.length >= 9) return false
+      state.addSessionToSplitGroup(state.activeSplitGroupId, newId)
       setFocusedSessionId(newId)
       return true
     },
-    [updateSplitGroupMembers, updateSplitGroupShape, setFocusedSessionId]
+    [setFocusedSessionId]
   )
 
   // Spawn a new claude session
@@ -590,14 +658,11 @@ export function App(): JSX.Element {
         return
       }
 
-      // Update group members and shift focus to the previous slot (or slot 0).
-      state.updateSplitGroupMembers(groupId, remaining)
+      // Remove the leaf from the layout — sibling subtree expands to fill.
+      state.removeSessionFromSplitGroup(groupId, sessionId)
       const nextIdx = Math.max(0, Math.min(closedIdx - 1, remaining.length - 1))
       const nextId = remaining[nextIdx]
       setFocusedSessionId(nextId ?? null)
-      // Re-derive the default shape for the new N so the layout reflows.
-      const newDefault = defaultShapeFor(remaining.length)?.id ?? null
-      if (newDefault) state.updateSplitGroupShape(groupId, newDefault)
     },
     [captureSnapshot, removeSession, setFocusedSessionId, setViewMode]
   )

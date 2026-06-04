@@ -1,15 +1,21 @@
 import { create } from 'zustand'
-import { defaultShapeFor } from './../lib/splitLayouts'
+import {
+  defaultLayoutFor,
+  getLeafIds,
+  insertLeaf,
+  removeLeaf,
+  type Layout,
+} from './../lib/splitLayouts'
 
 export type ViewMode = 'graph' | 'focused' | 'split'
 
 export interface SplitGroup {
   /** Stable group identifier. */
   id: string
-  /** Member session IDs in slot order (slot 0 = orderedSessionIds[0], etc.). */
+  /** BSP layout tree — single source of truth for tile placement. */
+  layout: Layout
+  /** Cached `getLeafIds(layout)`. Used for tab-order / Cmd+N / focus cycling. */
   orderedSessionIds: string[]
-  /** Shape id from splitLayouts.SHAPES_BY_N. Resolved with the layout helper at render time. */
-  shapeId: string | null
 }
 
 export interface HotkeyMap {
@@ -128,20 +134,21 @@ export interface AppState {
   isSplitModalOpen: boolean
   openSplitModal: () => void
   closeSplitModal: () => void
-  /** Shape chosen by the user during the modal preview (drag-to-reshape).
-   *  Null = use the default shape for the current member count. Cleared on close. */
-  pendingShapeId: string | null
-  setPendingShapeId: (id: string | null) => void
-  /** Create a new group from the given ordered session IDs and return its id.
-   *  If shapeId is provided, the group is created with that shape. */
-  createSplitGroup: (orderedSessionIds: string[], shapeId?: string | null) => string
+  /** Layout chosen by the user during the modal drag preview. `null` = no pending
+   *  change. Cleared on close. */
+  pendingLayout: Layout | null
+  setPendingLayout: (layout: Layout | null) => void
+  /** Create a new group with an explicit layout, or a default one for `orderedSessionIds`. */
+  createSplitGroup: (orderedSessionIds: string[], layout?: Layout | null) => string
   dissolveSplitGroup: (groupId: string) => void
   /** Switch to split view on the given group. */
   enterSplitGroup: (groupId: string) => void
-  /** Update an existing group's ordered session IDs (used by + button expand). */
-  updateSplitGroupMembers: (groupId: string, orderedSessionIds: string[]) => void
-  /** Update an existing group's shape (used by reshape from in-split modal). */
-  updateSplitGroupShape: (groupId: string, shapeId: string) => void
+  /** Replace the group's layout tree. `orderedSessionIds` is recomputed from leaves. */
+  setSplitGroupLayout: (groupId: string, layout: Layout) => void
+  /** Append a new session into the active group by splitting the largest pane. */
+  addSessionToSplitGroup: (groupId: string, sessionId: string) => void
+  /** Remove a session from the group's layout; collapse the surviving sibling. */
+  removeSessionFromSplitGroup: (groupId: string, sessionId: string) => void
   /** True when the user clicked + in the modal and is graph-picking more sessions
    *  to add to the existing active group. */
   isExpandingExistingGroup: boolean
@@ -314,14 +321,16 @@ export const useStore = create<AppState>((set) => ({
   activeSplitGroupId: null,
   isSplitModalOpen: false,
   openSplitModal: () => set({ isSplitModalOpen: true }),
-  closeSplitModal: () => set({ isSplitModalOpen: false, pendingShapeId: null }),
-  pendingShapeId: null,
-  setPendingShapeId: (id) => set({ pendingShapeId: id }),
-  createSplitGroup: (orderedSessionIds, shapeId) => {
+  closeSplitModal: () => set({ isSplitModalOpen: false, pendingLayout: null }),
+  pendingLayout: null,
+  setPendingLayout: (layout) => set({ pendingLayout: layout }),
+  createSplitGroup: (orderedSessionIds, layout) => {
     const id = crypto.randomUUID()
-    const finalShape = shapeId ?? defaultShapeFor(orderedSessionIds.length)?.id ?? null
+    const finalLayout = layout ?? defaultLayoutFor(orderedSessionIds)
+    if (!finalLayout) throw new Error('Cannot create a split group with no members')
+    const finalOrder = getLeafIds(finalLayout)
     set((state) => ({
-      splitGroups: [...state.splitGroups, { id, orderedSessionIds, shapeId: finalShape }],
+      splitGroups: [...state.splitGroups, { id, layout: finalLayout, orderedSessionIds: finalOrder }],
     }))
     return id
   },
@@ -332,18 +341,39 @@ export const useStore = create<AppState>((set) => ({
     })),
   enterSplitGroup: (groupId) =>
     set({ activeSplitGroupId: groupId, viewMode: 'split', focusedSessionId: null }),
-  updateSplitGroupMembers: (groupId, orderedSessionIds) =>
+  setSplitGroupLayout: (groupId, layout) =>
     set((state) => ({
       splitGroups: state.splitGroups.map((g) =>
-        g.id === groupId ? { ...g, orderedSessionIds } : g
+        g.id === groupId ? { ...g, layout, orderedSessionIds: getLeafIds(layout) } : g
       ),
     })),
-  updateSplitGroupShape: (groupId, shapeId) =>
+  addSessionToSplitGroup: (groupId, sessionId) =>
     set((state) => ({
-      splitGroups: state.splitGroups.map((g) =>
-        g.id === groupId ? { ...g, shapeId } : g
-      ),
+      splitGroups: state.splitGroups.map((g) => {
+        if (g.id !== groupId) return g
+        if (g.orderedSessionIds.includes(sessionId)) return g
+        const layout = insertLeaf(g.layout, sessionId)
+        return { ...g, layout, orderedSessionIds: getLeafIds(layout) }
+      }),
     })),
+  removeSessionFromSplitGroup: (groupId, sessionId) =>
+    set((state) => {
+      const next: SplitGroup[] = []
+      let removedGroup = false
+      for (const g of state.splitGroups) {
+        if (g.id !== groupId) { next.push(g); continue }
+        const layout = removeLeaf(g.layout, sessionId)
+        if (!layout) { removedGroup = true; continue }
+        next.push({ ...g, layout, orderedSessionIds: getLeafIds(layout) })
+      }
+      return {
+        splitGroups: next,
+        activeSplitGroupId:
+          removedGroup && state.activeSplitGroupId === groupId
+            ? null
+            : state.activeSplitGroupId,
+      }
+    }),
   isExpandingExistingGroup: false,
   setExpandingExistingGroup: (v) => set({ isExpandingExistingGroup: v }),
 

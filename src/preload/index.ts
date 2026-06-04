@@ -94,10 +94,10 @@ const api = {
     ipcRenderer.invoke('sessions:clearSaved'),
 
   // Composite/split-view group persistence (members keyed by claudeSessionId)
-  loadSplitGroups: (): Promise<Array<{ id: string; claudeSessionIds: string[]; shapeId: string | null }>> =>
+  loadSplitGroups: (): Promise<Array<{ id: string; claudeSessionIds: string[]; layout?: unknown; shapeId?: string | null }>> =>
     ipcRenderer.invoke('splitGroups:load'),
 
-  saveSplitGroups: (groups: Array<{ id: string; claudeSessionIds: string[]; shapeId: string | null }>): void =>
+  saveSplitGroups: (groups: Array<{ id: string; claudeSessionIds: string[]; layout?: unknown; shapeId?: string | null }>): void =>
     ipcRenderer.send('splitGroups:save', groups),
 
   // Settings

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { useStore, type Session, type SessionStatus } from '../store'
-import { resolveShape } from '../lib/splitLayouts'
+import { getLeaves, type Layout } from '../lib/splitLayouts'
 import { COMPOSITE_WIDTH, COMPOSITE_HEIGHT } from '../hooks/useSimulation'
 
 interface CompositeNodeProps {
@@ -42,14 +42,17 @@ export function CompositeNode({ groupId, x, y, isSelected, onClick }: CompositeN
   const group = splitGroups.find((g) => g.id === groupId)
   if (!group) return null
 
+  const sessionsById = new Map(sessions.map((s) => [s.id, s]))
   const liveMembers: Session[] = group.orderedSessionIds
-    .map((id) => sessions.find((s) => s.id === id))
+    .map((id) => sessionsById.get(id))
     .filter((s): s is Session => Boolean(s))
 
   if (liveMembers.length < 2) return null
 
-  const shape = resolveShape(liveMembers.length, group.shapeId)
-  if (!shape) return null
+  // Pull the layout tree directly off the group — leaves were already
+  // reconciled to live sessions in the store.
+  const layout: Layout = group.layout
+  const leaves = getLeaves(layout)
 
   return (
     <motion.div
@@ -73,23 +76,20 @@ export function CompositeNode({ groupId, x, y, isSelected, onClick }: CompositeN
             : '0 4px 24px rgba(0,0,0,0.5)',
         }}
       >
-        {/* Inner grid mirroring the actual split shape */}
-        <div
-          className="absolute inset-1 grid gap-0.5"
-          style={{
-            gridTemplateColumns: `repeat(${shape.cols}, 1fr)`,
-            gridTemplateRows: `repeat(${shape.rows}, 1fr)`,
-          }}
-        >
-          {liveMembers.map((session, i) => {
-            const slot = shape.slots[i]
-            if (!slot) return null
+        {/* Inner area mirroring the actual layout tree */}
+        <div className="absolute inset-1">
+          {leaves.map((leaf) => {
+            const session = sessionsById.get(leaf.id)
+            if (!session) return null
             const statusBorder = STATUS_BORDER[session.status]
             return (
               <CompositeTile
                 key={session.id}
                 session={session}
-                slot={slot}
+                leafX={leaf.x}
+                leafY={leaf.y}
+                leafW={leaf.w}
+                leafH={leaf.h}
                 statusBorder={statusBorder}
               />
             )
@@ -118,11 +118,14 @@ export function CompositeNode({ groupId, x, y, isSelected, onClick }: CompositeN
 
 interface CompositeTileProps {
   session: Session
-  slot: { col: number; row: number; colSpan: number; rowSpan: number }
+  leafX: number
+  leafY: number
+  leafW: number
+  leafH: number
   statusBorder: string | null
 }
 
-function CompositeTile({ session, slot, statusBorder }: CompositeTileProps): JSX.Element {
+function CompositeTile({ session, leafX, leafY, leafW, leafH, statusBorder }: CompositeTileProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const dotClass = STATUS_DOT[session.status]
 
@@ -138,10 +141,12 @@ function CompositeTile({ session, slot, statusBorder }: CompositeTileProps): JSX
 
   return (
     <div
-      className="relative rounded-sm overflow-hidden bg-[#0a0a0a]"
+      className="absolute rounded-sm overflow-hidden bg-[#0a0a0a]"
       style={{
-        gridColumn: `${slot.col + 1} / span ${slot.colSpan}`,
-        gridRow: `${slot.row + 1} / span ${slot.rowSpan}`,
+        left: `calc(${leafX * 100}% + 1px)`,
+        top: `calc(${leafY * 100}% + 1px)`,
+        width: `calc(${leafW * 100}% - 2px)`,
+        height: `calc(${leafH * 100}% - 2px)`,
         outline: statusBorder ? `1.5px solid ${statusBorder}` : '1px solid rgb(39 39 42 / 0.6)',
       }}
     >

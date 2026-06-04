@@ -8,10 +8,22 @@ import { atomicWriteSync } from './atomic-write'
 // so a group survives a clean quit/relaunch and can be reconstructed once the
 // corresponding sessions resume.
 
+/**
+ * Persisted split group. The `layout` field stores a tree whose leaves are
+ * keyed by `claudeSessionId` so restore can re-key onto fresh PTY ids.
+ *
+ * The tree shape has evolved twice (grid `shapeId`, BSP split tree, N-ary
+ * container tree) and old persisted data sticks around — the renderer
+ * tolerates all three via `layoutFromBsp` / `layoutFromShapeId`. The main
+ * process treats `layout` as opaque JSON and round-trips it.
+ */
 export interface SavedSplitGroup {
   id: string
   claudeSessionIds: string[]
-  shapeId: string | null
+  /** Opaque layout payload (any historical layout schema). */
+  layout?: unknown
+  /** Legacy grid format. Renderer migrates on load. */
+  shapeId?: string | null
 }
 
 interface SplitGroupsData {

@@ -1,40 +1,59 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, type Session } from '../store'
-import { defaultShapeFor, MAX_SPLIT_N, pickShapeForDrop, resolveShape, type Shape, type SlotRect } from '../lib/splitLayouts'
+import {
+  defaultLayoutFor,
+  getDividers,
+  getLeaves,
+  MAX_SPLIT_N,
+  moveLeaf,
+  setDividerPosition,
+  setDividersPosition,
+  swapLeaves,
+  type Layout,
+  type LayoutDivider,
+  type LayoutLeafView,
+  type LayoutPath,
+} from '../lib/splitLayouts'
 import { projectColor, projectColorDim } from '../lib/simulation'
 
 /**
- * Cmd-hold-still preview modal. Drag a slot to reshape; release Cmd to commit.
+ * Cmd-hold-still preview modal — N-ary container layout editor.
  *
- * Used both for forming a new group (from graph view) and for reshaping/expanding
- * an existing one (from split view). The selection comes from
- * `selectedForGroupingIds` in either case.
+ *   • Drag a tile's interior  → swap with whatever tile the cursor enters.
+ *   • Drag a divider          → resize only the two adjacent children.
+ *   • Snap                    → dragged divider locks onto any other same-dir
+ *                               divider within tolerance; aligned dividers
+ *                               highlight while dragging.
+ *   • Shift + drag a divider  → move every snap-aligned divider together.
  */
 export function SplitArrangementModal(): JSX.Element | null {
   const isOpen = useStore((s) => s.isSplitModalOpen)
   const ids = useStore((s) => s.selectedForGroupingIds)
   const sessions = useStore((s) => s.sessions)
-  const setGroupingSelection = useStore((s) => s.setGroupingSelection)
   const closeSplitModal = useStore((s) => s.closeSplitModal)
-  const pendingShapeId = useStore((s) => s.pendingShapeId)
-  const setPendingShapeId = useStore((s) => s.setPendingShapeId)
+  const pendingLayout = useStore((s) => s.pendingLayout)
+  const setPendingLayout = useStore((s) => s.setPendingLayout)
   const isExpandingExistingGroup = useStore((s) => s.isExpandingExistingGroup)
   const setExpandingExistingGroup = useStore((s) => s.setExpandingExistingGroup)
   const setViewMode = useStore((s) => s.setViewMode)
   const activeSplitGroupId = useStore((s) => s.activeSplitGroupId)
 
-  const slotSessions = useMemo<(Session | undefined)[]>(() => {
-    return ids.slice(0, MAX_SPLIT_N).map((id) => sessions.find((s) => s.id === id))
-  }, [ids, sessions])
+  const clamped = useMemo(() => ids.slice(0, MAX_SPLIT_N), [ids])
 
-  const N = Math.min(ids.length, MAX_SPLIT_N)
-  const shape = useMemo<Shape | null>(() => {
-    if (N < 2) return null
-    return pendingShapeId ? resolveShape(N, pendingShapeId) : defaultShapeFor(N)
-  }, [N, pendingShapeId])
+  const editingLayout = useMemo<Layout | null>(() => {
+    if (pendingLayout && layoutCoversIds(pendingLayout, clamped)) return pendingLayout
+    return defaultLayoutFor(clamped)
+  }, [pendingLayout, clamped])
 
-  if (!isOpen || N < 2 || !shape) return null
+  useEffect(() => {
+    if (!isOpen) return
+    if (!editingLayout) return
+    if (pendingLayout !== editingLayout) setPendingLayout(editingLayout)
+  }, [isOpen, editingLayout, pendingLayout, setPendingLayout])
+
+  const sessionsById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
+
+  if (!isOpen || clamped.length < 2 || !editingLayout) return null
 
   return (
     <div className="absolute inset-0 z-50 pointer-events-none">
@@ -44,17 +63,15 @@ export function SplitArrangementModal(): JSX.Element | null {
       >
         <div className="text-[11px] text-zinc-400 mb-2.5 flex items-center justify-between gap-2">
           <span>
-            {ids.length} session{ids.length !== 1 ? 's' : ''} · drag to reshape
+            {ids.length} session{ids.length !== 1 ? 's' : ''} · drag to rearrange
             {ids.length > MAX_SPLIT_N && (
               <span className="text-amber-500"> (max {MAX_SPLIT_N})</span>
             )}
           </span>
           <div className="flex items-center gap-1">
-            {/* + Add button — opens graph for picking more sessions while still holding Cmd */}
             {activeSplitGroupId && (
               <button
                 onClick={() => {
-                  // Switch to graph-pick mode without losing the selection or Cmd state.
                   setExpandingExistingGroup(true)
                   closeSplitModal()
                   setViewMode('graph')
@@ -77,104 +94,99 @@ export function SplitArrangementModal(): JSX.Element | null {
           </div>
         </div>
 
-        <ShapeDragArea
-          n={N}
-          shape={shape}
-          slotSessions={slotSessions}
-          onShapeChange={(s) => setPendingShapeId(s.id)}
-          onReorder={(a, b) => {
-            const next = ids.slice()
-            const tmp = next[a]
-            next[a] = next[b]
-            next[b] = tmp
-            setGroupingSelection(next)
-          }}
+        <LayoutEditor
+          layout={editingLayout}
+          sessionsById={sessionsById}
+          onChange={setPendingLayout}
         />
 
         <div className="text-[10px] text-zinc-600 mt-2.5 text-right">
-          release ⌘ to {isExpandingExistingGroup ? 'apply' : activeSplitGroupId ? 'apply' : 'open'} · any key to cancel
+          release ⌘ to {isExpandingExistingGroup ? 'apply' : activeSplitGroupId ? 'apply' : 'open'} · shift+drag aligned edges together
         </div>
       </div>
     </div>
   )
 }
 
-interface ShapeDragAreaProps {
-  n: number
-  shape: Shape
-  slotSessions: (Session | undefined)[]
-  onShapeChange: (next: Shape) => void
-  onReorder: (a: number, b: number) => void
+function layoutCoversIds(layout: Layout, ids: string[]): boolean {
+  const leaves = getLeaves(layout)
+  if (leaves.length !== ids.length) return false
+  const have = new Set(leaves.map((l) => l.id))
+  return ids.every((id) => have.has(id))
 }
 
-/** Index of the slot in `shape` whose cell contains the cursor fraction, or -1. */
-function slotAtFraction(shape: Shape, fx: number, fy: number): number {
-  if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return -1
-  const cx = Math.min(shape.cols - 1, Math.max(0, Math.floor(fx * shape.cols)))
-  const cy = Math.min(shape.rows - 1, Math.max(0, Math.floor(fy * shape.rows)))
-  for (let i = 0; i < shape.slots.length; i++) {
-    const s = shape.slots[i]
-    if (cx >= s.col && cx < s.col + s.colSpan && cy >= s.row && cy < s.row + s.rowSpan) {
-      return i
+// ---------------------------------------------------------------------------
+// Editor
+// ---------------------------------------------------------------------------
+
+interface LayoutEditorProps {
+  layout: Layout
+  sessionsById: Map<string, Session>
+  onChange: (next: Layout) => void
+}
+
+type DragState =
+  | { kind: 'tile'; leafId: string }
+  | {
+      kind: 'edge'
+      /** Targets being moved — `[{path, idx}]` for a single, or N for shift+drag. */
+      targets: { containerPath: LayoutPath; dividerIdx: number }[]
+      dir: 'row' | 'col'
     }
-  }
-  return -1
+  | null
+
+const EDGE_HIT_PX = 6
+/** Snap tolerance in canvas-fraction units (≈ 2% of editor extent). */
+const SNAP_TOL = 0.02
+
+type DropHint =
+  | { kind: 'swap'; leafId: string }
+  | { kind: 'edge'; leafId: string; where: 'left' | 'right' | 'top' | 'bottom' }
+
+/** Edge band thickness as a fraction of the leaf's extent. */
+const EDGE_BAND = 0.25
+
+function dropZoneFor(cfx: number, cfy: number, leaf: LayoutLeafView): 'center' | 'left' | 'right' | 'top' | 'bottom' {
+  const dx = (cfx - leaf.x) / leaf.w
+  const dy = (cfy - leaf.y) / leaf.h
+  const distLeft = dx
+  const distRight = 1 - dx
+  const distTop = dy
+  const distBottom = 1 - dy
+  const minD = Math.min(distLeft, distRight, distTop, distBottom)
+  if (minD >= EDGE_BAND) return 'center'
+  if (minD === distLeft) return 'left'
+  if (minD === distRight) return 'right'
+  if (minD === distTop) return 'top'
+  return 'bottom'
 }
 
-function ShapeDragArea({ n, shape, slotSessions, onShapeChange, onReorder }: ShapeDragAreaProps): JSX.Element {
+function LayoutEditor({ layout, sessionsById, onChange }: LayoutEditorProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
-  const [draggingIdx, setDraggingIdx] = useState<number | null>(null)
+  const [drag, setDrag] = useState<DragState>(null)
+  /** Keys of dividers that are currently visually aligned to the dragged one. */
+  const [alignedKeys, setAlignedKeys] = useState<Set<string>>(new Set())
+  /** Last applied drop hint while tile-dragging — used to avoid re-applying
+   *  the same swap/move on every mousemove inside one zone. */
+  const [dropHint, setDropHint] = useState<DropHint | null>(null)
+  const dropHintRef = useRef<DropHint | null>(dropHint)
+  dropHintRef.current = dropHint
 
-  // Imperative drag tracking via document-level listeners so the user can
-  // drag past the modal edge. The shape updates live during the drag so the
-  // preview tracks the cursor; mouseup just settles the drag state.
-  // `shape` is read via a ref to avoid restarting the listeners on every
-  // intermediate shape change (which would drop the active drag).
-  const shapeRef = useRef(shape)
-  shapeRef.current = shape
-  const onShapeChangeRef = useRef(onShapeChange)
-  onShapeChangeRef.current = onShapeChange
-  const onReorderRef = useRef(onReorder)
-  onReorderRef.current = onReorder
-  // Mutable drag index so swaps mid-gesture continue to track the same session
-  // through its new slot position without restarting the listener effect.
-  const draggingIdxRef = useRef<number | null>(draggingIdx)
-  draggingIdxRef.current = draggingIdx
+  const layoutRef = useRef(layout); layoutRef.current = layout
+  const dragRef = useRef(drag); dragRef.current = drag
+  const onChangeRef = useRef(onChange); onChangeRef.current = onChange
 
   useEffect(() => {
-    if (draggingIdx === null) return
-    const applyFromEvent = (e: MouseEvent): void => {
-      const el = containerRef.current
-      if (!el) return
-      const idx = draggingIdxRef.current
-      if (idx === null) return
-      const rect = el.getBoundingClientRect()
-      const fx = (e.clientX - rect.left) / rect.width
-      const fy = (e.clientY - rect.top) / rect.height
-      if (fx <= -0.05 || fx >= 1.05 || fy <= -0.05 || fy >= 1.05) return
-      const clampedFx = Math.max(0, Math.min(1, fx))
-      const clampedFy = Math.max(0, Math.min(1, fy))
-      const cur = shapeRef.current
-
-      // Reorder: if the cursor is over a different slot of the current shape,
-      // swap the dragged session with whatever sits there and follow the move.
-      const overIdx = slotAtFraction(cur, clampedFx, clampedFy)
-      if (overIdx !== -1 && overIdx !== idx) {
-        onReorderRef.current(idx, overIdx)
-        draggingIdxRef.current = overIdx
-        setDraggingIdx(overIdx)
-        return
-      }
-
-      // Reshape: pick the candidate shape whose dragged slot best matches the
-      // cursor. Only commits when it would actually change the shape.
-      const next = pickShapeForDrop(n, cur.id, idx, clampedFx, clampedFy)
-      if (next && next.id !== cur.id) onShapeChangeRef.current(next)
+    if (drag === null) {
+      setAlignedKeys(new Set())
+      setDropHint(null)
+      dropHintRef.current = null
+      return
     }
-    const onMove = (e: MouseEvent): void => applyFromEvent(e)
+    const onMove = (e: MouseEvent): void => handlePointer(e)
     const onUp = (e: MouseEvent): void => {
-      applyFromEvent(e)
-      setDraggingIdx(null)
+      handlePointer(e)
+      setDrag(null)
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
@@ -182,65 +194,199 @@ function ShapeDragArea({ n, shape, slotSessions, onShapeChange, onReorder }: Sha
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
     }
-  }, [draggingIdx, n])
+
+    function handlePointer(e: MouseEvent): void {
+      const el = containerRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const fx = (e.clientX - rect.left) / rect.width
+      const fy = (e.clientY - rect.top) / rect.height
+      if (fx < -0.05 || fx > 1.05 || fy < -0.05 || fy > 1.05) return
+      const cfx = Math.max(0, Math.min(1, fx))
+      const cfy = Math.max(0, Math.min(1, fy))
+      const d = dragRef.current
+      if (!d) return
+      const cur = layoutRef.current
+
+      if (d.kind === 'edge') {
+        const raw = d.dir === 'row' ? cfx : cfy
+        // Snap: against all other same-direction dividers (excluding the
+        // ones we're already dragging).
+        const draggingKeys = new Set(
+          d.targets.map((t) => `${t.containerPath.join('.')}:${t.dividerIdx}`)
+        )
+        const dividers = getDividers(cur)
+        let snapped = raw
+        const newlyAligned = new Set<string>()
+        for (const other of dividers) {
+          if (other.dir !== d.dir) continue
+          if (draggingKeys.has(other.key)) continue
+          if (Math.abs(other.axis - raw) < SNAP_TOL) {
+            snapped = other.axis
+            newlyAligned.add(other.key)
+          }
+        }
+        setAlignedKeys(newlyAligned)
+        const next = setDividersPosition(cur, d.targets, snapped)
+        if (next !== cur) onChangeRef.current(next)
+        return
+      }
+
+      // Tile-drag: pick the target leaf under the cursor, then choose between
+      // swap (cursor in the leaf's centre region) and relocate (cursor near an
+      // edge, restructures the tree).
+      const leaves = getLeaves(cur)
+      const over = leaves.find(
+        (l) => cfx >= l.x && cfx <= l.x + l.w && cfy >= l.y && cfy <= l.y + l.h
+      )
+      if (!over || over.id === d.leafId) {
+        if (dropHintRef.current) {
+          dropHintRef.current = null
+          setDropHint(null)
+        }
+        return
+      }
+      const zone = dropZoneFor(cfx, cfy, over)
+      const newHint = zone === 'center'
+        ? { kind: 'swap' as const, leafId: over.id }
+        : { kind: 'edge' as const, leafId: over.id, where: zone }
+      // Only mutate the layout when (target leaf, zone) changes — keeps the
+      // tree stable while the cursor wiggles inside one region.
+      const lastHint = dropHintRef.current
+      const sameAsLast =
+        lastHint &&
+        lastHint.kind === newHint.kind &&
+        lastHint.leafId === newHint.leafId &&
+        (lastHint.kind === 'swap' || (newHint.kind === 'edge' && lastHint.where === newHint.where))
+      if (sameAsLast) return
+      dropHintRef.current = newHint
+      setDropHint(newHint)
+      const next = zone === 'center'
+        ? swapLeaves(cur, d.leafId, over.id)
+        : moveLeaf(cur, d.leafId, over.id, zone)
+      if (next !== cur) onChangeRef.current(next)
+    }
+  }, [drag])
+
+  const dividers = useMemo(() => getDividers(layout), [layout])
+  const leaves = useMemo(() => getLeaves(layout), [layout])
+  const leafOrderById = useMemo(() => {
+    const m = new Map<string, number>()
+    leaves.forEach((l, i) => m.set(l.id, i + 1))
+    return m
+  }, [leaves])
+
+  const draggingDividerKeys = useMemo(() => {
+    if (drag?.kind !== 'edge') return new Set<string>()
+    return new Set(drag.targets.map((t) => `${t.containerPath.join('.')}:${t.dividerIdx}`))
+  }, [drag])
 
   return (
     <div
       ref={containerRef}
-      className="aspect-[3/2] w-full bg-zinc-950/60 border border-zinc-800 rounded-lg p-1.5 grid gap-1 select-none"
-      style={{
-        gridTemplateColumns: `repeat(${shape.cols}, 1fr)`,
-        gridTemplateRows: `repeat(${shape.rows}, 1fr)`,
+      className="relative aspect-[3/2] w-full bg-zinc-950/60 border border-zinc-800 rounded-lg select-none overflow-hidden"
+      onMouseDown={(e) => {
+        const el = containerRef.current
+        if (!el) return
+        const rect = el.getBoundingClientRect()
+        const px = e.clientX - rect.left
+        const py = e.clientY - rect.top
+        const w = rect.width
+        const h = rect.height
+
+        // Edge hit-test first.
+        for (const div of dividers) {
+          const axisPx = div.dir === 'row' ? div.axis * w : div.axis * h
+          const cursorAxisPx = div.dir === 'row' ? px : py
+          if (Math.abs(cursorAxisPx - axisPx) > EDGE_HIT_PX) continue
+          const startPx = div.dir === 'row' ? div.start * h : div.start * w
+          const endPx = div.dir === 'row' ? div.end * h : div.end * w
+          const cursorPerpPx = div.dir === 'row' ? py : px
+          if (cursorPerpPx < startPx || cursorPerpPx > endPx) continue
+          e.preventDefault()
+
+          // Shift+drag: include all snap-aligned same-direction dividers.
+          if (e.shiftKey) {
+            const targets = dividers
+              .filter(
+                (other) =>
+                  other.dir === div.dir &&
+                  Math.abs(other.axis - div.axis) < SNAP_TOL
+              )
+              .map((d) => ({ containerPath: d.containerPath, dividerIdx: d.dividerIdx }))
+            setDrag({ kind: 'edge', targets, dir: div.dir })
+          } else {
+            setDrag({
+              kind: 'edge',
+              targets: [{ containerPath: div.containerPath, dividerIdx: div.dividerIdx }],
+              dir: div.dir,
+            })
+          }
+          return
+        }
+
+        // Tile hit-test.
+        const fx = px / w
+        const fy = py / h
+        const leaf = leaves.find(
+          (l) => fx >= l.x && fx <= l.x + l.w && fy >= l.y && fy <= l.y + l.h
+        )
+        if (leaf) {
+          e.preventDefault()
+          setDrag({ kind: 'tile', leafId: leaf.id })
+        }
       }}
     >
-      <AnimatePresence>
-        {shape.slots.map((slot, i) => {
-          const session = slotSessions[i]
-          return (
-            <DragSlot
-              key={session?.id ?? `slot-${i}`}
-              slot={slot}
-              label={i + 1}
-              session={session}
-              isDragging={draggingIdx === i}
-              onDragStart={() => setDraggingIdx(i)}
-            />
-          )
-        })}
-      </AnimatePresence>
+      {leaves.map((leaf) => {
+        const session = sessionsById.get(leaf.id)
+        const isDragging = drag?.kind === 'tile' && drag.leafId === leaf.id
+        return (
+          <LeafTile
+            key={leaf.id}
+            leaf={leaf}
+            session={session}
+            label={leafOrderById.get(leaf.id) ?? 0}
+            isDragging={isDragging}
+          />
+        )
+      })}
+
+      {dividers.map((d) => (
+        <DividerStrip
+          key={d.key}
+          divider={d}
+          isDragging={draggingDividerKeys.has(d.key)}
+          isAligned={alignedKeys.has(d.key)}
+        />
+      ))}
     </div>
   )
 }
 
-interface DragSlotProps {
-  slot: SlotRect
-  label: number
+interface LeafTileProps {
+  leaf: LayoutLeafView
   session: Session | undefined
+  label: number
   isDragging: boolean
-  onDragStart: () => void
 }
 
-function DragSlot({ slot, label, session, isDragging, onDragStart }: DragSlotProps): JSX.Element {
+function LeafTile({ leaf, session, label, isDragging }: LeafTileProps): JSX.Element {
   const tint = session ? projectColor(session.projectPath) : null
   const tintDim = session ? projectColorDim(session.projectPath) : null
+  const PADDING = 2
   return (
-    <motion.div
-      layout
-      transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-      onMouseDown={(e) => {
-        e.preventDefault()
-        onDragStart()
-      }}
-      className={`rounded-md border flex items-center justify-center gap-1.5 text-xs font-mono cursor-grab overflow-hidden px-1.5 ${
-        isDragging ? 'cursor-grabbing' : ''
-      }`}
+    <div
+      className="absolute flex items-center justify-center gap-1.5 rounded-md border text-xs font-mono overflow-hidden cursor-grab"
       style={{
-        gridColumn: `${slot.col + 1} / span ${slot.colSpan}`,
-        gridRow: `${slot.row + 1} / span ${slot.rowSpan}`,
+        left: `calc(${leaf.x * 100}% + ${PADDING}px)`,
+        top: `calc(${leaf.y * 100}% + ${PADDING}px)`,
+        width: `calc(${leaf.w * 100}% - ${PADDING * 2}px)`,
+        height: `calc(${leaf.h * 100}% - ${PADDING * 2}px)`,
         backgroundColor: tintDim ?? (isDragging ? 'rgb(63 63 70)' : 'rgb(39 39 42 / 0.7)'),
         borderColor: tint ?? (isDragging ? 'rgb(113 113 122)' : 'rgb(63 63 70)'),
         color: tint ?? 'rgb(212 212 216)',
         boxShadow: isDragging ? `inset 0 0 0 1px ${tint ?? 'rgb(113 113 122)'}` : undefined,
+        transition: isDragging ? 'none' : 'left 140ms ease, top 140ms ease, width 140ms ease, height 140ms ease',
       }}
     >
       <span className="opacity-60 shrink-0">{label}</span>
@@ -249,6 +395,45 @@ function DragSlot({ slot, label, session, isDragging, onDragStart }: DragSlotPro
           {session.projectName}
         </span>
       )}
-    </motion.div>
+    </div>
   )
 }
+
+interface DividerStripProps {
+  divider: LayoutDivider
+  isDragging: boolean
+  isAligned: boolean
+}
+
+function DividerStrip({ divider, isDragging, isAligned }: DividerStripProps): JSX.Element {
+  const style: React.CSSProperties = divider.dir === 'row'
+    ? {
+        left: `calc(${divider.axis * 100}% - ${EDGE_HIT_PX}px)`,
+        top: `${divider.start * 100}%`,
+        width: EDGE_HIT_PX * 2,
+        height: `${(divider.end - divider.start) * 100}%`,
+        cursor: 'ew-resize',
+      }
+    : {
+        top: `calc(${divider.axis * 100}% - ${EDGE_HIT_PX}px)`,
+        left: `${divider.start * 100}%`,
+        height: EDGE_HIT_PX * 2,
+        width: `${(divider.end - divider.start) * 100}%`,
+        cursor: 'ns-resize',
+      }
+  const bg = isDragging
+    ? 'rgba(255,255,255,0.22)'
+    : isAligned
+      ? 'rgba(96,165,250,0.35)' // blue-400-ish — visible alignment indicator
+      : 'transparent'
+  return (
+    <div className="absolute" style={style}>
+      <div className="absolute inset-0 transition-colors" style={{ backgroundColor: bg }} />
+    </div>
+  )
+}
+
+// Silence the unused-direct-import lint — `setDividerPosition` is kept exported
+// for callers who don't need the multi-target form; we use it indirectly via
+// `setDividersPosition` here.
+void setDividerPosition

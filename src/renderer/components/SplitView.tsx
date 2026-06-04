@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { useStore, type Session, type SessionStatus } from '../store'
 import { Terminal, focusTerminal, setTerminalFontSize } from './Terminal'
-import { resolveShape, type Shape } from '../lib/splitLayouts'
+import type { Layout } from '../lib/splitLayouts'
 import { projectColor, projectColorDim } from '../lib/simulation'
 
 interface SplitViewProps {
@@ -69,10 +69,6 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
 
   const group = splitGroups.find((g) => g.id === activeSplitGroupId)
   const N = group?.orderedSessionIds.length ?? 0
-  const shape: Shape | null = useMemo(
-    () => (group ? resolveShape(N, group.shapeId) : null),
-    [group, N]
-  )
 
   // Default focus to slot 0 when entering the view.
   useEffect(() => {
@@ -114,14 +110,14 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
           const s = useStore.getState()
           if (s.viewMode !== 'split') return
           if (s.selectedForGroupingIds.length < 2) return
-          // Seed pendingShapeId with the active group's CURRENT shape so the
-          // modal preview opens at the user's last layout, not the per-N default.
-          // Otherwise a no-op release would silently snap the group back to default.
+          // Seed pendingLayout with the group's CURRENT tree so the modal opens at
+          // the user's existing arrangement. A no-op release then commits the
+          // same tree back, leaving the group unchanged.
           const activeGroup = s.activeSplitGroupId
             ? s.splitGroups.find((g) => g.id === s.activeSplitGroupId) ?? null
             : null
-          if (activeGroup?.shapeId) {
-            s.setPendingShapeId(activeGroup.shapeId)
+          if (activeGroup) {
+            s.setPendingLayout(activeGroup.layout)
           }
           s.openSplitModal()
         }, STILLNESS_DELAY_MS)
@@ -133,22 +129,8 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
         clearStillness()
         const state = useStore.getState()
         const activeId = state.activeSplitGroupId
-        if (activeId) {
-          // Apply any drag-chosen member order (slot swaps) to the group.
-          const activeGroup = state.splitGroups.find((g) => g.id === activeId)
-          const selection = state.selectedForGroupingIds
-          if (
-            activeGroup &&
-            selection.length === activeGroup.orderedSessionIds.length &&
-            selection.some((id, i) => id !== activeGroup.orderedSessionIds[i]) &&
-            selection.every((id) => activeGroup.orderedSessionIds.includes(id))
-          ) {
-            state.updateSplitGroupMembers(activeId, selection)
-          }
-          // Apply any drag-chosen shape to the active group.
-          if (state.pendingShapeId) {
-            state.updateSplitGroupShape(activeId, state.pendingShapeId)
-          }
+        if (activeId && state.pendingLayout) {
+          state.setSplitGroupLayout(activeId, state.pendingLayout)
         }
         state.closeSplitModal()
         setCmdHeld(false) // also clears selection
@@ -224,50 +206,86 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
     return () => window.removeEventListener('keydown', onKey, true)
   }, [group, setFocusedSessionId])
 
-  if (!group || !shape) return null
+  if (!group) return null
 
-  const members = group.orderedSessionIds
-    .map((id) => sessions.find((s) => s.id === id))
-    .filter((s): s is Session => Boolean(s))
+  const sessionsById = new Map(sessions.map((s) => [s.id, s]))
+  const slotIndexById = new Map<string, number>()
+  group.orderedSessionIds.forEach((id, i) => slotIndexById.set(id, i))
 
-  if (members.length === 0) return null
+  if (group.orderedSessionIds.length === 0) return null
 
   return (
     <div className="absolute inset-0 z-20 flex flex-col bg-[#0a0a0a]">
       {/* Titlebar — drag region */}
       <div className="h-10 border-b border-zinc-800/50 titlebar-drag shrink-0 flex items-center pr-4">
         <div className={`titlebar-no-drag flex items-center gap-2 text-xs text-zinc-500 ${navigator.platform.startsWith('Mac') ? 'pl-20' : 'pl-4'}`}>
-          <span>Split view · {members.length} session{members.length !== 1 ? 's' : ''}</span>
+          <span>Split view · {group.orderedSessionIds.length} session{group.orderedSessionIds.length !== 1 ? 's' : ''}</span>
         </div>
       </div>
 
-      {/* Grid container using the resolved shape */}
-      <div
-        className="flex-1 min-h-0 grid gap-2 p-2"
-        style={{
-          gridTemplateColumns: `repeat(${shape.cols}, 1fr)`,
-          gridTemplateRows: `repeat(${shape.rows}, 1fr)`,
-        }}
-      >
-        {members.map((session, i) => {
-          const slot = shape.slots[i]
-          if (!slot) return null
-          return (
-            <SplitPanel
-              key={session.id}
-              session={session}
-              slotIndex={i}
-              slot={slot}
-              isFocused={session.id === focusedSessionId}
-              onFocus={() => {
-                setFocusedSessionId(session.id)
-                if (session.status === 'finished') markSessionSeen(session.id)
-              }}
-              onTitleChange={onTitleChange}
-            />
-          )
-        })}
+      <div className="flex-1 min-h-0 p-2">
+        <LayoutPanes
+          layout={group.layout}
+          renderLeaf={(id) => {
+            const session = sessionsById.get(id)
+            if (!session) return null
+            const slotIndex = slotIndexById.get(id) ?? 0
+            return (
+              <SplitPanel
+                session={session}
+                slotIndex={slotIndex}
+                isFocused={session.id === focusedSessionId}
+                onFocus={() => {
+                  setFocusedSessionId(session.id)
+                  if (session.status === 'finished') markSessionSeen(session.id)
+                }}
+                onTitleChange={onTitleChange}
+              />
+            )
+          }}
+        />
       </div>
+    </div>
+  )
+}
+
+interface LayoutPanesProps {
+  layout: Layout
+  renderLeaf: (id: string) => JSX.Element | null
+}
+
+const PANE_GAP_PX = 8
+
+/**
+ * Render a `Layout` tree as nested flex containers. Each container is one
+ * flexbox with K children whose flex-basis is `weight × 100% − gapShare`, so
+ * the gap pixels are distributed proportionally and panes don't overflow.
+ */
+function LayoutPanes({ layout, renderLeaf }: LayoutPanesProps): JSX.Element | null {
+  if (layout.kind === 'leaf') {
+    return <div className="w-full h-full min-w-0 min-h-0">{renderLeaf(layout.id)}</div>
+  }
+  const isRow = layout.dir === 'row'
+  const k = layout.children.length
+  // Total cross-gap pixels = (K-1) × GAP. Distribute proportionally to weights
+  // so a wider pane doesn't lose more than its share to gap reservation.
+  const gapShareTotal = (k - 1) * PANE_GAP_PX
+  return (
+    <div
+      className="w-full h-full min-w-0 min-h-0 flex"
+      style={{ flexDirection: isRow ? 'row' : 'column', gap: PANE_GAP_PX }}
+    >
+      {layout.children.map((child, i) => (
+        <div
+          key={i}
+          className="min-w-0 min-h-0"
+          style={{
+            flex: `0 0 calc(${layout.weights[i] * 100}% - ${layout.weights[i] * gapShareTotal}px)`,
+          }}
+        >
+          <LayoutPanes layout={child} renderLeaf={renderLeaf} />
+        </div>
+      ))}
     </div>
   )
 }
@@ -275,13 +293,12 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
 interface SplitPanelProps {
   session: Session
   slotIndex: number
-  slot: { col: number; row: number; colSpan: number; rowSpan: number }
   isFocused: boolean
   onFocus: () => void
   onTitleChange: (id: string, title: string) => void
 }
 
-function SplitPanel({ session, slotIndex, slot, isFocused, onFocus, onTitleChange }: SplitPanelProps): JSX.Element {
+function SplitPanel({ session, slotIndex, isFocused, onFocus, onTitleChange }: SplitPanelProps): JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
 
   // Drive xterm font size off our own width with ResizeObserver.
@@ -309,10 +326,8 @@ function SplitPanel({ session, slotIndex, slot, isFocused, onFocus, onTitleChang
   return (
     <div
       ref={ref}
-      className="relative min-w-0 min-h-0 rounded-lg overflow-hidden"
+      className="relative w-full h-full min-w-0 min-h-0 rounded-lg overflow-hidden"
       style={{
-        gridColumn: `${slot.col + 1} / span ${slot.colSpan}`,
-        gridRow: `${slot.row + 1} / span ${slot.rowSpan}`,
         outline: statusBorder ? `2px solid ${statusBorder}` : '1px solid rgb(39 39 42 / 0.7)',
         outlineOffset: 0,
         boxShadow: statusGlow ?? undefined,
