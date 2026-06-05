@@ -2,6 +2,16 @@
   "name": "session-manager",
   "version": "0.1.0",
   "description": "Desktop app for managing multiple Claude Code sessions",
+  "author": "Ry J",
+  "license": "MIT",
+  "homepage": "https://github.com/ryj-dev/session-manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryj-dev/session-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ryj-dev/session-manager/issues"
+  },
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
