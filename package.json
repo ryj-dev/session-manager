@@ -1,6 +1,6 @@
 {
   "name": "session-manager",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Desktop app for managing multiple Claude Code sessions",
   "author": "Ry J",
   "license": "MIT",
