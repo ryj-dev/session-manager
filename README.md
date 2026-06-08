@@ -67,7 +67,7 @@ All of this is reversible. Open **Settings → Cleanup & uninstall** to see exac
 
 ## Hotkeys and settings
 
-All keyboard shortcuts are configurable. Open **Settings → Keyboard shortcuts** for the full list of capabilities and their default bindings (Cmd+T to spawn, Cmd+W to return to the graph, Cmd+M for memory, Cmd+E for the file explorer, and so on). Browsing that panel is the fastest way to discover what the app can do.
+All keyboard shortcuts are configurable. Open **Settings → Keyboard shortcuts** for the full list of capabilities and their default bindings (Cmd+T to spawn, Cmd+W to return to the graph, Cmd+M for memory, Cmd+E for the file explorer, Cmd+O for settings, and so on). Browsing that panel is the fastest way to discover what the app can do.
 
 Other settings worth knowing about live in the same panel: base projects directory, terminal pairing mode (off / split / overlay shell alongside Claude), auto-mode defaults for spawned sessions, message popup behavior, and per-integration disable toggles.
 

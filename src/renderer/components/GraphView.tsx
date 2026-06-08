@@ -621,6 +621,7 @@ export function GraphView(): JSX.Element {
               <Hotkey keys={formatHotkey(hotkeys.spawnSession)} label="Spawn Claude session" />
               <Hotkey keys={formatHotkey(hotkeys.spawnTerminal)} label="Spawn terminal" />
               <Hotkey keys={formatHotkey(hotkeys.toggleExplorer)} label="Open file explorer" />
+              <Hotkey keys={formatHotkey(hotkeys.openSettings)} label="Open settings" />
             </div>
           </div>
         </div>
@@ -631,6 +632,7 @@ export function GraphView(): JSX.Element {
         <div className="absolute bottom-3 right-3 text-[10px] text-zinc-600 space-y-0.5">
           <Hotkey keys={formatHotkey(hotkeys.spawnSession)} label="New session" small />
           <Hotkey keys={formatHotkey(hotkeys.toggleExplorer)} label="Explorer" small />
+          <Hotkey keys={formatHotkey(hotkeys.openSettings)} label="Settings" small />
           <Hotkey keys="←→" label="Cycle in project" small />
           <Hotkey keys="↑↓" label="Switch project" small />
           <Hotkey keys="Enter" label="Focus selected" small />
