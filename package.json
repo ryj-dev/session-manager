@@ -1,6 +1,6 @@
 {
   "name": "session-manager",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop app for managing multiple Claude Code sessions",
   "author": "Ry J",
   "license": "MIT",
@@ -39,7 +39,9 @@
       {
         "from": "resources",
         "to": "resources",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asarUnpack": [
@@ -53,8 +55,18 @@
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "identity": null,
       "hardenedRuntime": false,
