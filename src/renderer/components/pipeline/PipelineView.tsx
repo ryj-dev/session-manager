@@ -11,6 +11,8 @@ import type {
   PipelineSessionStatus,
   AutonomyLevel,
   PipelineTone,
+  PipelineKind,
+  FeedEntry,
 } from '../../store'
 
 /**
@@ -367,7 +369,8 @@ function CardTile({
   const orch = card.orchestrator
   const stage = liveStage(card)
   const fanCount = stage?.children?.length ?? 0
-  const narration = orch?.log[orch.log.length - 1]
+  const lastOrchEntry = orch?.log.at(-1)
+  const narration = lastOrchEntry ? normalizeEntry(lastOrchEntry).text : undefined
   const autonomy = card.autonomy ?? defaultAutonomy
   const isInFlight = card.stage !== 'backlog' && card.stage !== 'done'
 
@@ -775,7 +778,7 @@ function SessionContent({ sess, onSelectChild }: { sess: PipelineSession; onSele
                     {child.worktreeRemoved ? '🔒' : '⑂'} <span className="truncate">{child.worktreeBranch}</span>
                   </span>
                 )}
-                <p className="mt-1.5 line-clamp-2 font-mono text-[10px] text-zinc-500">{child.log[child.log.length - 1]}</p>
+                <p className="mt-1.5 line-clamp-2 font-mono text-[10px] text-zinc-500">{child.log.length ? normalizeEntry(child.log.at(-1)!).text : null}</p>
                 <span className="mt-1.5 inline-block text-[10px] text-zinc-600">View session →</span>
               </button>
             ))}
@@ -791,9 +794,19 @@ function SessionContent({ sess, onSelectChild }: { sess: PipelineSession; onSele
 
       {tab === 'feed' ? (
         <div ref={termRef} className="min-h-[180px] flex-1 overflow-y-auto rounded-lg border border-zinc-800 bg-black/60 p-3 font-mono text-[11px] leading-relaxed">
-          {sess.log.slice(0, visibleLines).map((line, i) => (
-            <div key={i} className={lineColor(line)}>{line}</div>
-          ))}
+          {sess.log.slice(0, visibleLines).map((raw, i) => {
+            const entry = normalizeEntry(raw)
+            const { color, icon } = entryStyle(entry)
+            return (
+              <div key={i} className="flex gap-1.5 items-baseline">
+                {icon && <span className="w-3 text-center opacity-60 shrink-0">{icon}</span>}
+                <span className={`${color} flex-1`}>{entry.text}</span>
+                {entry.ts != null && (
+                  <span className="text-[9px] text-zinc-600 tabular-nums shrink-0">{fmtFeedTime(entry.ts)}</span>
+                )}
+              </div>
+            )
+          })}
           {(sess.status === 'working' || sess.status === 'permission') && visibleLines >= sess.log.length && (
             <span className="inline-block h-3 w-1.5 animate-pulse bg-zinc-500 align-middle" />
           )}
@@ -971,3 +984,39 @@ function lineColor(line: string): string {
   if (t.startsWith('◌')) return 'text-zinc-500'
   return 'text-zinc-300'
 }
+
+// ── Typed milestone-feed colouring (text variants of the TONE_CHIP palette) ──
+
+/** Defensive guard: legacy persisted entries may still be bare strings. */
+function normalizeEntry(e: string | FeedEntry): FeedEntry {
+  return typeof e === 'string' ? { text: e } : e
+}
+
+const TONE_TEXT: Record<PipelineTone, string> = {
+  pass: 'text-green-300', fail: 'text-red-300', warn: 'text-amber-300',
+  active: 'text-sky-300', neutral: 'text-zinc-400',
+}
+
+const KIND_META: Record<PipelineKind, { icon: string; color?: string }> = {
+  info:             { icon: '·' },
+  'plan-ready':     { icon: '✻', color: 'text-violet-300' },
+  fanout:           { icon: '⑂', color: 'text-sky-300' },
+  'review-verdict': { icon: '◎' },
+  blocked:          { icon: '⏳', color: 'text-amber-300' },
+  done:             { icon: '✓', color: 'text-green-300' },
+  error:            { icon: '✗', color: 'text-red-300' },
+}
+
+/** Resolve a feed entry to its row colour + optional type icon. Identity/terminal
+ *  kinds carry a fixed colour that wins; state-bearing kinds defer to tone (so a
+ *  failed review reads red, a passing one green); legacy entries fall back to the
+ *  glyph heuristic. */
+function entryStyle(e: FeedEntry): { color: string; icon: string | null } {
+  const km = e.kind ? KIND_META[e.kind] : undefined
+  const color = km?.color ?? (e.tone ? TONE_TEXT[e.tone] : undefined) ?? lineColor(e.text)
+  const icon = km?.icon ?? null
+  return { color, icon }
+}
+
+const fmtFeedTime = (t: number): string =>
+  new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
