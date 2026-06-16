@@ -361,14 +361,20 @@ const ORCHESTRATOR_TOOLS = [
   'Read', 'Grep', 'Glob',
 ]
 
-function buildOrchestratorPrompt(task: pipelineStore.PipelineTask): string {
+function buildOrchestratorPrompt(task: pipelineStore.PipelineTask, isolated: boolean): string {
   const tagLine = task.tags.length ? `\n- tags: ${task.tags.join(', ')}` : ''
+  const bodyBlock = task.body && task.body.trim()
+    ? `\n\nTASK DETAILS (the user's full intent, from the todo body — follow it closely and relay the relevant parts to the planner/implementers):\n"""\n${task.body.trim()}\n"""`
+    : ''
+  const isolationLine = isolated
+    ? `\n\nISOLATION: You and ALL your stage sessions run in a dedicated git worktree on a per-task branch, so other tasks running concurrently can't collide with you. Your branch is merged back into the integration branch automatically when the task reaches Done — do not merge to the main branch yourself.`
+    : `\n\nNOTE: This task is NOT running in an isolated worktree (the project isn't a git repo, or worktree creation failed). Avoid parallel file-editing fan-out; work sequentially.`
   return `You are the ORCHESTRATOR for an agentic-pipeline task in the Session Manager app. You own this task end-to-end and drive it through the pipeline by coordinating SEPARATE Claude sessions — you do not write code yourself.
 
 TASK
 - taskId: ${task.id}
 - title: ${task.title}
-- autonomy: ${task.autonomy}   (manual = pause at every hand-off · gated = pause at gates · auto = run unattended)${tagLine}
+- autonomy: ${task.autonomy}   (manual = pause at every hand-off · gated = pause at gates · auto = run unattended)${tagLine}${bodyBlock}${isolationLine}
 
 PIPELINE: Plan → Implement → Review (review⇄implement loop) → Done.
 
@@ -409,9 +415,28 @@ Begin now.`
 /** Spawn the orchestrator session for a task and register it as the tree root.
  *  Called from the renderer's pipeline:start IPC. */
 export function spawnPipelineOrchestrator(task: pipelineStore.PipelineTask): { id: string } {
-  const cwd = task.projectPath || loadSettings().baseProjectsDir || app.getPath('home')
+  const baseDir = task.projectPath || loadSettings().baseProjectsDir || app.getPath('home')
+  // Per-task isolation: run the whole task (orchestrator + every stage session,
+  // which inherit this cwd) in its OWN git worktree on a per-task branch, so
+  // concurrent tasks can't collide in the shared working tree. Integrated back
+  // into the main branch when the task reaches Done. Falls back to the shared
+  // dir if the project isn't a git repo.
+  let cwd = baseDir
+  let isolated = false
+  const repoRoot = gitWorktree.getRepoRoot(baseDir)
+  if (repoRoot) {
+    try {
+      const branch = gitWorktree.branchNameFor(task.id, 'task')
+      const ref = gitWorktree.addWorktree({ repoRoot, taskId: task.id, branch })
+      cwd = ref.worktreePath
+      isolated = true
+      pipelineStore.setTaskWorktree(task.id, { repoRoot, worktreePath: ref.worktreePath, worktreeBranch: ref.branch })
+    } catch (err) {
+      console.error('[hook-server] per-task worktree creation failed; running in shared dir:', err)
+    }
+  }
   const id = randomUUID()
-  const prompt = buildOrchestratorPrompt(task)
+  const prompt = buildOrchestratorPrompt(task, isolated)
   // Auto permission mode so it can call its (scoped) tools without prompts.
   const args = ['--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--', prompt]
   const session = spawnSession(id, cwd, 'claude', args)
@@ -483,22 +508,31 @@ function handlePipelineGetTask(body: string, res: import('http').ServerResponse)
 }
 
 function handlePipelineSetStage(body: string, res: import('http').ServerResponse): void {
-  try {
-    const { taskId, stage } = readJson<{ taskId: string; stage: pipelineStore.PipelineStage }>(body)
-    pipelineStore.setPipelineStage(taskId, stage)
-    broadcastPipeline()
-    // Task complete → clean up any leftover worktrees, then tear down every
-    // session in its tree (orchestrator + workers).
-    if (stage === 'done') {
-      cleanupTaskWorktrees(taskId)
-      for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
+  void (async (): Promise<void> => {
+    try {
+      const { taskId, stage } = readJson<{ taskId: string; stage: pipelineStore.PipelineStage }>(body)
+      pipelineStore.setPipelineStage(taskId, stage)
+      broadcastPipeline()
+      if (stage === 'done') {
+        // Integrate the per-task branch into the main branch FIRST (safe
+        // ordering — never delete unmerged work). Only on success do we clean
+        // up worktrees + tear down sessions. On conflict, everything is kept.
+        const integ = await integrateTaskWorktree(taskId)
+        if (integ.ok) {
+          cleanupTaskWorktrees(taskId)
+          for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, stage, integration: integ }))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, stage }))
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: String(err) }))
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, stage }))
-  } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: String(err) }))
-  }
+  })()
 }
 
 function handlePipelineEmit(body: string, res: import('http').ServerResponse): void {
@@ -581,12 +615,16 @@ function handlePipelineMergeWorktree(body: string, res: import('http').ServerRes
         res.end(JSON.stringify({ error: `Session ${sessionId} has no worktree to merge` }))
         return
       }
-      // Resolve the MAIN repo root, never a worktree path — merging "into" the
-      // worker's own worktree is a silent no-op + force-delete (data loss).
-      const root = gitWorktree.getMainWorktreeRoot(task.projectPath || node.cwd || process.cwd())
-      if (!root) {
+      // Integration target for a fan-out worker: the TASK's own worktree (its
+      // per-task branch) when the task is isolated — so a worker's work lands on
+      // the task branch, not main (main integration happens once, at Done).
+      // Fall back to the MAIN repo root for non-isolated tasks. NEVER the
+      // worker's own worktree (merging into itself = no-op + force-delete = data
+      // loss — exactly the blocker this guards against).
+      const root = task.worktreePath || gitWorktree.getMainWorktreeRoot(task.projectPath || node.cwd || process.cwd())
+      if (!root || root === node.worktreePath) {
         res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'Task project path is not a git repo' }))
+        res.end(JSON.stringify({ error: !root ? 'No git integration root for this task' : 'Refusing to merge a worktree into itself' }))
         return
       }
 
@@ -633,18 +671,70 @@ function handlePipelineMergeWorktree(body: string, res: import('http').ServerRes
 /** Best-effort removal of any live worktrees in a task's tree — called on
  *  terminal states (Done / task removed) to clean up crashed/abandoned workers. */
 export function cleanupTaskWorktrees(taskId: string): void {
-  const nodes = pipelineStore.getWorktreeNodes(taskId)
-  if (nodes.length === 0) return
   const task = pipelineStore.getPipelineTask(taskId)
-  for (const node of nodes) {
-    const root = gitWorktree.getMainWorktreeRoot(task?.projectPath || node.cwd || process.cwd())
+  // Session-level fan-out worker worktrees.
+  for (const node of pipelineStore.getWorktreeNodes(taskId)) {
+    // Worker worktrees live off the TASK worktree (or main if not isolated).
+    const root = task?.worktreePath || gitWorktree.getMainWorktreeRoot(task?.projectPath || node.cwd || process.cwd())
     if (!root || !node.worktreePath || !node.worktreeBranch) continue
     try {
       gitWorktree.removeWorktree({ repoRoot: root, worktreePath: node.worktreePath, branch: node.worktreeBranch })
       pipelineStore.markWorktreeRemoved(taskId, node.id)
     } catch (err) {
-      console.error('[hook-server] task worktree cleanup failed:', err)
+      console.error('[hook-server] worker worktree cleanup failed:', err)
     }
+  }
+  // Task-level worktree (discard path). On the Done path the integrate step has
+  // already removed it after a successful merge — best-effort no-op then; on
+  // remove/discard this throws the work away.
+  if (task?.repoRoot && task.worktreePath && task.worktreeBranch) {
+    try {
+      gitWorktree.removeWorktree({ repoRoot: task.repoRoot, worktreePath: task.worktreePath, branch: task.worktreeBranch })
+    } catch (err) {
+      console.error('[hook-server] task-level worktree cleanup failed:', err)
+    }
+  }
+}
+
+/** On task completion, merge the per-task branch into the integration (main)
+ *  branch and remove the task worktree. SAFE ORDERING: the worktree is removed
+ *  ONLY after a successful merge, so unmerged work is never lost. On conflict
+ *  the worktree is kept and a milestone is emitted for resolution. No-op for
+ *  non-isolated tasks. */
+export async function integrateTaskWorktree(
+  taskId: string,
+): Promise<{ ok: boolean; conflicts?: string[]; noWorktree?: boolean }> {
+  const task = pipelineStore.getPipelineTask(taskId)
+  if (!task?.repoRoot || !task.worktreePath || !task.worktreeBranch) return { ok: true, noWorktree: true }
+  const feedId = task.orchestrator?.id ?? taskId
+  try {
+    const result = await gitWorktree.mergeWorktree({
+      repoRoot: task.repoRoot,
+      branch: task.worktreeBranch,
+      worktreePath: task.worktreePath,
+    })
+    if (!result.merged) {
+      pipelineStore.emitMilestone(taskId, feedId, {
+        text: `⚠ Task branch ${task.worktreeBranch} conflicts with the integration branch (${result.conflicts.join(', ')}). Worktree kept — resolve and re-complete.`,
+        tone: 'fail', badge: 'merge conflict',
+      })
+      broadcastPipeline()
+      return { ok: false, conflicts: result.conflicts }
+    }
+    gitWorktree.removeWorktree({ repoRoot: task.repoRoot, worktreePath: task.worktreePath, branch: task.worktreeBranch })
+    pipelineStore.emitMilestone(taskId, feedId, {
+      text: `Merged task branch ${task.worktreeBranch} → integration branch; task worktree removed.`,
+      tone: 'pass', badge: 'integrated',
+    })
+    broadcastPipeline()
+    return { ok: true }
+  } catch (err) {
+    pipelineStore.emitMilestone(taskId, feedId, {
+      text: `⚠ Task integration failed: ${err instanceof Error ? err.message : String(err)}. Worktree kept.`,
+      tone: 'fail',
+    })
+    broadcastPipeline()
+    return { ok: false }
   }
 }
 

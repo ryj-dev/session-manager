@@ -47,6 +47,8 @@ export interface PipelineTask {
   id: string
   title: string
   tags: string[]
+  /** Full todo body (the user's detailed intent) — passed to the orchestrator. */
+  body?: string
   stage: PipelineStage
   autonomy: AutonomyLevel
   reviewRound?: number
@@ -57,6 +59,13 @@ export interface PipelineTask {
   completedAt?: number
   /** Project directory the orchestrator + stage sessions run in. */
   projectPath?: string
+  /** Per-task isolation: the integration repo root (the MAIN repo). */
+  repoRoot?: string
+  /** Per-task isolation: the task's own worktree path (where the orchestrator
+   *  + all its stage sessions run, so concurrent tasks don't collide). */
+  worktreePath?: string
+  /** Per-task isolation: the task's branch (merged → integration at Done). */
+  worktreeBranch?: string
 }
 
 const STAGE_ORDER: PipelineStage[] = ['plan', 'implement', 'review', 'done']
@@ -100,7 +109,7 @@ export function getPipelineTask(id: string): PipelineTask | null {
 
 /** Move a todo into the pipeline at the Plan stage. No-op if already present. */
 export function startPipelineTask(
-  todo: { id: string; title: string; tags: string[] },
+  todo: { id: string; title: string; tags: string[]; body?: string },
   defaultAutonomy: AutonomyLevel,
   projectPath?: string,
 ): PipelineTask[] {
@@ -112,12 +121,21 @@ export function startPipelineTask(
       id: todo.id,
       title: todo.title,
       tags: todo.tags,
+      body: todo.body,
       stage: 'plan',
       autonomy: defaultAutonomy,
       createdAt: Date.now(),
       projectPath,
     },
   ])
+}
+
+/** Record the per-task worktree (set once when the orchestrator is spawned). */
+export function setTaskWorktree(
+  id: string,
+  info: { repoRoot: string; worktreePath: string; worktreeBranch: string },
+): PipelineTask[] {
+  return persist(loadPipeline().map((t) => (t.id === id ? { ...t, ...info } : t)))
 }
 
 export function setPipelineStage(id: string, stage: PipelineStage): PipelineTask[] {
