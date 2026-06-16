@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useStore, completedCutoffMs } from '../../store'
 import { projectColor } from '../../lib/simulation'
+import { Terminal, disposeTerminal } from '../Terminal'
 import type {
   PipelineTask,
   PipelineSession,
@@ -574,7 +575,9 @@ function SessionDrawer({
             </div>
             <div className="flex min-w-0 flex-1 flex-col">
               {selected ? (
-                <SessionContent sess={selected} onSelectChild={setSelectedId} />
+                // Keyed by node id so switching sessions force-remounts SessionContent
+                // (and the live Terminal pane within), firing ephemeral-resume teardown cleanly.
+                <SessionContent key={selected.id} sess={selected} onSelectChild={setSelectedId} />
               ) : (
                 <div className="flex flex-1 items-center justify-center text-[12px] text-zinc-600">Select a session</div>
               )}
@@ -792,7 +795,8 @@ function SessionContent({ sess, onSelectChild }: { sess: PipelineSession; onSele
         <span className="ml-auto text-[9px] text-zinc-600">{tab === 'terminal' ? 'real interactive PTY' : 'curated via emit-milestone + hooks'}</span>
       </div>
 
-      {tab === 'feed' ? (
+      {/* Feed: cheap to mount/unmount on tab toggle. */}
+      {tab === 'feed' && (
         <div ref={termRef} className="min-h-[180px] flex-1 overflow-y-auto rounded-lg border border-zinc-800 bg-black/60 p-3 font-mono text-[11px] leading-relaxed">
           {sess.log.slice(0, visibleLines).map((raw, i) => {
             const entry = normalizeEntry(raw)
@@ -811,8 +815,130 @@ function SessionContent({ sess, onSelectChild }: { sess: PipelineSession; onSele
             <span className="inline-block h-3 w-1.5 animate-pulse bg-zinc-500 align-middle" />
           )}
         </div>
+      )}
+
+      {/* Terminal: stays mounted for the drawer's life (hidden when on feed) so the live
+          xterm/PTY persists across tab toggles. Teardown of an ephemeral resume only fires
+          on unmount (drawer close / node switch via the SessionContent key). */}
+      <SessionTerminalPane sess={sess} active={tab === 'terminal'} />
+    </div>
+  )
+}
+
+/**
+ * Mounts the real interactive <Terminal> for a pipeline session in the drawer.
+ *
+ * Resolves one of three modes (best-effort live resume):
+ *   1. LIVE      — a PTY for this node is still running (worker active). Attach to the
+ *                  shared instance; teardown is a no-op (the worker / focus view owns it).
+ *   2. EPHEMERAL — no live PTY but the node has a claudeSessionId + cwd → `claude --resume`
+ *                  into a fresh PTY we own. Killed + disposed on unmount.
+ *   3. READ-ONLY — worktreeRemoved, no claudeSessionId/cwd, or the resume failed/exited.
+ *                  worktreeRemoved NEVER offers resume.
+ */
+function SessionTerminalPane({ sess, active }: { sess: PipelineSession; active: boolean }): JSX.Element {
+  const [state, setState] = useState<{
+    mode: 'resolving' | 'live' | 'ephemeral' | 'readonly'
+    ptyId: string | null
+  }>({ mode: 'resolving', ptyId: null })
+
+  // Lazy one-way latch: resolution fires only once the Terminal tab is FIRST activated.
+  // Without this, opening the drawer on (or arrow-keying through) resumable nodes would
+  // spawn + kill a real `claude --resume` per node even for feed-only viewing. Once armed
+  // it stays true, so flipping back to the feed never tears down or re-resumes — the pane
+  // persists hidden, exactly as before. (The mid-resume tab-toggle race is already covered
+  // by the `cancelled` flag, so eager resolution bought us nothing.) Node switch remounts
+  // this component via SessionContent's key, which re-latches `armed` off → resume happens
+  // again only when Terminal is opened on the new node.
+  const [armed, setArmed] = useState(active)
+  useEffect(() => {
+    if (active) setArmed(true)
+  }, [active])
+
+  // Resolve + resume once per (open, node) — gated on `armed`. Deps are stable within a mount
+  // (SessionContent is keyed by node id), so this runs once the tab is first opened; cleanup
+  // runs once on unmount.
+  useEffect(() => {
+    // Not yet revealed — don't spawn anything (and never mount xterm into a hidden 0×0 box).
+    if (!armed) return
+    // worktreeRemoved is read-only and must never offer resume.
+    if (sess.worktreeRemoved) {
+      setState({ mode: 'readonly', ptyId: null })
+      return
+    }
+
+    let cancelled = false
+    let owned: string | null = null // the ephemeral PTY we must kill on teardown
+    let unsubExit: (() => void) | null = null
+
+    ;(async () => {
+      try {
+        // 1. LIVE — is a PTY for this node still running? Match by claudeSessionId, fall back to id.
+        const actives = await window.api.listActiveSessions()
+        if (cancelled) return
+        const live = actives.find(
+          (s) => (sess.claudeSessionId && s.claudeSessionId === sess.claudeSessionId) || s.id === sess.id
+        )
+        if (live) {
+          setState({ mode: 'live', ptyId: live.id })
+          return
+        }
+
+        // 2. EPHEMERAL view-resume — needs both a claude session id and a working dir.
+        if (!sess.claudeSessionId || !sess.cwd) {
+          setState({ mode: 'readonly', ptyId: null })
+          return
+        }
+        const fresh = await window.api.resumeSession(sess.claudeSessionId, sess.cwd, false, true)
+        if (cancelled) {
+          // Drawer closed / node switched before resume resolved — kill the orphan PTY.
+          window.api.killSession(fresh.id)
+          disposeTerminal(fresh.id)
+          return
+        }
+        owned = fresh.id
+        // If the resumed process exits (e.g. `claude --resume` failed, session file gone, or
+        // the conversation ended), fall back to read-only rather than showing a dead terminal.
+        unsubExit = window.api.onPtyExit(({ id }) => {
+          if (id !== fresh.id) return
+          disposeTerminal(fresh.id)
+          owned = null // already exiting — nothing left to kill
+          setState({ mode: 'readonly', ptyId: null })
+        })
+        setState({ mode: 'ephemeral', ptyId: fresh.id })
+      } catch {
+        // Resume invoke rejected — fall back to read-only.
+        if (cancelled) return
+        setState({ mode: 'readonly', ptyId: null })
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      unsubExit?.()
+      // Ephemeral teardown ONLY — never kill/dispose a LIVE session (the worker owns it).
+      if (owned) {
+        window.api.killSession(owned)
+        disposeTerminal(owned)
+      }
+    }
+  }, [armed, sess.id, sess.claudeSessionId, sess.cwd, sess.worktreeRemoved])
+
+  const showTerminal = (state.mode === 'live' || state.mode === 'ephemeral') && state.ptyId
+
+  return (
+    <div className="flex min-h-[180px] flex-1 flex-col" style={{ display: active ? 'flex' : 'none' }}>
+      {showTerminal ? (
+        <div className="relative flex-1 overflow-hidden rounded-lg border border-zinc-800 bg-black/60">
+          <Terminal sessionId={state.ptyId!} visible={active} autoFocus={false} />
+        </div>
+      ) : state.mode === 'resolving' ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 bg-black/40 p-3 text-center">
+          <span className="inline-block h-3 w-1.5 animate-pulse bg-zinc-500 align-middle" />
+          <p className="text-[10px] text-zinc-600">Connecting to session…</p>
+        </div>
       ) : sess.worktreeRemoved ? (
-        <div className="flex min-h-[180px] flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 bg-black/40 p-3 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 bg-black/40 p-3 text-center">
           <span className="text-lg text-zinc-700">🔒</span>
           <p className="text-[11px] text-zinc-400">Read-only — worktree removed</p>
           <p className="max-w-xs text-[10px] text-zinc-600">
@@ -820,9 +946,12 @@ function SessionContent({ sess, onSelectChild }: { sess: PipelineSession; onSele
           </p>
         </div>
       ) : (
-        <div className="flex min-h-[180px] flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 bg-black/40 p-3 text-center">
-          <span className="font-mono text-[11px] text-zinc-500">$ claude --resume {sess.claudeSessionId ?? sess.id}</span>
-          <p className="max-w-xs text-[10px] text-zinc-600">Mounts the real <code className="text-zinc-500">&lt;Terminal&gt;</code> for this session — same interactive xterm PTY as the graph view (best-effort resume).</p>
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 bg-black/40 p-3 text-center">
+          <span className="text-lg text-zinc-700">○</span>
+          <p className="text-[11px] text-zinc-400">Live resume unavailable</p>
+          <p className="max-w-xs text-[10px] text-zinc-600">
+            This session can't be resumed{sess.claudeSessionId ? ' right now' : ' (no saved conversation)'}. The milestone feed above is preserved.
+          </p>
         </div>
       )}
     </div>
