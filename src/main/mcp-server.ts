@@ -999,16 +999,17 @@ server.tool(
     status: z.enum(['working', 'idle', 'permission', 'done', 'queued']).optional().describe('Update this session\'s status.'),
     badge: z.string().optional().describe('Short status chip, e.g. "2 issues", "approved", "plan ready".'),
     tone: z.enum(['pass', 'fail', 'warn', 'active', 'neutral']).optional().describe('Color tone for the badge.'),
+    kind: z.enum(['info', 'plan-ready', 'fanout', 'review-verdict', 'blocked', 'done', 'error']).optional().describe('Notification type for feed colouring'),
     fanoutKind: z.string().optional().describe('If you just fanned out, the kind: "research" | "worktrees" | "topics".'),
     sessionId: z.string().optional().describe('Override the target session id (defaults to your own session).'),
   },
-  async ({ taskId, text, status, badge, tone, fanoutKind, sessionId }) => {
+  async ({ taskId, text, status, badge, tone, kind, fanoutKind, sessionId }) => {
     try {
       const sid = sessionId || process.env.APP_SESSION_ID
       if (!sid) {
         return { content: [{ type: 'text', text: 'No session id available (APP_SESSION_ID unset). Pass sessionId explicitly.' }], isError: true }
       }
-      await callHookServer('/pipeline/emit-milestone', { taskId, sessionId: sid, text, status, badge, tone, fanoutKind })
+      await callHookServer('/pipeline/emit-milestone', { taskId, sessionId: sid, text, status, badge, tone, kind, fanoutKind })
       return { content: [{ type: 'text', text: `Milestone emitted.` }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error emitting milestone: ${err instanceof Error ? err.message : String(err)}` }], isError: true }

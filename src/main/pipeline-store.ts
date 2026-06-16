@@ -15,6 +15,16 @@ export type AutonomyLevel = 'manual' | 'gated' | 'auto'
 export type PipelineRole = 'orchestrator' | 'plan' | 'implement' | 'review'
 export type PipelineSessionStatus = 'working' | 'idle' | 'permission' | 'done' | 'queued'
 export type PipelineTone = 'pass' | 'fail' | 'warn' | 'active' | 'neutral'
+export type PipelineKind = 'info' | 'plan-ready' | 'fanout' | 'review-verdict' | 'blocked' | 'done' | 'error'
+
+/** One entry in a session's curated milestone feed. Legacy on-disk entries may
+ *  be bare strings; loadPipeline() migrates those to `{ text }`. */
+export interface FeedEntry {
+  text: string
+  kind?: PipelineKind
+  tone?: PipelineTone
+  ts?: number
+}
 
 /** A node in a task's session tree — orchestrator, a stage run, or a fan-out
  *  child. Populated by real orchestration; undefined until sessions exist. */
@@ -27,7 +37,7 @@ export interface PipelineSession {
   badge?: string
   tone?: PipelineTone
   /** Curated milestone feed (persisted). The raw transcript lives on disk via Claude Code. */
-  log: string[]
+  log: FeedEntry[]
   children?: PipelineSession[]
   fanoutKind?: string
   /** Stable Claude conversation id for best-effort live resume (`claude --resume`). */
@@ -82,11 +92,21 @@ function storePath(): string {
   return join(dir, 'pipeline.json')
 }
 
+/** Coerce legacy string log entries → FeedEntry across a session subtree. */
+function migrateFeed(node?: PipelineSession): void {
+  if (!node) return
+  if (Array.isArray(node.log)) {
+    node.log = node.log.map((e) => (typeof e === 'string' ? { text: e } : e)) as FeedEntry[]
+  }
+  node.children?.forEach(migrateFeed)
+}
+
 export function loadPipeline(): PipelineTask[] {
   if (cache) return cache
   try {
     const parsed: PipelineData = JSON.parse(readFileSync(storePath(), 'utf-8'))
     cache = parsed.tasks || []
+    cache.forEach((t) => migrateFeed(t.orchestrator))
   } catch {
     cache = []
   }
@@ -272,6 +292,7 @@ export function upsertPipelineSession(taskId: string, node: SessionUpsert, paren
 
 export interface MilestonePatch {
   text?: string
+  kind?: PipelineKind
   status?: PipelineSessionStatus
   badge?: string
   tone?: PipelineTone
@@ -296,7 +317,7 @@ export function emitMilestone(taskId: string, sessionId: string, patch: Mileston
         target.children = [...(target.children ?? []), node]
       }
     }
-    if (patch.text) node.log.push(patch.text)
+    if (patch.text) node.log.push({ text: patch.text, kind: patch.kind, tone: patch.tone, ts: Date.now() })
     if (patch.status) node.status = patch.status
     if (patch.badge !== undefined) node.badge = patch.badge
     if (patch.tone) node.tone = patch.tone

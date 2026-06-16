@@ -251,7 +251,7 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
         if (payload.pipelineTaskId) {
           pipelineStore.emitMilestone(payload.pipelineTaskId, id, {
             text: `⚠ ${projectPath} is not a git repo — running without worktree isolation.`,
-            tone: 'warn',
+            tone: 'warn', kind: 'blocked',
           })
         }
       } else {
@@ -265,7 +265,7 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
         } catch (err) {
           pipelineStore.emitMilestone(payload.pipelineTaskId!, id, {
             text: `⚠ Worktree isolation failed (${err instanceof Error ? err.message : String(err)}) — running in the shared project dir.`,
-            tone: 'warn',
+            tone: 'warn', kind: 'blocked',
           })
           cwd = projectPath
         }
@@ -379,7 +379,7 @@ TASK
 PIPELINE: Plan → Implement → Review (review⇄implement loop) → Done.
 
 YOUR TOOLS (session-manager MCP):
-- emit-milestone({ taskId, text, status?, badge?, tone? }) — narrate to the board. Call it at EVERY notable step; the user watches this feed.
+- emit-milestone({ taskId, text, status?, badge?, tone?, kind? }) — narrate to the board. Call it at EVERY notable step; the user watches this feed. Set kind to colour-code the feed: 'plan-ready' | 'fanout' | 'review-verdict' | 'blocked' | 'done' | 'error' | 'info'.
 - spawn-session({ prompt, pipelineTaskId, pipelineRole, pipelineLabel?, fanoutKind?, reportBack }) — spawn a stage session or fan-out worker. ALWAYS pass pipelineTaskId="${task.id}". Children report back to you automatically.
 - pipeline-set-stage({ taskId, stage }) — advance the board (plan|implement|review|done).
 - pipeline-request-approval({ taskId, gate, detail }) — pause for the user. Under autonomy=auto it auto-approves and advances; under gated/manual it returns "pending" and you MUST STOP and wait for an approval message before continuing.
@@ -646,6 +646,7 @@ function handlePipelineMergeWorktree(body: string, res: import('http').ServerRes
           status: 'done',
           badge: 'merged',
           tone: 'pass',
+          kind: 'done',
         })
         scheduleSessionTeardown(sessionId)
         broadcastPipeline()
@@ -656,6 +657,7 @@ function handlePipelineMergeWorktree(body: string, res: import('http').ServerRes
           text: `Merge conflict in: ${result.conflicts.join(', ')} — worktree kept for resolution.`,
           badge: 'conflict',
           tone: 'fail',
+          kind: 'error',
         })
         broadcastPipeline()
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -716,7 +718,7 @@ export async function integrateTaskWorktree(
     if (!result.merged) {
       pipelineStore.emitMilestone(taskId, feedId, {
         text: `⚠ Task branch ${task.worktreeBranch} conflicts with the integration branch (${result.conflicts.join(', ')}). Worktree kept — resolve and re-complete.`,
-        tone: 'fail', badge: 'merge conflict',
+        tone: 'fail', badge: 'merge conflict', kind: 'error',
       })
       broadcastPipeline()
       return { ok: false, conflicts: result.conflicts }
@@ -724,14 +726,14 @@ export async function integrateTaskWorktree(
     gitWorktree.removeWorktree({ repoRoot: task.repoRoot, worktreePath: task.worktreePath, branch: task.worktreeBranch })
     pipelineStore.emitMilestone(taskId, feedId, {
       text: `Merged task branch ${task.worktreeBranch} → integration branch; task worktree removed.`,
-      tone: 'pass', badge: 'integrated',
+      tone: 'pass', badge: 'integrated', kind: 'done',
     })
     broadcastPipeline()
     return { ok: true }
   } catch (err) {
     pipelineStore.emitMilestone(taskId, feedId, {
       text: `⚠ Task integration failed: ${err instanceof Error ? err.message : String(err)}. Worktree kept.`,
-      tone: 'fail',
+      tone: 'fail', kind: 'error',
     })
     broadcastPipeline()
     return { ok: false }

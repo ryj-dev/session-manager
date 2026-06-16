@@ -78,6 +78,16 @@ export type AutonomyLevel = 'manual' | 'gated' | 'auto'
 export type PipelineRole = 'orchestrator' | 'plan' | 'implement' | 'review'
 export type PipelineSessionStatus = 'working' | 'idle' | 'permission' | 'done' | 'queued'
 export type PipelineTone = 'pass' | 'fail' | 'warn' | 'active' | 'neutral'
+export type PipelineKind = 'info' | 'plan-ready' | 'fanout' | 'review-verdict' | 'blocked' | 'done' | 'error'
+
+/** One entry in a session's curated milestone feed. Legacy persisted entries
+ *  may be bare strings; the renderer normalizes those defensively. */
+export interface FeedEntry {
+  text: string
+  kind?: PipelineKind
+  tone?: PipelineTone
+  ts?: number
+}
 
 /** A node in a task's session tree — orchestrator, a stage run, or a fan-out
  *  child. Populated by real orchestration (spawn-session / emit-milestone);
@@ -89,7 +99,7 @@ export interface PipelineSession {
   status: PipelineSessionStatus
   badge?: string
   tone?: PipelineTone
-  log: string[]
+  log: FeedEntry[]
   children?: PipelineSession[]
   fanoutKind?: string
   /** Stable Claude conversation id for best-effort live resume. */
