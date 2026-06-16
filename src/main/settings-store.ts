@@ -51,6 +51,7 @@ export interface AppSettings {
   todosShowCompleted?: boolean
   todosSelectedTags?: string[]
   todosDetailWidth?: number
+  completedFilter?: 'all' | 'day' | 'week' | 'month'
   disabledIntegrations?: DisabledIntegrations
   autoModeForChildSessions: boolean
   autoModeForManualSessions: boolean
@@ -64,6 +65,10 @@ export interface AppSettings {
    *   - 'overlay' : shell attached as a hidden right-edge hover sidebar
    */
   terminalPairingMode: 'off' | 'split' | 'overlay'
+  /** Agentic pipeline (Cmd+L) — persisted board state. Typed loosely here;
+   *  the renderer owns the PipelineTask shape. */
+  pipelineTasks?: unknown[]
+  pipelineDefaultAutonomy?: 'manual' | 'gated' | 'auto'
 }
 
 const defaults: AppSettings = {
@@ -78,6 +83,7 @@ const defaults: AppSettings = {
   todosShowCompleted: false,
   todosSelectedTags: [],
   todosDetailWidth: 460,
+  completedFilter: 'week',
   disabledIntegrations: {},
   autoModeForChildSessions: false,
   autoModeForManualSessions: false,
@@ -85,6 +91,8 @@ const defaults: AppSettings = {
   ambientTodoNudge: false,
   spawnIntoCurrentSplit: false,
   terminalPairingMode: 'off',
+  pipelineTasks: [],
+  pipelineDefaultAutonomy: 'gated',
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {

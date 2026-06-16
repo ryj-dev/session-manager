@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -44,6 +44,8 @@ import { syncBacklinks, getInboundLinks, cleanupRefsBeforeDelete, addToRelatedSe
 import { validateNote, slugify, generateNote, touchModified, appendToSection, replaceSectionContent, prependToSection } from './memory/core'
 import * as notesManager from './notes-manager'
 import type { TodoFilter } from './notes-manager'
+import * as pipelineStore from './pipeline-store'
+import type { PipelineStage, AutonomyLevel } from './pipeline-store'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -471,6 +473,42 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   ipcMain.handle('todos:listTags', () => notesManager.listAllTags())
   ipcMain.handle('todos:projectFromCwd', (_e, cwd: string) => notesManager.projectFromCwd(cwd))
   ipcMain.handle('todos:projectTagFromCwd', (_e, cwd: string) => notesManager.projectTagFromCwd(cwd))
+
+  // Agentic pipeline (Cmd+L). Main owns the state; renderer mirrors it via the
+  // 'pipeline:changed' broadcast. Orchestrator sessions mutate the same store
+  // through the hook-server bridge (added in a later phase).
+  ipcMain.handle('pipeline:list', () => pipelineStore.getPipelineTasks())
+  ipcMain.handle('pipeline:start', (_e, todo: { id: string; title: string; tags: string[] }, defaultAutonomy: AutonomyLevel, projectPath?: string) => {
+    pipelineStore.startPipelineTask(todo, defaultAutonomy, projectPath)
+    // Spawn the real orchestrator session for newly-started tasks.
+    const task = pipelineStore.getPipelineTask(todo.id)
+    if (task && !task.orchestrator) {
+      try { spawnPipelineOrchestrator(task) } catch (err) { console.error('[pipeline] orchestrator spawn failed:', err) }
+    }
+    const tasks = pipelineStore.getPipelineTasks()
+    sendToRenderer('pipeline:changed', tasks)
+    return tasks
+  })
+  ipcMain.handle('pipeline:setStage', (_e, id: string, stage: PipelineStage) => {
+    const tasks = pipelineStore.setPipelineStage(id, stage)
+    sendToRenderer('pipeline:changed', tasks)
+    return tasks
+  })
+  ipcMain.handle('pipeline:setAutonomy', (_e, id: string, level: AutonomyLevel) => {
+    const tasks = pipelineStore.setPipelineAutonomy(id, level)
+    sendToRenderer('pipeline:changed', tasks)
+    return tasks
+  })
+  ipcMain.handle('pipeline:resolveGate', (_e, id: string, approve: boolean) => {
+    const tasks = pipelineStore.resolvePipelineGate(id, approve)
+    sendToRenderer('pipeline:changed', tasks)
+    return tasks
+  })
+  ipcMain.handle('pipeline:remove', (_e, id: string) => {
+    const tasks = pipelineStore.removePipelineTask(id)
+    sendToRenderer('pipeline:changed', tasks)
+    return tasks
+  })
 
   // Send an inter-session message (used by notes dispatch + future hooks)
   ipcMain.handle(
@@ -1009,6 +1047,18 @@ When in doubt, default to \`"true"\` — an unnecessary report is low-cost; a mi
 - \`spawn-agent\` — spawn a specialised agent. Run \`list-agents\` first to see what's available and their tool sets.
 - \`list-sessions\` — all active sessions (IDs, project paths, status, terminal titles). Use before messaging.
 - \`send-message\` — message another session. Delivered immediately if the target is idle, queued if busy. Child sessions can message their parent — the parent ID is available automatically.
+
+### Pipeline orchestration (Cmd+L)
+
+Tools for an orchestrator/worker session to drive a task through the agentic pipeline (Backlog→Plan→Implement→Review→Done). The orchestrator is told its \`taskId\` in its spawn prompt; workers emit milestones against the same \`taskId\`.
+
+| Tool | Purpose |
+|------|---------|
+| \`pipeline-get-task\` | Read a task's full state: stage, autonomy, pending gate, review round, and session tree. Call on resume to recover context |
+| \`pipeline-set-stage\` | Move a task to a new stage (Plan→Implement→Review→Done). Orchestrator-only — how the board advances |
+| \`pipeline-request-approval\` | Pause at a gate for user approval. Auto-approves under \`auto\` autonomy; sets a pending gate under \`gated\`/\`manual\` (stop and wait) |
+| \`emit-milestone\` | Post a one-line milestone to your session's feed (plan ready, fanned out, verdict, blocked, done); drives the card line, badge, and status |
+| \`pipeline-rename-session\` | Rename a node in your task tree (a child or yourself) to a descriptive board label, e.g. "Implement · CSV serializer" |
 <!-- /session-manager-instructions -->
 `
 }

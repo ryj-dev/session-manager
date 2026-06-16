@@ -5,6 +5,7 @@ import { pathToFileURL } from 'url'
 import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions } from './pty-manager'
 import { saveSessions } from './session-store'
+import { getPipelineClaudeSessionIds } from './pipeline-store'
 import { startHookServer, stopHookServer } from './hook-server'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
@@ -38,7 +39,11 @@ function saveAndCleanup(): void {
   if (didSave) return
   didSave = true
 
-  const resumable = getResumableSessions()
+  // Exclude agentic-pipeline sessions — they shouldn't be offered in the generic
+  // restore prompt (which would re-add them as ordinary graph nodes). Pipeline
+  // resume is on-demand via the board, keyed off pipeline.json.
+  const pipelineIds = getPipelineClaudeSessionIds()
+  const resumable = getResumableSessions().filter((s) => !s.claudeSessionId || !pipelineIds.has(s.claudeSessionId))
   console.log('[main] saving resumable sessions:', resumable.length, resumable.map(s => s.claudeSessionId))
   saveSessions(
     resumable.map((s) => ({

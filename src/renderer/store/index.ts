@@ -31,6 +31,7 @@ export interface HotkeyMap {
   toggleNotesProject: string
   toggleNotesGlobal: string
   copyFilePath: string
+  togglePipeline: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -48,9 +49,10 @@ export const defaultHotkeys: HotkeyMap = {
   // Mac: Cmd+Opt+C. Windows: Alt+Shift+C (Alt is the base app modifier on Windows,
   // so 'alt' isn't expressible as an extra; use shift instead).
   copyFilePath: typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac') ? 'alt+c' : 'shift+c',
+  togglePipeline: 'l',
 }
 
-export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | null
+export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | null
 
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
@@ -67,6 +69,69 @@ export interface MessageNotification {
   expanded: boolean
   /** Remaining auto-dismiss ms for 'timed' mode. null = timer not yet started. */
   timerRemainingMs: number | null
+}
+
+// ---- Agentic pipeline (Cmd+L) ----
+
+export type PipelineStage = 'plan' | 'implement' | 'review' | 'done'
+export type AutonomyLevel = 'manual' | 'gated' | 'auto'
+export type PipelineRole = 'orchestrator' | 'plan' | 'implement' | 'review'
+export type PipelineSessionStatus = 'working' | 'idle' | 'permission' | 'done' | 'queued'
+export type PipelineTone = 'pass' | 'fail' | 'warn' | 'active' | 'neutral'
+
+/** A node in a task's session tree — orchestrator, a stage run, or a fan-out
+ *  child. Populated by real orchestration (spawn-session / emit-milestone);
+ *  undefined until a task is actually wired to running sessions. */
+export interface PipelineSession {
+  id: string
+  label: string
+  role: PipelineRole
+  status: PipelineSessionStatus
+  badge?: string
+  tone?: PipelineTone
+  log: string[]
+  children?: PipelineSession[]
+  fanoutKind?: string
+  /** Stable Claude conversation id for best-effort live resume. */
+  claudeSessionId?: string | null
+  /** Working directory the session ran in (for resume). */
+  cwd?: string
+  /** For worktree fan-out workers: the branch they built on. */
+  worktreeBranch?: string
+  /** Worktree merged + removed → node is read-only (no live resume). */
+  worktreeRemoved?: boolean
+}
+
+export interface PipelineTask {
+  /** Equals the backing todo id. */
+  id: string
+  title: string
+  tags: string[]
+  stage: PipelineStage
+  autonomy: AutonomyLevel
+  reviewRound?: number
+  gate?: { label: string; detail: string } | null
+  orchestrator?: PipelineSession
+  createdAt: number
+  /** When the task entered the Done stage (ms). Used by the completed-filter. */
+  completedAt?: number
+}
+
+export const PIPELINE_STAGE_ORDER: PipelineStage[] = ['plan', 'implement', 'review', 'done']
+
+/** Recency window for showing completed todos / pipeline cards (Linear-style). */
+export type CompletedFilter = 'all' | 'day' | 'week' | 'month'
+
+/** Cutoff timestamp (ms) for a completed-filter window; null = show all. Items
+ *  completed at or after the cutoff are shown. */
+export function completedCutoffMs(filter: CompletedFilter, now: number = Date.now()): number | null {
+  const DAY = 86_400_000
+  switch (filter) {
+    case 'day': return now - DAY
+    case 'week': return now - 7 * DAY
+    case 'month': return now - 30 * DAY
+    default: return null
+  }
 }
 
 export interface Session {
@@ -86,6 +151,10 @@ export interface Session {
    *  hover-overlay sidebar. Attached sessions are excluded from the graph and from
    *  graph navigation but still mount as real PTYs. */
   isAttached: boolean
+  /** True for agentic-pipeline sessions (orchestrator + stage/fan-out workers).
+   *  Excluded from the graph view and graph nav — they live in the pipeline
+   *  board (Cmd+L) — but still mount as real PTYs. */
+  isPipeline: boolean
   /** For Claude sessions with `terminalPairingMode === 'overlay'`: the id of the hidden
    *  terminal session attached to this one. Null on attached sessions and on
    *  Claude sessions without an attachment. */
@@ -95,7 +164,7 @@ export interface Session {
 export interface AppState {
   // Sessions
   sessions: Session[]
-  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean }) => void
+  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean }) => void
   removeSession: (id: string) => void
   updateSessionStatus: (id: string, status: SessionStatus) => void
   markSessionSeen: (id: string) => void
@@ -198,6 +267,9 @@ export interface AppState {
   setTodosSearch: (s: string) => void
   todosShowCompleted: boolean
   setTodosShowCompleted: (v: boolean) => void
+  /** Recency window for completed items, shared by Notes (Cmd+N) and Pipeline (Cmd+L). */
+  completedFilter: CompletedFilter
+  setCompletedFilter: (f: CompletedFilter) => void
   todosSelectedId: string | null
   setTodosSelectedId: (id: string | null) => void
   /** Session-project tag auto-applied when the panel is opened from a session (e.g. `project:session-manager`). */
@@ -206,6 +278,25 @@ export interface AppState {
   /** Persisted width (px) of the todo detail pane when a todo is selected. */
   todosDetailWidth: number
   setTodosDetailWidth: (w: number) => void
+
+  // Agentic pipeline (Cmd+L)
+  pipelineTasks: PipelineTask[]
+  pipelineDefaultAutonomy: AutonomyLevel
+  setPipelineDefaultAutonomy: (level: AutonomyLevel) => void
+  /** Replace the mirror from the main-process store (initial load + broadcast). */
+  setPipelineTasks: (tasks: PipelineTask[]) => void
+  /** Board project filter (project basename, or null = all). Set on open from
+   *  the current session's project; user-overridable via the board dropdown. */
+  pipelineProjectFilter: string | null
+  setPipelineProjectFilter: (name: string | null) => void
+  /** Move a todo into the pipeline at the Plan stage (no-op if already present). */
+  startPipelineTask: (todo: { id: string; title: string; tags: string[] }) => void
+  setPipelineStage: (id: string, stage: PipelineStage) => void
+  setPipelineAutonomy: (id: string, level: AutonomyLevel) => void
+  /** Resolve a pending gate: approve advances to the next stage; reject clears it. */
+  resolvePipelineGate: (id: string, approve: boolean) => void
+  /** Remove a task from the pipeline (back to Backlog). */
+  removePipelineTask: (id: string) => void
 
   // Message notifications
   pendingMessages: MessageNotification[]
@@ -224,7 +315,7 @@ function projectNameFromPath(projectPath: string): string {
   return projectPath.split(/[\\/]/).filter(Boolean).pop() || projectPath
 }
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
   // Sessions
   sessions: [],
   addSession: (id, projectPath, claudeSessionId = null, opts) =>
@@ -249,6 +340,7 @@ export const useStore = create<AppState>((set) => ({
             createdAt: Date.now(),
             claudeSessionId,
             isAttached: !!opts?.isAttached,
+            isPipeline: !!opts?.isPipeline,
             attachedTerminalId: null,
           }
         ]
@@ -427,12 +519,43 @@ export const useStore = create<AppState>((set) => ({
   setTodosSearch: (s) => set({ todosSearch: s }),
   todosShowCompleted: false,
   setTodosShowCompleted: (v) => set({ todosShowCompleted: v }),
+  completedFilter: 'week',
+  setCompletedFilter: (f) => set({ completedFilter: f }),
   todosSelectedId: null,
   setTodosSelectedId: (id) => set({ todosSelectedId: id }),
   todosSessionProjectTag: null,
   setTodosSessionProjectTag: (tag) => set({ todosSessionProjectTag: tag }),
   todosDetailWidth: 460,
   setTodosDetailWidth: (w) => set({ todosDetailWidth: Math.max(320, Math.min(1100, Math.round(w))) }),
+
+  // Agentic pipeline. The main process owns the authoritative state
+  // (pipeline-store.ts); these actions write through via IPC and the mirror is
+  // refreshed by the 'pipeline:changed' broadcast (wired in App.tsx).
+  pipelineTasks: [],
+  pipelineDefaultAutonomy: 'gated',
+  setPipelineDefaultAutonomy: (level) => set({ pipelineDefaultAutonomy: level }),
+  setPipelineTasks: (tasks) => set({ pipelineTasks: tasks }),
+  pipelineProjectFilter: null,
+  setPipelineProjectFilter: (name) => set({ pipelineProjectFilter: name }),
+  startPipelineTask: (todo) => {
+    const state = get()
+    // Resolve the project directory the orchestrator should run in, from the
+    // todo's project: tag — prefer an open session for that project, else
+    // baseProjectsDir/<name>. Main falls back to baseProjectsDir/home if unset.
+    const projectTag = todo.tags.find((t) => t.startsWith('project:'))
+    const name = projectTag ? projectTag.slice('project:'.length) : null
+    let projectPath: string | undefined
+    if (name) {
+      const match = state.sessions.find((s) => s.projectName === name)
+      projectPath = match?.projectPath ?? (state.baseProjectsDir ? `${state.baseProjectsDir}/${name}` : undefined)
+    }
+    if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
+    void window.api.pipelineStart(todo, state.pipelineDefaultAutonomy, projectPath)
+  },
+  setPipelineStage: (id, stage) => { void window.api.pipelineSetStage(id, stage) },
+  setPipelineAutonomy: (id, level) => { void window.api.pipelineSetAutonomy(id, level) },
+  resolvePipelineGate: (id, approve) => { void window.api.pipelineResolveGate(id, approve) },
+  removePipelineTask: (id) => { void window.api.pipelineRemove(id) },
 
   // Message notifications
   pendingMessages: [],

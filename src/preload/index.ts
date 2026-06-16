@@ -175,8 +175,8 @@ const api = {
     ipcRenderer.invoke('claude:setStatuslineConfig', elements, customComponents),
 
   // Session spawned externally (via MCP)
-  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null }) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string; claudeSessionId?: string | null }) => callback(data)
+  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean }) => callback(data)
     ipcRenderer.on('session:spawned', handler)
     return (): void => { ipcRenderer.removeListener('session:spawned', handler) }
   },
@@ -248,6 +248,21 @@ const api = {
   todosListTags: (): Promise<Array<{ tag: string; count: number }>> => ipcRenderer.invoke('todos:listTags'),
   todosProjectFromCwd: (cwd: string): Promise<string> => ipcRenderer.invoke('todos:projectFromCwd', cwd),
   todosProjectTagFromCwd: (cwd: string): Promise<string> => ipcRenderer.invoke('todos:projectTagFromCwd', cwd),
+
+  // Agentic pipeline (Cmd+L). Tasks are plain JSON; the renderer casts to its
+  // own PipelineTask type. Mutations return the new list and also broadcast.
+  pipelineList: (): Promise<unknown[]> => ipcRenderer.invoke('pipeline:list'),
+  pipelineStart: (todo: { id: string; title: string; tags: string[] }, defaultAutonomy: string, projectPath?: string): Promise<unknown[]> =>
+    ipcRenderer.invoke('pipeline:start', todo, defaultAutonomy, projectPath),
+  pipelineSetStage: (id: string, stage: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:setStage', id, stage),
+  pipelineSetAutonomy: (id: string, level: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:setAutonomy', id, level),
+  pipelineResolveGate: (id: string, approve: boolean): Promise<unknown[]> => ipcRenderer.invoke('pipeline:resolveGate', id, approve),
+  pipelineRemove: (id: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:remove', id),
+  onPipelineChanged: (callback: (tasks: unknown[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, tasks: unknown[]) => callback(tasks)
+    ipcRenderer.on('pipeline:changed', handler)
+    return (): void => { ipcRenderer.removeListener('pipeline:changed', handler) }
+  },
 
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>

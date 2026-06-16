@@ -13,7 +13,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   toggleNotesProject: 'Notes (project view)',
   toggleNotesGlobal: 'Notes (global todos)',
   openSettings: 'Open settings',
-  copyFilePath: 'Copy file path (in file explorer)'
+  copyFilePath: 'Copy file path (in file explorer)',
+  togglePipeline: 'Toggle agentic pipeline'
 }
 
 /** All recognized modifier tokens in canonical order */

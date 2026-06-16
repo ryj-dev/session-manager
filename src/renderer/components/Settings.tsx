@@ -21,6 +21,10 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setExplorerFollowsProject = useStore((s) => s.setExplorerFollowsProject)
   const colorExplorerByProject = useStore((s) => s.colorExplorerByProject)
   const setColorExplorerByProject = useStore((s) => s.setColorExplorerByProject)
+  const completedFilter = useStore((s) => s.completedFilter)
+  const setCompletedFilter = useStore((s) => s.setCompletedFilter)
+  const pipelineDefaultAutonomy = useStore((s) => s.pipelineDefaultAutonomy)
+  const setPipelineDefaultAutonomy = useStore((s) => s.setPipelineDefaultAutonomy)
   const messagePopup = useStore((s) => s.messagePopup)
   const setMessagePopup = useStore((s) => s.setMessagePopup)
   const messagePopupSeconds = useStore((s) => s.messagePopupSeconds)
@@ -236,6 +240,47 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 Passes <code className="text-zinc-500">--permission-mode auto</code> when resuming sessions saved from a previous app launch
+              </p>
+            </div>
+
+            {/* Completed-item filter */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Completed items</div>
+              <label className="text-xs text-zinc-400 block mb-1.5">
+                Show completed todos &amp; pipeline cards from
+              </label>
+              <select
+                value={completedFilter}
+                onChange={(e) => setCompletedFilter(e.target.value as 'all' | 'day' | 'week' | 'month')}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 appearance-none cursor-pointer"
+              >
+                <option value="day">Past day</option>
+                <option value="week">Past week</option>
+                <option value="month">Past month</option>
+                <option value="all">All time</option>
+              </select>
+              <p className="text-[10px] text-zinc-600 mt-1">
+                Older completed items are archived (kept, not deleted) and hidden from the Notes (⌘N) and Pipeline (⌘L) screens. Open items always show.
+              </p>
+            </div>
+
+            {/* Agentic pipeline */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Agentic pipeline</div>
+              <label className="text-xs text-zinc-400 block mb-1.5">
+                Default autonomy for new tasks
+              </label>
+              <select
+                value={pipelineDefaultAutonomy}
+                onChange={(e) => setPipelineDefaultAutonomy(e.target.value as 'manual' | 'gated' | 'auto')}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 appearance-none cursor-pointer"
+              >
+                <option value="manual">Manual — pause at every hand-off</option>
+                <option value="gated">Gated — pause at key gates</option>
+                <option value="auto">Autonomous — run the whole pipeline</option>
+              </select>
+              <p className="text-[10px] text-zinc-600 mt-1">
+                The orchestrator&apos;s default decision-making freedom. Per-task autonomy can still be changed inside the pipeline (⌘L) when you open a task.
               </p>
             </div>
 

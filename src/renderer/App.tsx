@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, type HotkeyMap } from './store'
+import { useStore, defaultHotkeys, type HotkeyMap, type PipelineTask } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -22,6 +22,7 @@ import { AgentGallery } from './components/AgentGallery'
 import { SkillsGallery } from './components/SkillsGallery'
 import MemoryPanel from './components/memory/MemoryPanel'
 import { NotesPanel } from './components/notes/NotesPanel'
+import { PipelineView } from './components/pipeline/PipelineView'
 import { MessagePopup } from './components/MessagePopup'
 import { AttachedTerminalOverlay, PINNED_WIDTH_PCT } from './components/AttachedTerminalOverlay'
 import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
@@ -162,6 +163,11 @@ export function App(): JSX.Element {
   const setActivePanel = useStore((s) => s.setActivePanel)
   const explorerCurrentPath = useRef<string>('')
 
+  // Agentic pipeline: default autonomy + completed filter are prefs (settings
+  // blob); the task list itself lives in the main-process pipeline store.
+  const pipelineDefaultAutonomy = useStore((s) => s.pipelineDefaultAutonomy)
+  const completedFilter = useStore((s) => s.completedFilter)
+
   // Settings
   const [showSettings, setShowSettings] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
@@ -195,15 +201,29 @@ export function App(): JSX.Element {
       if (typeof settings.todosShowCompleted === 'boolean') useStore.getState().setTodosShowCompleted(settings.todosShowCompleted)
       if (Array.isArray(settings.todosSelectedTags)) useStore.getState().setTodosSelectedTags(settings.todosSelectedTags as string[])
       if (typeof settings.todosDetailWidth === 'number') useStore.getState().setTodosDetailWidth(settings.todosDetailWidth)
+      if (settings.completedFilter === 'all' || settings.completedFilter === 'day' || settings.completedFilter === 'week' || settings.completedFilter === 'month') {
+        useStore.getState().setCompletedFilter(settings.completedFilter)
+      }
+      if (settings.pipelineDefaultAutonomy === 'manual' || settings.pipelineDefaultAutonomy === 'gated' || settings.pipelineDefaultAutonomy === 'auto') {
+        useStore.getState().setPipelineDefaultAutonomy(settings.pipelineDefaultAutonomy)
+      }
       settingsLoadedRef.current = true
     })
+  }, [])
+
+  // Load agentic-pipeline tasks from the main-process store, then mirror every
+  // change broadcast (renderer-driven mutations + future orchestrator writes).
+  useEffect(() => {
+    window.api.pipelineList().then((tasks) => useStore.getState().setPipelineTasks(tasks as PipelineTask[]))
+    const unsub = window.api.onPipelineChanged((tasks) => useStore.getState().setPipelineTasks(tasks as PipelineTask[]))
+    return unsub
   }, [])
 
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -875,6 +895,20 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.togglePipeline) {
+        e.preventDefault()
+        if (activePanel === 'pipeline') { setActivePanel(null); return }
+        // Auto-filter to the current session's project when opened from inside a
+        // session; show all projects when opened from the graph.
+        const store = useStore.getState()
+        const proj = store.viewMode !== 'graph' && store.focusedSessionId
+          ? store.sessions.find((s) => s.id === store.focusedSessionId)?.projectName ?? null
+          : null
+        store.setPipelineProjectFilter(proj)
+        setActivePanel('pipeline')
+        return
+      }
+
       if (key === hotkeys.openSettings) {
         e.preventDefault()
         setShowSettings((prev) => !prev)
@@ -972,8 +1006,8 @@ export function App(): JSX.Element {
 
   // Listen for sessions spawned externally (via MCP)
   useEffect(() => {
-    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId }) => {
-      addSession(id, projectPath, claudeSessionId ?? null)
+    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline }) => {
+      addSession(id, projectPath, claudeSessionId ?? null, { isPipeline: !!isPipeline })
     })
     return unsubscribe
   }, [addSession])
@@ -1118,6 +1152,11 @@ export function App(): JSX.Element {
       <div className="absolute inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
         {sessions
           .filter((s) => {
+            // Pipeline sessions have no graph node, so they don't need a hidden
+            // snapshot terminal — and mounting one per session burns a WebGL
+            // context each, exhausting the GPU's context limit and blacking out
+            // the visible terminal. They mount on demand when viewed in the board.
+            if (s.isPipeline) return false
             if (viewMode === 'focused' && s.id === focusedSessionId) return false
             // Attached overlay terminal of the currently focused Claude session is
             // mounted by AttachedTerminalOverlay itself — exclude it from the
@@ -1314,6 +1353,12 @@ export function App(): JSX.Element {
       {/* Notes panel */}
       <NotesPanel
         visible={activePanel === 'notes'}
+        onClose={() => setActivePanel(null)}
+      />
+
+      {/* Agentic pipeline (Cmd+L) — mockup */}
+      <PipelineView
+        visible={activePanel === 'pipeline'}
         onClose={() => setActivePanel(null)}
       />
 

@@ -5,14 +5,23 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID } from 'crypto'
-import { spawnSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId } from './pty-manager'
+import { spawnSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId, killSession } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
 import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
+import * as pipelineStore from './pipeline-store'
 
 let server: Server | null = null
 let serverPort = 0
+
+/** Broadcast the latest pipeline task list to the renderer mirror. */
+function broadcastPipeline(): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('pipeline:changed', pipelineStore.getPipelineTasks())
+  }
+}
 
 // Track which sessions are idle (at the prompt) — used for GUI status indicators
 const sessionStatus = new Map<string, 'working' | 'idle'>()
@@ -125,6 +134,13 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
           return
         }
 
+        // ── Agentic pipeline endpoints (called by orchestrator/worker sessions) ──
+        if (url.pathname === '/pipeline/get-task') { handlePipelineGetTask(body, res); return }
+        if (url.pathname === '/pipeline/set-stage') { handlePipelineSetStage(body, res); return }
+        if (url.pathname === '/pipeline/emit-milestone') { handlePipelineEmit(body, res); return }
+        if (url.pathname === '/pipeline/request-approval') { handlePipelineApproval(body, res); return }
+        if (url.pathname === '/pipeline/rename-session') { handlePipelineRename(body, res); return }
+
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
           try {
@@ -191,6 +207,14 @@ interface SpawnRequest {
   prompt: string
   projectPath?: string
   allowedTools?: string[]
+  /** Pipeline linkage: register the spawned session into a task's tree. */
+  pipelineTaskId?: string
+  pipelineRole?: 'orchestrator' | 'plan' | 'implement' | 'review'
+  /** Parent node (app session id) to attach under. Usually the spawner. */
+  parentSessionId?: string
+  pipelineLabel?: string
+  fanoutKind?: string
+  worktreeBranch?: string
 }
 
 function handleSpawnRequest(body: string, res: import('http').ServerResponse): void {
@@ -229,10 +253,30 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       attachListenersFn(id, session)
     }
 
-    // Notify the renderer to add this session to the UI
+    // Notify the renderer to add this session to the UI. Pipeline-linked spawns
+    // are flagged so the graph view excludes them (they live in the board).
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) {
-      win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null })
+      win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null, isPipeline: !!payload.pipelineTaskId })
+    }
+
+    // Register into the pipeline tree if this spawn is part of a task.
+    if (payload.pipelineTaskId && payload.pipelineRole) {
+      pipelineStore.upsertPipelineSession(
+        payload.pipelineTaskId,
+        {
+          id,
+          role: payload.pipelineRole,
+          label: payload.pipelineLabel ?? payload.pipelineRole,
+          status: 'working',
+          fanoutKind: payload.fanoutKind,
+          claudeSessionId: session.claudeSessionId ?? null,
+          cwd,
+          worktreeBranch: payload.worktreeBranch,
+        },
+        payload.parentSessionId,
+      )
+      broadcastPipeline()
     }
 
     console.log(`[hook-server] spawned session ${id} in ${cwd}`)
@@ -240,6 +284,200 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     res.end(JSON.stringify({ id, projectPath: cwd }))
   } catch (err) {
     console.error('[hook-server] spawn error:', err)
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+// ── Pipeline orchestrator spawn ─────────────────────────────────────────────
+
+/** Tools the orchestrator is allowed to use. It coordinates only — it cannot
+ *  edit code itself (workers do that), so no Write/Edit/Bash. */
+const ORCHESTRATOR_TOOLS = [
+  'mcp__session-manager__emit-milestone',
+  'mcp__session-manager__spawn-session',
+  'mcp__session-manager__pipeline-set-stage',
+  'mcp__session-manager__pipeline-request-approval',
+  'mcp__session-manager__pipeline-rename-session',
+  'mcp__session-manager__pipeline-get-task',
+  'mcp__session-manager__send-message',
+  'mcp__session-manager__list-sessions',
+  'Read', 'Grep', 'Glob',
+]
+
+function buildOrchestratorPrompt(task: pipelineStore.PipelineTask): string {
+  const tagLine = task.tags.length ? `\n- tags: ${task.tags.join(', ')}` : ''
+  return `You are the ORCHESTRATOR for an agentic-pipeline task in the Session Manager app. You own this task end-to-end and drive it through the pipeline by coordinating SEPARATE Claude sessions — you do not write code yourself.
+
+TASK
+- taskId: ${task.id}
+- title: ${task.title}
+- autonomy: ${task.autonomy}   (manual = pause at every hand-off · gated = pause at gates · auto = run unattended)${tagLine}
+
+PIPELINE: Plan → Implement → Review (review⇄implement loop) → Done.
+
+YOUR TOOLS (session-manager MCP):
+- emit-milestone({ taskId, text, status?, badge?, tone? }) — narrate to the board. Call it at EVERY notable step; the user watches this feed.
+- spawn-session({ prompt, pipelineTaskId, pipelineRole, pipelineLabel?, fanoutKind?, reportBack }) — spawn a stage session or fan-out worker. ALWAYS pass pipelineTaskId="${task.id}". Children report back to you automatically.
+- pipeline-set-stage({ taskId, stage }) — advance the board (plan|implement|review|done).
+- pipeline-request-approval({ taskId, gate, detail }) — pause for the user. Under autonomy=auto it auto-approves and advances; under gated/manual it returns "pending" and you MUST STOP and wait for an approval message before continuing.
+- pipeline-get-task({ taskId }) — re-read full state (use this first if you are resuming).
+
+WORKFLOW
+1. emit-milestone "Task accepted — planning."
+2. Spawn a PLANNER: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"plan", pipelineLabel:"Architect", reportBack:"true", prompt:"<gather context for: ${task.title}, then produce a concrete implementation plan. You MAY fan out research probes via spawn-session with pipelineTaskId='${task.id}', pipelineRole='plan', fanoutKind='research'. Report the final plan back.>" }).
+3. When the planner reports its plan: emit-milestone "Plan ready", then pipeline-request-approval({ gate:"Begin implementation", detail:"<one-line plan summary>" }). If pending → STOP and wait. When approved/auto-approved → continue.
+4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement"); it MAY fan out parallel workers (fanoutKind:"worktrees"). Wait for it to report completion.
+5. pipeline-set-stage "review". Spawn ONE reviewer session per RELEVANT dimension below (pipelineRole:"review", fanoutKind:"topics", pipelineLabel:<dimension>). Give each reviewer a SPECIFIC, contextual prompt scoped to THIS change — name the exact files/areas to inspect and what to check (e.g. "Inspect the auth changes in src/x.ts and verify the new token check can't be bypassed"). Do NOT spawn generic "security reviewer" sessions; write the concern into the prompt. Skip dimensions that don't apply to this change.
+   Review dimensions to consider:
+   - Correctness/logic — does it match the plan; edge cases handled
+   - Bugs/runtime safety — null/undefined, async, error handling, regressions
+   - Security — input validation, authz, secrets, unsafe calls (only if the change touches these)
+   - Architecture/design — fits existing patterns, coupling, abstractions
+   - Tests — coverage present and passing
+   - Performance — only if the change touches hot paths
+   Each reviewer reports a verdict back to you (pass, or changes-requested with specifics). Collect all verdicts and emit-milestone a summary each round. If any request changes, spawn an implementer (pipelineRole:"implement") to fix, then RE-REVIEW — re-run only the dimensions that failed. LOOP until all relevant reviewers pass.
+6. pipeline-request-approval({ gate:"Merge to Done" }). When approved/auto → pipeline-set-stage "done" and emit-milestone "Done."
+
+RULES
+- Pass pipelineTaskId="${task.id}" on every spawn so sessions slot into this task's tree.
+- Give every session you spawn a DESCRIPTIVE pipelineLabel so the user can tell them apart on the board, e.g. "Architect", "Implement · CSV serializer", "Security review · auth token check". You can relabel any child later with pipeline-rename-session({ taskId:"${task.id}", sessionId, label }).
+- Respect autonomy: under manual/gated, request approval at gates and WAIT; under auto, proceed.
+- When a spawned session reports it has FINISHED, mark it done so it can be cleaned up (frees resources): emit-milestone({ taskId:"${task.id}", sessionId:<that session's id>, status:"done", text:"<short>" }). All sessions are torn down automatically when the task reaches Done.
+- You coordinate only — never edit code or run builds yourself; delegate to spawned sessions.
+
+Begin now.`
+}
+
+/** Spawn the orchestrator session for a task and register it as the tree root.
+ *  Called from the renderer's pipeline:start IPC. */
+export function spawnPipelineOrchestrator(task: pipelineStore.PipelineTask): { id: string } {
+  const cwd = task.projectPath || loadSettings().baseProjectsDir || app.getPath('home')
+  const id = randomUUID()
+  const prompt = buildOrchestratorPrompt(task)
+  // Auto permission mode so it can call its (scoped) tools without prompts.
+  const args = ['--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--', prompt]
+  const session = spawnSession(id, cwd, 'claude', args)
+
+  if (attachListenersFn) attachListenersFn(id, session)
+
+  pipelineStore.upsertPipelineSession(task.id, {
+    id,
+    role: 'orchestrator',
+    label: 'Orchestrator',
+    status: 'working',
+    badge: 'starting',
+    tone: 'active',
+    claudeSessionId: session.claudeSessionId ?? null,
+    cwd,
+  })
+
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null, isPipeline: true })
+  }
+  broadcastPipeline()
+
+  console.log(`[hook-server] spawned orchestrator ${id} for task ${task.id} in ${cwd}`)
+  return { id }
+}
+
+// ── Pipeline session teardown ───────────────────────────────────────────────
+// Finished pipeline sessions are killed to free resources (each idle session is
+// a live `claude` process + a WebGL terminal context). Their pointer + milestone
+// feed live on in pipeline.json, and the transcript on disk, so they can be
+// resumed on demand later. A short grace period avoids cutting off a session
+// that just emitted its final milestone.
+
+const teardownTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const TEARDOWN_GRACE_MS = 6000
+
+function scheduleSessionTeardown(appSessionId: string): void {
+  if (teardownTimers.has(appSessionId)) return
+  const timer = setTimeout(() => {
+    teardownTimers.delete(appSessionId)
+    try {
+      killSession(appSessionId)
+      cleanupSession(appSessionId)
+      console.log(`[hook-server] tore down finished pipeline session ${appSessionId}`)
+    } catch (err) {
+      console.error('[hook-server] pipeline teardown failed:', err)
+    }
+  }, TEARDOWN_GRACE_MS)
+  teardownTimers.set(appSessionId, timer)
+}
+
+// ── Pipeline endpoint handlers ──────────────────────────────────────────────
+
+function readJson<T>(body: string): T {
+  return JSON.parse(body) as T
+}
+
+function handlePipelineGetTask(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId } = readJson<{ taskId: string }>(body)
+    const task = pipelineStore.getPipelineTask(taskId)
+    res.writeHead(task ? 200 : 404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(task ?? { error: `Pipeline task ${taskId} not found` }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handlePipelineSetStage(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId, stage } = readJson<{ taskId: string; stage: pipelineStore.PipelineStage }>(body)
+    pipelineStore.setPipelineStage(taskId, stage)
+    broadcastPipeline()
+    // Task complete → tear down every session in its tree (orchestrator + workers).
+    if (stage === 'done') {
+      for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, stage }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handlePipelineEmit(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId, sessionId, ...patch } = readJson<{ taskId: string; sessionId: string } & pipelineStore.MilestonePatch>(body)
+    pipelineStore.emitMilestone(taskId, sessionId, patch)
+    broadcastPipeline()
+    // A finished worker → tear it down (keep its pointer + feed for resume).
+    if (patch.status === 'done') scheduleSessionTeardown(sessionId)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handlePipelineApproval(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId, gate, detail } = readJson<{ taskId: string; gate: string; detail?: string }>(body)
+    const result = pipelineStore.requestApproval(taskId, gate, detail ?? '')
+    broadcastPipeline()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handlePipelineRename(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId, sessionId, label } = readJson<{ taskId: string; sessionId: string; label: string }>(body)
+    pipelineStore.renamePipelineSession(taskId, sessionId, label)
+    broadcastPipeline()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+  } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
   }
@@ -506,7 +744,7 @@ function buildSyncHookResponse(appSessionId: string | null, payload: HookPayload
 
     const nudge = `This project still has ${count} unfinished todo${count === 1 ? '' : 's'} tagged \`${projectTag}\`. `
       + `If you're at a natural stopping point in this reply (and not mid-task on something unrelated), `
-      + `add a soft closing line inviting the user to pick one up — e.g. "by the way, there are still N todos open for this project, want me to list them?". `
+      + `add a soft closing line inviting the user to pick one up — e.g. "by the way, there are still N todos open for this project, want me to list them or send them to the agentic pipeline?". `
       + `Do not pivot, do not list them unprompted, and skip the nudge if it would feel forced.`
 
     return {

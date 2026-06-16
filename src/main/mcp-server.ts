@@ -787,8 +787,13 @@ server.tool(
     projectPath: z.string().optional().describe('Project directory for the new session. Defaults to the current working directory.'),
     allowedTools: z.array(z.string()).optional().describe('Restrict the session to specific tools (e.g. ["Read", "Write", "Edit", "Bash"])'),
     reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): child must report back findings. "done": child sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
+    pipelineTaskId: z.string().optional().describe('Agentic pipeline: link this session into the given task\'s tree. Only set when spawning a pipeline stage/worker.'),
+    pipelineRole: z.enum(['orchestrator', 'plan', 'implement', 'review']).optional().describe('Agentic pipeline: this session\'s role in the task tree. Required with pipelineTaskId.'),
+    pipelineLabel: z.string().optional().describe('Agentic pipeline: short label for the tree node (e.g. "Research · auth flow", "worktree: feat/export-ui").'),
+    fanoutKind: z.string().optional().describe('Agentic pipeline: when this spawn is a parallel child, the kind of fan-out (e.g. "research", "worktrees", "topics").'),
+    worktreeBranch: z.string().optional().describe('Agentic pipeline: for worktree workers, the branch they build on (recorded for resume / read-only-after-merge).'),
   },
-  async ({ prompt, projectPath, allowedTools, reportBack }) => {
+  async ({ prompt, projectPath, allowedTools, reportBack, pipelineTaskId, pipelineRole, pipelineLabel, fanoutKind, worktreeBranch }) => {
     try {
       const parentContext = buildParentContext(reportBack)
       const cwd = projectPath || process.cwd()
@@ -796,6 +801,13 @@ server.tool(
         prompt: prompt + parentContext,
         projectPath: cwd,
         allowedTools,
+        pipelineTaskId,
+        pipelineRole,
+        pipelineLabel,
+        fanoutKind,
+        worktreeBranch,
+        // The spawner becomes the parent node in the tree.
+        parentSessionId: process.env.APP_SESSION_ID || undefined,
       }) as { id: string; projectPath: string }
 
       return {
@@ -932,6 +944,112 @@ server.tool(
         content: [{ type: 'text', text: `Error spawning agent: ${err instanceof Error ? err.message : String(err)}` }],
         isError: true
       }
+    }
+  }
+)
+
+// ─── Agentic pipeline (Cmd+L) ────────────────────────────────────────────────
+//
+// Tools for an orchestrator/worker session to drive its task through the
+// pipeline. The orchestrator is told its taskId in its spawn prompt; workers
+// emit milestones against the same taskId using their own session id.
+
+server.tool(
+  'pipeline-get-task',
+  'Read the current state of an agentic-pipeline task: its stage, autonomy level, pending gate, review round, and the full session tree (orchestrator + stage/fan-out children with their statuses). Call this on resume to recover context, or before deciding the next transition.',
+  {
+    taskId: z.string().describe('The pipeline task id (provided in your orchestrator prompt).'),
+  },
+  async ({ taskId }) => {
+    try {
+      const task = await callHookServer('/pipeline/get-task', { taskId })
+      return { content: [{ type: 'text', text: JSON.stringify(task, null, 2) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error reading task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-set-stage',
+  'Move a pipeline task to a new stage (Backlog→Plan→Implement→Review→Done). Orchestrator-only — this is how the board advances. When autonomy is gated/manual and you are crossing a user gate, call pipeline-request-approval FIRST and wait for approval instead of forcing the move here.',
+  {
+    taskId: z.string().describe('The pipeline task id.'),
+    stage: z.enum(['plan', 'implement', 'review', 'done']).describe('Target stage.'),
+  },
+  async ({ taskId, stage }) => {
+    try {
+      await callHookServer('/pipeline/set-stage', { taskId, stage })
+      return { content: [{ type: 'text', text: `Task ${taskId} moved to ${stage}.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error setting stage: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'emit-milestone',
+  'Emit a notable milestone to your session\'s feed in the pipeline UI. Use this for anything the user should see at a glance (plan ready, fanned out, review verdict, blocked, done) — it drives the card line, badges, and status. Far better than relying on raw terminal output. Defaults the session to you (the caller).',
+  {
+    taskId: z.string().describe('The pipeline task id this session belongs to.'),
+    text: z.string().describe('One-line, human-readable milestone for the feed.'),
+    status: z.enum(['working', 'idle', 'permission', 'done', 'queued']).optional().describe('Update this session\'s status.'),
+    badge: z.string().optional().describe('Short status chip, e.g. "2 issues", "approved", "plan ready".'),
+    tone: z.enum(['pass', 'fail', 'warn', 'active', 'neutral']).optional().describe('Color tone for the badge.'),
+    fanoutKind: z.string().optional().describe('If you just fanned out, the kind: "research" | "worktrees" | "topics".'),
+    sessionId: z.string().optional().describe('Override the target session id (defaults to your own session).'),
+  },
+  async ({ taskId, text, status, badge, tone, fanoutKind, sessionId }) => {
+    try {
+      const sid = sessionId || process.env.APP_SESSION_ID
+      if (!sid) {
+        return { content: [{ type: 'text', text: 'No session id available (APP_SESSION_ID unset). Pass sessionId explicitly.' }], isError: true }
+      }
+      await callHookServer('/pipeline/emit-milestone', { taskId, sessionId: sid, text, status, badge, tone, fanoutKind })
+      return { content: [{ type: 'text', text: `Milestone emitted.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error emitting milestone: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-rename-session',
+  'Rename a session in your pipeline task tree (one of your children, or yourself) to a descriptive label shown on the board — e.g. "Security review · auth token check", "Implement · CSV serializer". Use the session id returned by spawn-session.',
+  {
+    taskId: z.string().describe('The pipeline task id.'),
+    sessionId: z.string().describe('The app session id of the node to rename (from spawn-session, or your own APP_SESSION_ID).'),
+    label: z.string().describe('The new label.'),
+  },
+  async ({ taskId, sessionId, label }) => {
+    try {
+      await callHookServer('/pipeline/rename-session', { taskId, sessionId, label })
+      return { content: [{ type: 'text', text: `Renamed ${sessionId} to "${label}".` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error renaming session: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-request-approval',
+  'Pause the task at a gate and ask the user to approve advancing. Under "auto" autonomy this auto-approves and advances immediately; under "gated"/"manual" it sets a pending gate the user resolves in the UI, and you should stop and wait for a message before proceeding. Returns the decision.',
+  {
+    taskId: z.string().describe('The pipeline task id.'),
+    gate: z.string().describe('Short label for what you want to do, e.g. "Begin implementation", "Merge to Done".'),
+    detail: z.string().optional().describe('Context shown in the approval banner (e.g. "Plan ready · 3 steps · ~2 files").'),
+  },
+  async ({ taskId, gate, detail }) => {
+    try {
+      const result = await callHookServer('/pipeline/request-approval', { taskId, gate, detail }) as { decision: string; stage?: string }
+      const msg = result.decision === 'auto-approved'
+        ? `Auto-approved (autonomy=auto). Task advanced to ${result.stage}. Continue.`
+        : result.decision === 'pending'
+          ? `Gate "${gate}" is pending user approval. STOP and wait for an approval message before continuing.`
+          : `Task not found.`
+      return { content: [{ type: 'text', text: msg }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error requesting approval: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )

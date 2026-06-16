@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
-import { useStore } from '../../store'
+import { useStore, completedCutoffMs } from '../../store'
 import { NotesSidebar } from './NotesSidebar'
 import { TodoList } from './TodoList'
 import { TodoDetail } from './TodoDetail'
@@ -21,6 +21,7 @@ export function NotesPanel({ visible, onClose }: Props): JSX.Element | null {
   const sessions = useStore((s) => s.sessions)
   const detailWidth = useStore((s) => s.todosDetailWidth)
   const setDetailWidth = useStore((s) => s.setTodosDetailWidth)
+  const completedFilter = useStore((s) => s.completedFilter)
 
   // Project tags from currently-active sessions (so projects with no todos yet still appear in pickers).
   const activeProjectTags = useMemo(() => {
@@ -44,13 +45,15 @@ export function NotesPanel({ visible, onClose }: Props): JSX.Element | null {
       window.api.todosList(),
       window.api.todosListTags(),
     ])
+    const cutoff = completedCutoffMs(completedFilter)
+    const doneVisible = (t: TodoSummary): boolean => t.done && (cutoff == null || Date.parse(t.updated) >= cutoff)
     setTotals({
       all: all.length,
       open: all.filter((t) => !t.done).length,
-      done: all.filter((t) => t.done).length,
+      done: all.filter(doneVisible).length,
     })
     setTags(tagList)
-  }, [])
+  }, [completedFilter])
 
   // Load filtered list for the main view.
   const refreshFiltered = useCallback(async () => {
@@ -59,8 +62,10 @@ export function NotesPanel({ visible, onClose }: Props): JSX.Element | null {
     if (!showCompleted) filter.done = false
     if (search.trim()) filter.search = search.trim()
     const list = await window.api.todosList(filter)
-    setTodos(list)
-  }, [selectedTags, showCompleted, search])
+    // Apply the recency window to completed items (open items always show).
+    const cutoff = completedCutoffMs(completedFilter)
+    setTodos(cutoff == null ? list : list.filter((t) => !t.done || Date.parse(t.updated) >= cutoff))
+  }, [selectedTags, showCompleted, search, completedFilter])
 
   // Load the selected todo's full body.
   const refreshOpenTodo = useCallback(async () => {

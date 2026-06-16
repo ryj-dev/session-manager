@@ -211,7 +211,7 @@ export function useSimulation(width: number, height: number): SimulationResult {
   // that calls .filter() returns a new array each render and triggers an infinite
   // Zustand re-render loop (Object.is on the array never matches).
   const allSessions = useStore((s) => s.sessions)
-  const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached), [allSessions])
+  const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached && !x.isPipeline), [allSessions])
   const splitGroups = useStore((s) => s.splitGroups)
   const hubSimRef = useRef<Simulation<HubNode, never> | null>(null)
   const hubNodesRef = useRef<HubNode[]>([])

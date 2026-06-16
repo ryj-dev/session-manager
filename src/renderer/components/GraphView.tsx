@@ -67,7 +67,7 @@ export function GraphView(): JSX.Element {
   // the reference is stable: a selector that calls .filter() returns a new
   // array each render and triggers an infinite Zustand re-render loop.
   const allSessions = useStore((s) => s.sessions)
-  const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached), [allSessions])
+  const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached && !x.isPipeline), [allSessions])
   const setViewMode = useStore((s) => s.setViewMode)
   const setFocusedSessionId = useStore((s) => s.setFocusedSessionId)
   const selectedIndex = useStore((s) => s.selectedSessionIndex)
