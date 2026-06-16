@@ -128,13 +128,16 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Resume a saved claude session
   ipcMain.handle(
     'pty:resume',
-    (event, { claudeSessionId, projectPath, autoMode }: { claudeSessionId: string; projectPath: string; autoMode?: boolean }) => {
+    (event, { claudeSessionId, projectPath, autoMode, ephemeral }: { claudeSessionId: string; projectPath: string; autoMode?: boolean; ephemeral?: boolean }) => {
       const id = randomUUID()
       const resumeArgs = ['--resume', claudeSessionId]
       const finalArgs = autoMode ? ['--permission-mode', 'auto', ...resumeArgs] : resumeArgs
       const session = spawnSession(id, projectPath, 'claude', finalArgs)
       // Pre-set the claude session ID since we already know it
       session.claudeSessionId = claudeSessionId
+      // Best-effort view-resume (pipeline drawer): never persist this PTY on quit —
+      // the renderer kills it on unmount.
+      session.ephemeral = ephemeral === true
       attachSessionListeners(id, session)
       return { id, projectPath, claudeSessionId }
     }

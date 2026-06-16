@@ -62,6 +62,9 @@ export interface PtySession {
   claudeSessionId: string | null
   hasActivity: boolean // true once user has sent input — empty sessions can't be resumed
   terminalTitle: string | null
+  /** Best-effort view-resume (e.g. pipeline drawer). Never persisted on quit — the
+   *  renderer owns its lifecycle and kills it on unmount. */
+  ephemeral?: boolean
 }
 
 const sessions = new Map<string, PtySession>()
@@ -201,7 +204,8 @@ export function getResumableSessions(): Array<{
   for (const session of sessions.values()) {
     // Save sessions that have had real activity (user sent input).
     // hasActivity is the reliable signal — terminal title may stay as the default on Windows.
-    if (session.claudeSessionId && session.hasActivity) {
+    // Ephemeral view-resumes are excluded: the renderer owns them and kills them on unmount.
+    if (session.claudeSessionId && session.hasActivity && !session.ephemeral) {
       resumable.push({
         id: session.id,
         projectPath: session.projectPath,

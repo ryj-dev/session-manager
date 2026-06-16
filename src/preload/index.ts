@@ -31,8 +31,8 @@ const api = {
   spawnSession: (cwd: string, command?: string, args?: string[], allowedTools?: string[], autoMode?: boolean): Promise<PtySpawnResult> =>
     ipcRenderer.invoke('pty:spawn', { cwd, command, args, allowedTools, autoMode }),
 
-  resumeSession: (claudeSessionId: string, projectPath: string, autoMode?: boolean): Promise<PtySpawnResult> =>
-    ipcRenderer.invoke('pty:resume', { claudeSessionId, projectPath, autoMode }),
+  resumeSession: (claudeSessionId: string, projectPath: string, autoMode?: boolean, ephemeral?: boolean): Promise<PtySpawnResult> =>
+    ipcRenderer.invoke('pty:resume', { claudeSessionId, projectPath, autoMode, ephemeral }),
 
   writeSession: (id: string, data: string): void =>
     ipcRenderer.send('pty:write', { id, data }),
