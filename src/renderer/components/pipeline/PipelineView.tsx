@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useStore, completedCutoffMs } from '../../store'
 import { projectColor } from '../../lib/simulation'
 import type {
@@ -150,6 +152,10 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
 
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [open, setOpen] = useState<{ cardId: string; sessionId: string | null } | null>(null)
+  // Read-only detail panel for a clicked Backlog card. Backlog cards carry only
+  // {id, title, tags}; the body is fetched lazily via todosRead on click.
+  const [backlogDetail, setBacklogDetail] = useState<{ id: string; title: string; body: string; done: boolean; tags: string[] } | null>(null)
+  const [backlogLoadingId, setBacklogLoadingId] = useState<string | null>(null)
   // True while the ProjectPicker dropdown is open. Checked in the global Escape
   // handler so it never closes the drawer/view while the popover owns Escape —
   // robust regardless of window-listener registration order.
@@ -210,6 +216,19 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     if (target === 'done') completeTodo(card.id)
   }, [removeTask, startTask, setStage, completeTodo])
 
+  // Open the read-only detail panel for a Backlog card. Show a shell immediately
+  // (title + tags are already known) then fetch the body; a race guard ignores a
+  // stale response if the user switched cards before it resolved.
+  const openBacklogDetail = useCallback(async (card: BoardCard) => {
+    setBacklogLoadingId(card.id)
+    setBacklogDetail({ id: card.id, title: card.title, body: '', done: false, tags: card.tags })
+    try {
+      const full = await window.api.todosRead(card.id)
+      setBacklogDetail((cur) => (cur && cur.id === card.id ? full : cur))
+    } catch { /* keep the shell we already rendered */ }
+    finally { setBacklogLoadingId((id) => (id === card.id ? null : id)) }
+  }, [])
+
   useEffect(() => {
     if (!visible) return
     const handler = (e: KeyboardEvent): void => {
@@ -220,13 +239,14 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
         // ahead of us. Either way, leave the drawer/view alone here.
         if (popoverOpenRef.current || e.defaultPrevented) return
         e.stopPropagation()
+        if (backlogDetail) { setBacklogDetail(null); return }
         if (open) setOpen(null)
         else onClose()
       }
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [visible, open, onClose])
+  }, [visible, open, onClose, backlogDetail])
 
   const toggleExpand = useCallback((id: string) => {
     setExpandedIds((prev) => {
@@ -279,7 +299,7 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
                       defaultAutonomy={defaultAutonomy}
                       expanded={expandedIds.has(card.id)}
                       onToggleExpand={() => toggleExpand(card.id)}
-                      onOpen={(sessionId) => { if (card.stage !== 'backlog') setOpen({ cardId: card.id, sessionId }) }}
+                      onOpen={(sessionId) => { if (card.stage === 'backlog') openBacklogDetail(card); else setOpen({ cardId: card.id, sessionId }) }}
                       onStart={() => startTask({ id: card.id, title: card.title, tags: card.tags })}
                       onDragStart={() => setDragCard(card)}
                       onDragEnd={() => { setDragCard(null); setDragOver(null) }}
@@ -308,6 +328,17 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
             onApprove={() => { const n = nextStage(openTask.stage); resolveGate(openTask.id, true); if (n === 'done') completeTodo(openTask.id) }}
             onReject={() => resolveGate(openTask.id, false)}
             onAdvance={() => { const n = nextStage(openTask.stage); setStage(openTask.id, n); if (n === 'done') completeTodo(openTask.id) }}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {backlogDetail && (
+          <BacklogDetailDrawer
+            key={backlogDetail.id}
+            todo={backlogDetail}
+            loading={backlogLoadingId === backlogDetail.id}
+            onClose={() => setBacklogDetail(null)}
           />
         )}
       </AnimatePresence>
@@ -583,6 +614,100 @@ function SessionDrawer({
         </div>
       </motion.aside>
     </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Backlog detail drawer (read-only: a clicked Backlog todo)
+// ---------------------------------------------------------------------------
+
+function BacklogDetailDrawer({
+  todo, loading, onClose,
+}: {
+  todo: { id: string; title: string; body: string; done: boolean; tags: string[] }
+  loading: boolean
+  onClose: () => void
+}): JSX.Element {
+  const hasBody = todo.body.trim().length > 0
+  return (
+    <>
+      <motion.div
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]"
+      />
+      <motion.aside
+        initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }}
+        transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+        className="fixed right-0 top-0 z-40 flex h-full w-[440px] max-w-[90vw] flex-col border-l border-zinc-800 bg-zinc-950"
+      >
+        {/* Header */}
+        <div className="flex items-start gap-3 border-b border-zinc-800 px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${ACCENT.zinc.chipBg} ${ACCENT.zinc.text}`}>Backlog</span>
+            <h2 className="mt-1.5 line-clamp-3 text-sm font-medium text-zinc-100">{todo.title}</h2>
+          </div>
+          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
+        </div>
+
+        {/* Meta: status + tags */}
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-zinc-800 px-4 py-2.5">
+          <span className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">
+            <span className={`h-1.5 w-1.5 rounded-full ${todo.done ? 'bg-green-400' : 'bg-zinc-500'}`} />
+            {todo.done ? 'Completed' : 'Open'}
+          </span>
+          {todo.tags.map((t) => (
+            <span key={t} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">{t.replace(/^project:/, '')}</span>
+          ))}
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          {loading
+            ? <p className="text-[12px] text-zinc-600">Loading…</p>
+            : hasBody
+              ? <MarkdownBody content={todo.body} />
+              : <p className="text-[12px] italic text-zinc-600">No description.</p>}
+        </div>
+      </motion.aside>
+    </>
+  )
+}
+
+/**
+ * Self-contained markdown renderer for the backlog body. Mirrors the inline-style
+ * component map from memory/NoteViewer.tsx — the app has no @tailwindcss/typography
+ * plugin, so the `prose` classes are unavailable and styles are applied inline.
+ */
+function MarkdownBody({ content }: { content: string }): JSX.Element {
+  return (
+    <div className="text-[12px] leading-relaxed text-zinc-300">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer" style={{ color: '#6cf' }}>{children}</a>,
+          h1: ({ children }) => <h1 style={{ fontSize: 18, fontWeight: 600, color: '#e0e0e0', marginBottom: 8 }}>{children}</h1>,
+          h2: ({ children }) => <h2 style={{ fontSize: 15, fontWeight: 600, color: '#c0c8d0', marginTop: 18, marginBottom: 6, borderBottom: '1px solid #1e2530', paddingBottom: 4 }}>{children}</h2>,
+          h3: ({ children }) => <h3 style={{ fontSize: 13, fontWeight: 600, color: '#aab8c0', marginTop: 14, marginBottom: 4 }}>{children}</h3>,
+          p: ({ children }) => <p style={{ marginBottom: 10 }}>{children}</p>,
+          ul: ({ children }) => <ul style={{ paddingLeft: 18, marginBottom: 10, listStyle: 'disc' }}>{children}</ul>,
+          ol: ({ children }) => <ol style={{ paddingLeft: 18, marginBottom: 10, listStyle: 'decimal' }}>{children}</ol>,
+          li: ({ children }) => <li style={{ marginBottom: 3 }}>{children}</li>,
+          code: ({ children, className }) => {
+            if (className) {
+              return <code style={{ display: 'block', background: '#111418', padding: 10, borderRadius: 4, fontSize: 11, fontFamily: 'ui-monospace, monospace', overflowX: 'auto', marginBottom: 10 }}>{children}</code>
+            }
+            return <code style={{ background: '#1a2030', padding: '1px 5px', borderRadius: 3, fontSize: 12, fontFamily: 'ui-monospace, monospace' }}>{children}</code>
+          },
+          table: ({ children }) => <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 10, fontSize: 12 }}>{children}</table>,
+          th: ({ children }) => <th style={{ textAlign: 'left', padding: '5px 8px', borderBottom: '1px solid #2a3545', color: '#aab', fontWeight: 600, fontSize: 11 }}>{children}</th>,
+          td: ({ children }) => <td style={{ padding: '4px 8px', borderBottom: '1px solid #1a1f28' }}>{children}</td>,
+          blockquote: ({ children }) => <blockquote style={{ borderLeft: '3px solid #2a3545', paddingLeft: 14, color: '#889', marginBottom: 10 }}>{children}</blockquote>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
   )
 }
 
