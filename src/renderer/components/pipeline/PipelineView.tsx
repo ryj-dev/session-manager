@@ -642,6 +642,14 @@ function SessionContent({ sess, onSelectChild }: { sess: PipelineSession; onSele
                   <span className="truncate text-[11px] font-medium text-zinc-100">{child.label}</span>
                   {child.badge && <span className={`ml-auto shrink-0 rounded px-1 text-[9px] ${TONE_CHIP[child.tone ?? 'neutral']}`}>{child.badge}</span>}
                 </div>
+                {child.worktreeBranch && (
+                  <span
+                    className={`mt-1.5 inline-flex max-w-full items-center gap-1 truncate rounded px-1 text-[9px] ${child.worktreeRemoved ? 'bg-zinc-800 text-zinc-500' : 'bg-violet-500/15 text-violet-300'}`}
+                    title={child.worktreeRemoved ? 'Merged — worktree removed (read-only)' : `Isolated worktree on ${child.worktreeBranch}`}
+                  >
+                    {child.worktreeRemoved ? '🔒' : '⑂'} <span className="truncate">{child.worktreeBranch}</span>
+                  </span>
+                )}
                 <p className="mt-1.5 line-clamp-2 font-mono text-[10px] text-zinc-500">{child.log[child.log.length - 1]}</p>
                 <span className="mt-1.5 inline-block text-[10px] text-zinc-600">View session →</span>
               </button>

@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -505,6 +505,8 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return tasks
   })
   ipcMain.handle('pipeline:remove', (_e, id: string) => {
+    // Clean up any leftover isolated worktrees before dropping the task.
+    try { cleanupTaskWorktrees(id) } catch (err) { console.error('[pipeline] worktree cleanup on remove failed:', err) }
     const tasks = pipelineStore.removePipelineTask(id)
     sendToRenderer('pipeline:changed', tasks)
     return tasks
@@ -1059,6 +1061,7 @@ Tools for an orchestrator/worker session to drive a task through the agentic pip
 | \`pipeline-request-approval\` | Pause at a gate for user approval. Auto-approves under \`auto\` autonomy; sets a pending gate under \`gated\`/\`manual\` (stop and wait) |
 | \`emit-milestone\` | Post a one-line milestone to your session's feed (plan ready, fanned out, verdict, blocked, done); drives the card line, badge, and status |
 | \`pipeline-rename-session\` | Rename a node in your task tree (a child or yourself) to a descriptive board label, e.g. "Implement · CSV serializer" |
+| \`merge-worktree\` | Merge a finished isolated-worktree worker's branch into the integration branch, remove its worktree, and mark the node read-only; conflicts keep the worktree for a fix worker |
 <!-- /session-manager-instructions -->
 `
 }

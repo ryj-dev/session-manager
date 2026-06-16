@@ -36,6 +36,8 @@ export interface PipelineSession {
   cwd?: string
   /** For worktree fan-out workers: the branch they built on. */
   worktreeBranch?: string
+  /** Filesystem path of the worker's isolated worktree (for merge/cleanup). */
+  worktreePath?: string
   /** Set once the worktree has been merged + removed → node is read-only (Option B). */
   worktreeRemoved?: boolean
 }
@@ -176,6 +178,20 @@ export function getPipelineSessionIds(taskId: string): string[] {
   return ids
 }
 
+/** Live worktree-backed nodes in a task's tree (have a worktreePath and haven't
+ *  been merged/removed yet). Used to clean up crashed/abandoned workers when a
+ *  task is completed or removed. */
+export function getWorktreeNodes(taskId: string): PipelineSession[] {
+  const out: PipelineSession[] = []
+  const walk = (n?: PipelineSession): void => {
+    if (!n) return
+    if (n.worktreePath && !n.worktreeRemoved) out.push(n)
+    n.children?.forEach(walk)
+  }
+  walk(getPipelineTask(taskId)?.orchestrator)
+  return out
+}
+
 // ── Orchestration mutators (driven by sessions via the hook-server bridge) ──
 
 /** Recursive lookup of a node by app session id within a task's tree. */
@@ -212,6 +228,7 @@ export interface SessionUpsert {
   claudeSessionId?: string | null
   cwd?: string
   worktreeBranch?: string
+  worktreePath?: string
 }
 
 /** Insert or update a node in a task's session tree. The first node registered

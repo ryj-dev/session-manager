@@ -98,6 +98,8 @@ export interface PipelineSession {
   cwd?: string
   /** For worktree fan-out workers: the branch they built on. */
   worktreeBranch?: string
+  /** Filesystem path of the worker's isolated worktree. */
+  worktreePath?: string
   /** Worktree merged + removed → node is read-only (no live resume). */
   worktreeRemoved?: boolean
 }

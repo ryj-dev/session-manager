@@ -118,7 +118,8 @@ Not all sections are required. Each note type has recommended sections.
 | delete-memory | Delete a memory note (cleans up backlinks automatically) |
 | add-tags / remove-tags | Manage tags on notes |
 | repair-related | Rebuild ## Related from actual wikilinks (for fixing broken backlinks) |
-| spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager) |
+| spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager). Pass isolate:true + worktreeBranch for an isolated git worktree worker |
+| merge-worktree | Merge a finished worktree worker's branch back into the integration branch, remove its worktree, and mark the node read-only (pipeline) |
 | spawn-agent | Spawn a specialised agent (researcher, debugger, etc.) in a new session with a task |
 | list-agents | List available specialised agents and their capabilities |
 | list-sessions | List all active sessions with IDs, status, and project paths |
@@ -792,8 +793,9 @@ server.tool(
     pipelineLabel: z.string().optional().describe('Agentic pipeline: short label for the tree node (e.g. "Research · auth flow", "worktree: feat/export-ui").'),
     fanoutKind: z.string().optional().describe('Agentic pipeline: when this spawn is a parallel child, the kind of fan-out (e.g. "research", "worktrees", "topics").'),
     worktreeBranch: z.string().optional().describe('Agentic pipeline: for worktree workers, the branch they build on (recorded for resume / read-only-after-merge).'),
+    isolate: z.boolean().optional().describe('Agentic pipeline: create an isolated git worktree+branch for this worker so parallel workers cannot clobber each other. Requires worktreeBranch and a git projectPath; falls back to the shared dir (with a warning) for non-git projects.'),
   },
-  async ({ prompt, projectPath, allowedTools, reportBack, pipelineTaskId, pipelineRole, pipelineLabel, fanoutKind, worktreeBranch }) => {
+  async ({ prompt, projectPath, allowedTools, reportBack, pipelineTaskId, pipelineRole, pipelineLabel, fanoutKind, worktreeBranch, isolate }) => {
     try {
       const parentContext = buildParentContext(reportBack)
       const cwd = projectPath || process.cwd()
@@ -806,6 +808,7 @@ server.tool(
         pipelineLabel,
         fanoutKind,
         worktreeBranch,
+        isolate,
         // The spawner becomes the parent node in the tree.
         parentSessionId: process.env.APP_SESSION_ID || undefined,
       }) as { id: string; projectPath: string }
@@ -1050,6 +1053,32 @@ server.tool(
       return { content: [{ type: 'text', text: msg }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error requesting approval: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'merge-worktree',
+  'Merge a finished worktree worker\'s branch back into the integration branch, then remove its worktree and mark its node read-only. Call this when a worker spawned with isolate:true reports it has FINISHED. On success the worker node becomes read-only (its session is torn down). On a merge conflict the worktree + session are KEPT so a fix worker can resolve and you can retry. Orchestrator-only.',
+  {
+    taskId: z.string().describe('The pipeline task id.'),
+    sessionId: z.string().describe('The app session id of the worktree worker to merge (from spawn-session).'),
+  },
+  async ({ taskId, sessionId }) => {
+    try {
+      const result = await callHookServer('/pipeline/merge-worktree', { taskId, sessionId }) as
+        { merged: boolean; branch?: string; conflicts?: string[] }
+      if (result.merged) {
+        return { content: [{ type: 'text', text: `Merged ${result.branch ?? 'branch'}, worktree removed, node read-only.` }] }
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: `MERGE CONFLICT in: ${(result.conflicts ?? []).join(', ') || '(unknown files)'}. Worktree kept — resolve in the worker's worktree and retry merge-worktree, or spawn a fix worker.`,
+        }],
+      }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error merging worktree: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )

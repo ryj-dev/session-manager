@@ -12,6 +12,7 @@
     "isolatedModules": true
   },
   "include": ["src"],
+  "exclude": ["**/*.test.ts"],
   "references": [
     { "path": "./tsconfig.node.json" }
   ]

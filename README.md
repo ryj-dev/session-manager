@@ -7,6 +7,7 @@ A desktop app for managing many [Claude Code](https://claude.com/claude-code) se
 - **macOS (Apple Silicon)** for the prebuilt release. Intel macs work from source. **Windows is supported but rough around the edges** — you can build and run it from source today (the main loop, terminals, hooks, and MCP all work), but expect some bugs: hotkeys may not register correctly, a few path/keybinding assumptions are Mac-first, and some integrations haven't been polished for Windows yet. Fixes are welcome, and broader Windows support is on the roadmap.
 - **Claude Code, recent version.** Session Manager relies on Claude Code's `monitor` feature for live status, which landed around `2.1.113`. To be safe, run a current build — confirmed stable on `2.1.140` and newer (latest at time of writing: `2.1.163`). Check with `claude --version` and update via `npm i -g @anthropic-ai/claude-code` (or however you installed it) if you're behind.
 - **Node 20+** if running from source.
+- **git ≥ 2.5** for the agentic pipeline's worktree-based parallel fan-out (the version that introduced `git worktree`). Any modern git works. Tasks in non-git project directories still run — they just fall back to the shared working tree without worktree isolation.
 
 ## Running it
 

@@ -11,6 +11,7 @@ import { atomicWriteSync } from './atomic-write'
 import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
+import * as gitWorktree from './git-worktree'
 
 let server: Server | null = null
 let serverPort = 0
@@ -140,6 +141,7 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/pipeline/emit-milestone') { handlePipelineEmit(body, res); return }
         if (url.pathname === '/pipeline/request-approval') { handlePipelineApproval(body, res); return }
         if (url.pathname === '/pipeline/rename-session') { handlePipelineRename(body, res); return }
+        if (url.pathname === '/pipeline/merge-worktree') { handlePipelineMergeWorktree(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -215,6 +217,9 @@ interface SpawnRequest {
   pipelineLabel?: string
   fanoutKind?: string
   worktreeBranch?: string
+  /** Create an isolated git worktree + branch for this worker. Implied when
+   *  fanoutKind==='worktrees'. Requires worktreeBranch + a git projectPath. */
+  isolate?: boolean
 }
 
 function handleSpawnRequest(body: string, res: import('http').ServerResponse): void {
@@ -226,8 +231,46 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       return
     }
 
-    const cwd = payload.projectPath || process.cwd()
+    const projectPath = payload.projectPath || process.cwd()
     const id = randomUUID()
+
+    // ── Worktree isolation ──────────────────────────────────────────────────
+    // If requested (explicit isolate, or implicitly for worktree fan-out), put
+    // this worker in its own git worktree on its own branch so parallel workers
+    // can't clobber each other. Falls back to the shared project dir (with a
+    // WARNING milestone) if the project isn't a git repo or the worktree fails.
+    let cwd = projectPath
+    let worktreePath: string | undefined
+    let worktreeBranch: string | undefined = payload.worktreeBranch
+    let worktreeRepoRoot: string | undefined
+    const wantIsolation = (payload.isolate === true || payload.fanoutKind === 'worktrees')
+      && !!payload.worktreeBranch && !!payload.pipelineTaskId
+    if (wantIsolation) {
+      const root = gitWorktree.getRepoRoot(projectPath)
+      if (!root) {
+        if (payload.pipelineTaskId) {
+          pipelineStore.emitMilestone(payload.pipelineTaskId, id, {
+            text: `⚠ ${projectPath} is not a git repo — running without worktree isolation.`,
+            tone: 'warn',
+          })
+        }
+      } else {
+        try {
+          const branch = gitWorktree.branchNameFor(payload.pipelineTaskId!, payload.worktreeBranch!)
+          const ref = gitWorktree.addWorktree({ repoRoot: root, taskId: payload.pipelineTaskId!, branch })
+          cwd = ref.worktreePath
+          worktreePath = ref.worktreePath
+          worktreeBranch = ref.branch
+          worktreeRepoRoot = root
+        } catch (err) {
+          pipelineStore.emitMilestone(payload.pipelineTaskId!, id, {
+            text: `⚠ Worktree isolation failed (${err instanceof Error ? err.message : String(err)}) — running in the shared project dir.`,
+            tone: 'warn',
+          })
+          cwd = projectPath
+        }
+      }
+    }
 
     // Build args — always auto-allow send-message so child can report back
     const SEND_MESSAGE_TOOL = 'mcp__session-manager__send-message'
@@ -246,7 +289,18 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     // Pass prompt as CLI positional arg — Claude Code parses it on startup,
     // bypassing the PTY paste/timing issues of writing to the TUI.
     // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
-    const session = spawnSession(id, cwd, 'claude', [...args, '--', payload.prompt])
+    let session: ReturnType<typeof spawnSession>
+    try {
+      session = spawnSession(id, cwd, 'claude', [...args, '--', payload.prompt])
+    } catch (err) {
+      // Don't leak the worktree we just created if the PTY spawn fails.
+      if (worktreePath && worktreeBranch && worktreeRepoRoot) {
+        try {
+          gitWorktree.removeWorktree({ repoRoot: worktreeRepoRoot, worktreePath, branch: worktreeBranch })
+        } catch { /* best-effort */ }
+      }
+      throw err
+    }
 
     // Attach PTY listeners so the renderer can see this session
     if (attachListenersFn) {
@@ -272,7 +326,8 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
           fanoutKind: payload.fanoutKind,
           claudeSessionId: session.claudeSessionId ?? null,
           cwd,
-          worktreeBranch: payload.worktreeBranch,
+          worktreeBranch,
+          worktreePath,
         },
         payload.parentSessionId,
       )
@@ -300,6 +355,7 @@ const ORCHESTRATOR_TOOLS = [
   'mcp__session-manager__pipeline-request-approval',
   'mcp__session-manager__pipeline-rename-session',
   'mcp__session-manager__pipeline-get-task',
+  'mcp__session-manager__merge-worktree',
   'mcp__session-manager__send-message',
   'mcp__session-manager__list-sessions',
   'Read', 'Grep', 'Glob',
@@ -327,7 +383,8 @@ WORKFLOW
 1. emit-milestone "Task accepted — planning."
 2. Spawn a PLANNER: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"plan", pipelineLabel:"Architect", reportBack:"true", prompt:"<gather context for: ${task.title}, then produce a concrete implementation plan. You MAY fan out research probes via spawn-session with pipelineTaskId='${task.id}', pipelineRole='plan', fanoutKind='research'. Report the final plan back.>" }).
 3. When the planner reports its plan: emit-milestone "Plan ready", then pipeline-request-approval({ gate:"Begin implementation", detail:"<one-line plan summary>" }). If pending → STOP and wait. When approved/auto-approved → continue.
-4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement"); it MAY fan out parallel workers (fanoutKind:"worktrees"). Wait for it to report completion.
+4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement"). Wait for it to report completion.
+   PARALLEL WORKTREE FAN-OUT (when the work splits cleanly into independent pieces): spawn each worker with isolate:true, a UNIQUE worktreeBranch (a short descriptive label, e.g. "csv-export", "auth-guard"), fanoutKind:"worktrees", and a descriptive pipelineLabel. Each worker builds in its OWN isolated git worktree+branch, so they can't clobber each other. When a worker reports it has FINISHED, call merge-worktree({ taskId:"${task.id}", sessionId:<that worker's id> }): on success the branch is merged, its worktree removed, and the node goes read-only; on "MERGE CONFLICT" send-message that worker to resolve the conflict in its (still-present) worktree and then re-call merge-worktree, OR spawn a fix worker for it. Only advance to review once ALL workers are merged. NOTE: if the project is not a git repo, isolation is skipped automatically (a warning milestone is emitted) and workers run in the shared dir — in that case do NOT fan out into parallel worktrees; run sequentially instead.
 5. pipeline-set-stage "review". Spawn ONE reviewer session per RELEVANT dimension below (pipelineRole:"review", fanoutKind:"topics", pipelineLabel:<dimension>). Give each reviewer a SPECIFIC, contextual prompt scoped to THIS change — name the exact files/areas to inspect and what to check (e.g. "Inspect the auth changes in src/x.ts and verify the new token check can't be bypassed"). Do NOT spawn generic "security reviewer" sessions; write the concern into the prompt. Skip dimensions that don't apply to this change.
    Review dimensions to consider:
    - Correctness/logic — does it match the plan; edge cases handled
@@ -430,8 +487,10 @@ function handlePipelineSetStage(body: string, res: import('http').ServerResponse
     const { taskId, stage } = readJson<{ taskId: string; stage: pipelineStore.PipelineStage }>(body)
     pipelineStore.setPipelineStage(taskId, stage)
     broadcastPipeline()
-    // Task complete → tear down every session in its tree (orchestrator + workers).
+    // Task complete → clean up any leftover worktrees, then tear down every
+    // session in its tree (orchestrator + workers).
     if (stage === 'done') {
+      cleanupTaskWorktrees(taskId)
       for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -480,6 +539,112 @@ function handlePipelineRename(body: string, res: import('http').ServerResponse):
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Find a node in a task's tree by app session id. */
+function findTaskNode(taskId: string, sessionId: string): pipelineStore.PipelineSession | null {
+  const walk = (n?: pipelineStore.PipelineSession): pipelineStore.PipelineSession | null => {
+    if (!n) return null
+    if (n.id === sessionId) return n
+    for (const c of n.children ?? []) {
+      const found = walk(c)
+      if (found) return found
+    }
+    return null
+  }
+  return walk(pipelineStore.getPipelineTask(taskId)?.orchestrator)
+}
+
+/** Merge a worktree worker's branch back into the integration branch. On success
+ *  the worktree is removed, the node is marked read-only (Option B) and the
+ *  (now-stale) session is torn down so it can't keep editing merged code. On a
+ *  conflict the worktree + session are kept alive for a fix worker to resolve. */
+function handlePipelineMergeWorktree(body: string, res: import('http').ServerResponse): void {
+  void (async (): Promise<void> => {
+    try {
+      const { taskId, sessionId } = readJson<{ taskId: string; sessionId: string }>(body)
+      const task = pipelineStore.getPipelineTask(taskId)
+      const node = findTaskNode(taskId, sessionId)
+      if (!task || !node) {
+        res.writeHead(404, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `Task ${taskId} / session ${sessionId} not found` }))
+        return
+      }
+      if (node.worktreeRemoved) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ merged: true, alreadyMerged: true }))
+        return
+      }
+      if (!node.worktreePath || !node.worktreeBranch) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `Session ${sessionId} has no worktree to merge` }))
+        return
+      }
+      // Resolve the MAIN repo root, never a worktree path — merging "into" the
+      // worker's own worktree is a silent no-op + force-delete (data loss).
+      const root = gitWorktree.getMainWorktreeRoot(task.projectPath || node.cwd || process.cwd())
+      if (!root) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Task project path is not a git repo' }))
+        return
+      }
+
+      const result = await gitWorktree.mergeWorktree({
+        repoRoot: root,
+        branch: node.worktreeBranch,
+        worktreePath: node.worktreePath,
+      })
+
+      if (result.merged) {
+        try {
+          gitWorktree.removeWorktree({ repoRoot: root, worktreePath: node.worktreePath, branch: node.worktreeBranch })
+        } catch (err) {
+          console.error('[hook-server] worktree remove after merge failed:', err)
+        }
+        pipelineStore.markWorktreeRemoved(taskId, sessionId)
+        pipelineStore.emitMilestone(taskId, sessionId, {
+          text: `Merged ${node.worktreeBranch} → integration branch; worktree removed (read-only).`,
+          status: 'done',
+          badge: 'merged',
+          tone: 'pass',
+        })
+        scheduleSessionTeardown(sessionId)
+        broadcastPipeline()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ merged: true, branch: node.worktreeBranch }))
+      } else {
+        pipelineStore.emitMilestone(taskId, sessionId, {
+          text: `Merge conflict in: ${result.conflicts.join(', ')} — worktree kept for resolution.`,
+          badge: 'conflict',
+          tone: 'fail',
+        })
+        broadcastPipeline()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ merged: false, conflicts: result.conflicts }))
+      }
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: String(err) }))
+    }
+  })()
+}
+
+/** Best-effort removal of any live worktrees in a task's tree — called on
+ *  terminal states (Done / task removed) to clean up crashed/abandoned workers. */
+export function cleanupTaskWorktrees(taskId: string): void {
+  const nodes = pipelineStore.getWorktreeNodes(taskId)
+  if (nodes.length === 0) return
+  const task = pipelineStore.getPipelineTask(taskId)
+  for (const node of nodes) {
+    const root = gitWorktree.getMainWorktreeRoot(task?.projectPath || node.cwd || process.cwd())
+    if (!root || !node.worktreePath || !node.worktreeBranch) continue
+    try {
+      gitWorktree.removeWorktree({ repoRoot: root, worktreePath: node.worktreePath, branch: node.worktreeBranch })
+      pipelineStore.markWorktreeRemoved(taskId, node.id)
+    } catch (err) {
+      console.error('[hook-server] task worktree cleanup failed:', err)
+    }
   }
 }
 
