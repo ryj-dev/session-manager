@@ -12,6 +12,7 @@ import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
+import { deriveRoleTools } from './pipeline-roles'
 
 let server: Server | null = null
 let serverPort = 0
@@ -284,11 +285,17 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
 
     // Build args — always auto-allow send-message so child can report back
     const SEND_MESSAGE_TOOL = 'mcp__session-manager__send-message'
+    // Explicit allowedTools wins; otherwise derive scoping from pipelineRole
+    // (server-side enforcement, not convention). No role + no explicit list ⇒
+    // unrestricted, unchanged from prior behavior.
+    const effective = (payload.allowedTools && payload.allowedTools.length > 0)
+      ? payload.allowedTools
+      : deriveRoleTools(payload.pipelineRole)
     let args: string[] = []
-    if (payload.allowedTools && payload.allowedTools.length > 0) {
-      const tools = payload.allowedTools.includes(SEND_MESSAGE_TOOL)
-        ? payload.allowedTools
-        : [...payload.allowedTools, SEND_MESSAGE_TOOL]
+    if (effective && effective.length > 0) {
+      const tools = effective.includes(SEND_MESSAGE_TOOL)
+        ? effective
+        : [...effective, SEND_MESSAGE_TOOL]
       args = ['--allowedTools', ...tools]
     }
 
