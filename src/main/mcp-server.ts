@@ -129,6 +129,8 @@ Not all sections are required. Each note type has recommended sections.
 | pipeline-request-approval | Pause at a user gate; auto-approves under 'auto' autonomy, otherwise sets a pending gate you must stop and wait on (pipeline) |
 | emit-milestone | Post a one-line milestone to your session's feed — drives the card line, badge, status, and feed colour (pipeline) |
 | pipeline-rename-session | Rename a node in your task tree to a descriptive board label (pipeline) |
+| pipeline-put-artifact | Store the full plan/diff/review for a task so downstream stages read it cleanly instead of relaying big content via chat; overwrites same kind (pipeline) |
+| pipeline-get-artifact | Read a stored hand-off artifact ('plan'/'diff'/'review'); found:false just means nothing stored yet, not an error (pipeline) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -182,7 +184,7 @@ All spawned sessions (spawn-session and spawn-agent) automatically have send-mes
 
 ## Agentic pipeline
 
-The session manager can run a task through an orchestrator/worker pipeline. An orchestrator session and its worker sessions are linked into one task tree via **spawn-session**'s pipeline params (\`pipelineTaskId\`, \`pipelineRole\`, \`pipelineLabel\`, \`fanoutKind\`). The orchestrator drives the board with **pipeline-set-stage** (Backlog→Plan→Implement→Review→Done) and gates progress at user checkpoints with **pipeline-request-approval**. Every session narrates its progress with **emit-milestone** (and can relabel tree nodes via **pipeline-rename-session**), while **pipeline-get-task** recovers full task state on resume. Finished worktree workers (spawned with \`isolate:true\`) are folded back in with **merge-worktree**.
+The session manager can run a task through an orchestrator/worker pipeline. An orchestrator session and its worker sessions are linked into one task tree via **spawn-session**'s pipeline params (\`pipelineTaskId\`, \`pipelineRole\`, \`pipelineLabel\`, \`fanoutKind\`). The orchestrator drives the board with **pipeline-set-stage** (Backlog→Plan→Implement→Review→Done) and gates progress at user checkpoints with **pipeline-request-approval**. Every session narrates its progress with **emit-milestone** (and can relabel tree nodes via **pipeline-rename-session**), while **pipeline-get-task** recovers full task state on resume. Finished worktree workers (spawned with \`isolate:true\`) are folded back in with **merge-worktree**. Large stage hand-offs (the full plan, a diff summary, review verdicts) pass between stages via **pipeline-put-artifact** / **pipeline-get-artifact** — stored off the board so the planner's full plan, the implementer's diff, and each reviewer's verdict flow cleanly to the next stage instead of being relayed through chat or milestones (which stay one-line summaries).
 
 ## Notes & todo lists (separate from memory)
 
@@ -1089,6 +1091,42 @@ server.tool(
       }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error merging worktree: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-put-artifact',
+  'Store the full plan/diff/review for a pipeline task so downstream stages read it cleanly instead of relaying big content through chat. Overwrites any existing artifact of the same kind. Keep large content here, NOT in milestones or chat.',
+  {
+    taskId: z.string().describe('The pipeline task id.'),
+    kind: z.string().describe("Artifact kind: 'plan' | 'diff' | 'review' (free-form, e.g. 'review:security')."),
+    content: z.string().describe('The full artifact content (markdown).'),
+  },
+  async ({ taskId, kind, content }) => {
+    try {
+      const sid = process.env.APP_SESSION_ID
+      const r = await callHookServer('/pipeline/put-artifact', { taskId, kind, content, sessionId: sid }) as { bytes: number }
+      return { content: [{ type: 'text', text: `Stored ${kind} artifact (${r.bytes} bytes).` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error storing artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-get-artifact',
+  'Read a stored hand-off artifact for a pipeline task. Implementers fetch the plan; the orchestrator reads review verdicts to drive the review loop. A missing artifact (found:false) is NOT an error — it just means nothing has been stored yet.',
+  {
+    taskId: z.string().describe('The pipeline task id.'),
+    kind: z.string().describe("Artifact kind to read: 'plan' | 'diff' | 'review' (or a specific variant like 'review:security')."),
+  },
+  async ({ taskId, kind }) => {
+    try {
+      const r = await callHookServer('/pipeline/get-artifact', { taskId, kind }) as { found: boolean; content: string | null }
+      return { content: [{ type: 'text', text: r.found ? (r.content ?? '') : `No ${kind} artifact stored yet.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error reading artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )
