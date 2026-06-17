@@ -27,10 +27,14 @@ function broadcastPipeline(): void {
 // Track which sessions are idle (at the prompt) — used for GUI status indicators
 const sessionStatus = new Map<string, 'working' | 'idle'>()
 
+/** Last PTY-output timestamp per session — drives the ephemeral idle sweep. */
+const lastPtyActivity = new Map<string, number>()
+
 /** Clean up all hook-server state for a session (call on PTY exit/kill). */
 export function cleanupSession(appSessionId: string): void {
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
+  lastPtyActivity.delete(appSessionId)
   lastProjectTodoCount.delete(appSessionId)
   sessionTurnCount.delete(appSessionId)
   lastNudgeTurn.delete(appSessionId)
@@ -69,6 +73,10 @@ export function getHookServerPort(): number {
 /** Called from IPC when PTY outputs data.
  *  Detects permission rejection via terminal output. */
 export function onPtyData(appSessionId: string, data: string): void {
+  // Record activity first — terminals echo keystrokes, so any user input or
+  // Claude output surfaces here. Drives the ephemeral idle sweep below.
+  lastPtyActivity.set(appSessionId, Date.now())
+
   // Permission rejection detection
   if (!awaitingPermission.has(appSessionId)) return
 
@@ -182,6 +190,7 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         console.log(`[hook-server] listening on port ${serverPort}`)
         writePortFile(serverPort)
         if (!opts.skipInstall) installHooks(serverPort)
+        startEphemeralSweep()
         resolve(serverPort)
       } else {
         reject(new Error('Failed to bind hook server'))
@@ -197,6 +206,7 @@ export function reinstallHooks(): void {
 }
 
 export function stopHookServer(): void {
+  stopEphemeralSweep()
   removeHooks()
   removePortFile()
   // Wipe all inbox files on shutdown (may fail on Windows if files are still locked)
@@ -487,6 +497,60 @@ function scheduleSessionTeardown(appSessionId: string): void {
     }
   }, TEARDOWN_GRACE_MS)
   teardownTimers.set(appSessionId, timer)
+}
+
+// ── Ephemeral idle reclaim ──────────────────────────────────────────────────
+// Drawer "view-resume" PTYs are spawned ephemeral and torn down when the drawer
+// closes. If the app crashes mid-view, that `claude` process is orphaned until
+// quit. This backstop sweeps idle ephemeral sessions and reclaims them, reusing
+// the teardownTimers + grace + killSession/cleanupSession machinery above.
+
+const IDLE_REAP_MS = 120_000      // 2 min
+const SWEEP_INTERVAL_MS = 30_000  // poll every 30s
+let ephemeralSweepTimer: ReturnType<typeof setInterval> | null = null
+
+// Re-validating reap: shares teardownTimers + TEARDOWN_GRACE_MS + killSession +
+// cleanupSession, but re-checks idle/ephemeral AT FIRE TIME so a drawer that
+// re-adopts + re-activates this PTY inside the grace window is NOT killed.
+function scheduleEphemeralReap(id: string): void {
+  if (teardownTimers.has(id)) return
+  const timer = setTimeout(() => {
+    teardownTimers.delete(id)
+    const s = getSession(id)
+    const last = lastPtyActivity.get(id) ?? 0
+    if (!s?.ephemeral || Date.now() - last < IDLE_REAP_MS) return  // re-adopted / active again
+    try {
+      killSession(id)
+      cleanupSession(id)
+      console.log(`[hook-server] reaped idle ephemeral session ${id}`)
+    } catch (err) {
+      console.error('[hook-server] ephemeral reap failed:', err)
+    }
+  }, TEARDOWN_GRACE_MS)
+  teardownTimers.set(id, timer)
+}
+
+function sweepIdleEphemeralSessions(): void {
+  const now = Date.now()
+  for (const s of getAllSessions()) {
+    if (!s.ephemeral || teardownTimers.has(s.id)) continue
+    const last = lastPtyActivity.get(s.id)
+    if (last == null) { lastPtyActivity.set(s.id, now); continue }  // just-resumed grace window
+    if (now - last >= IDLE_REAP_MS) scheduleEphemeralReap(s.id)
+  }
+}
+
+function startEphemeralSweep(): void {
+  if (ephemeralSweepTimer) return
+  ephemeralSweepTimer = setInterval(sweepIdleEphemeralSessions, SWEEP_INTERVAL_MS)
+  ephemeralSweepTimer.unref?.()
+}
+
+function stopEphemeralSweep(): void {
+  if (ephemeralSweepTimer) {
+    clearInterval(ephemeralSweepTimer)
+    ephemeralSweepTimer = null
+  }
 }
 
 // ── Pipeline endpoint handlers ──────────────────────────────────────────────
