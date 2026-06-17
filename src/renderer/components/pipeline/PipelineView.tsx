@@ -228,6 +228,13 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
       }
       return
     }
+    // A BACKWARD drag restarts the task from the target stage with a fresh
+    // orchestrator (main handles the teardown + respawn). Guard it — in-flight
+    // work in child workers is discarded.
+    const backward = STAGE_FLOW.indexOf(target as PipelineStage) < STAGE_FLOW.indexOf(card.stage as PipelineStage)
+    if (backward && !window.confirm(`Restart this task from ${target}? This stops the current run and all its sessions and re-runs from ${target}. In-progress work in child workers will be discarded.`)) {
+      return
+    }
     const tasks = await setStage(card.id, target as PipelineStage)
     if (target === 'done') completeTodoIfDone(tasks, card.id)
   }, [removeTask, startTask, setStage, completeTodoIfDone])
