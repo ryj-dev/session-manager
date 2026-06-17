@@ -204,27 +204,13 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     [backlogCards, pipelineTasks, completedFilter, matchesProject],
   )
 
-  // When a task lands in Done, mark its backing todo complete.
-  const completeTodo = useCallback(async (id: string) => {
-    try { await window.api.todosUpdate(id, { done: true }) } catch { /* ignore */ }
-    refreshBacklog()
-  }, [refreshBacklog])
-
-  // Mark the backing todo done ONLY if the task actually reached Done. A Done
-  // transition can be held back by a merge conflict (the card stays in Review),
-  // in which case the todo must NOT be closed.
-  const completeTodoIfDone = useCallback((tasks: PipelineTask[], id: string) => {
-    if (tasks.find((t) => t.id === id)?.stage === 'done') completeTodo(id)
-  }, [completeTodo])
-
   const moveToStage = useCallback(async (card: BoardCard, target: BoardStage) => {
     if (card.stage === target) return
     if (target === 'backlog') { if (card.stage !== 'backlog') removeTask(card.id); return }
     if (card.stage === 'backlog') {
       startTask({ id: card.id, title: card.title, tags: card.tags })
       if (target !== 'plan') {
-        const tasks = await setStage(card.id, target as PipelineStage)
-        if (target === 'done') completeTodoIfDone(tasks, card.id)
+        await setStage(card.id, target as PipelineStage)
       }
       return
     }
@@ -235,9 +221,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     if (backward && !window.confirm(`Restart this task from ${target}? This stops the current run and all its sessions and re-runs from ${target}. In-progress work in child workers will be discarded.`)) {
       return
     }
-    const tasks = await setStage(card.id, target as PipelineStage)
-    if (target === 'done') completeTodoIfDone(tasks, card.id)
-  }, [removeTask, startTask, setStage, completeTodoIfDone])
+    await setStage(card.id, target as PipelineStage)
+  }, [removeTask, startTask, setStage])
 
   // Open the read-only detail panel for a Backlog card. Show a shell immediately
   // (title + tags are already known) then fetch the body; a race guard ignores a
@@ -348,9 +333,9 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
             initialSessionId={open?.sessionId ?? openTask.orchestrator?.id ?? null}
             onClose={() => setOpen(null)}
             onSetAutonomy={(level) => setAutonomy(openTask.id, level)}
-            onApprove={async () => { const n = nextStage(openTask.stage); const tasks = await resolveGate(openTask.id, true); if (n === 'done') completeTodoIfDone(tasks, openTask.id) }}
+            onApprove={() => resolveGate(openTask.id, true)}
             onReject={() => resolveGate(openTask.id, false)}
-            onAdvance={async () => { const n = nextStage(openTask.stage); const tasks = await setStage(openTask.id, n); if (n === 'done') completeTodoIfDone(tasks, openTask.id) }}
+            onAdvance={() => setStage(openTask.id, nextStage(openTask.stage))}
           />
         )}
       </AnimatePresence>

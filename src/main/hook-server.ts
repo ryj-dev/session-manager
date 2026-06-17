@@ -25,6 +25,21 @@ function broadcastPipeline(): void {
   }
 }
 
+/** Close the backing todo (taskId === todo id) when a task reaches Done, and
+ *  notify the renderer's notes/backlog mirror. Idempotent (skips if already
+ *  done) and safe if the todo was deleted. */
+function markBackingTodoDone(taskId: string): void {
+  try {
+    const todo = notesManager.readTodo(taskId) // throws if the todo was deleted
+    if (todo.done) return                       // only fire on the transition INTO done
+    notesManager.updateTodo(taskId, { done: true })
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win && !win.isDestroyed()) win.webContents.send('notes:changed')
+  } catch (err) {
+    console.error('[pipeline] mark backing todo done failed:', err)
+  }
+}
+
 // Track which sessions are idle (at the prompt) — used for GUI status indicators
 const sessionStatus = new Map<string, 'working' | 'idle'>()
 
@@ -962,6 +977,7 @@ export async function finalizeTaskCompletion(
     // Only flag 'merged' when there was an actual branch to merge; non-isolated
     // tasks keep integrationStatus undefined (they render as a plain ✓ complete).
     if (!integ.noWorktree) pipelineStore.setIntegrationStatus(taskId, 'merged')
+    markBackingTodoDone(taskId)
     cleanupTaskWorktrees(taskId)
     for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
   } else {
