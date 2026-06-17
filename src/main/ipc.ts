@@ -525,7 +525,15 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return pipelineStore.getPipelineTasks()
   })
   ipcMain.handle('pipeline:remove', (_e, id: string) => {
-    // Clean up any leftover isolated worktrees before dropping the task.
+    // Stop the live sessions FIRST. Dragging a started task back to Backlog (or
+    // any removal) used to only clean up worktrees + drop the task, leaving the
+    // orchestrator + worker PTYs running — burning tokens, still editing files,
+    // and racing cleanupTaskWorktrees as it force-removed the worktrees out from
+    // under them (lost uncommitted work). Kill the whole session tree, then clean
+    // up the now-idle worktrees.
+    for (const sid of pipelineStore.getPipelineSessionIds(id)) {
+      try { killSession(sid); hookCleanupSession(sid) } catch (err) { console.error('[pipeline] session teardown on remove failed:', err) }
+    }
     try { cleanupTaskWorktrees(id) } catch (err) { console.error('[pipeline] worktree cleanup on remove failed:', err) }
     const tasks = pipelineStore.removePipelineTask(id)
     sendToRenderer('pipeline:changed', tasks)
