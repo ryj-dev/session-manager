@@ -3,7 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useStore, completedCutoffMs } from '../../store'
-import { projectColor } from '../../lib/simulation'
+import { projectColor, projectColorDim } from '../../lib/simulation'
+import { isProjectTag, projectFromTag } from '../notes/types'
 import { Terminal, disposeTerminal } from '../Terminal'
 import type {
   PipelineTask,
@@ -412,7 +413,7 @@ function CardTile({
         {card.tags.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1 pl-[18px]">
             {card.tags.map((t) => (
-              <span key={t} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">{t.replace(/^project:/, '')}</span>
+              <TagPill key={t} tag={t} />
             ))}
           </div>
         )}
@@ -694,7 +695,7 @@ function BacklogDetailDrawer({
             {todo.done ? 'Completed' : 'Open'}
           </span>
           {todo.tags.map((t) => (
-            <span key={t} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">{t.replace(/^project:/, '')}</span>
+            <TagPill key={t} tag={t} />
           ))}
         </div>
 
@@ -1087,6 +1088,22 @@ function StatusDot({ status }: { status: PipelineSessionStatus }): JSX.Element {
   return (
     <span className={`relative h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`}>
       {meta.pulse && <span className={`absolute inset-0 animate-ping rounded-full ${meta.dot} opacity-75`} />}
+    </span>
+  )
+}
+
+/** Tag chip; project: tags are coloured by project name to match TagChip / NotesSidebar. */
+function TagPill({ tag }: { tag: string }): JSX.Element {
+  if (!isProjectTag(tag)) {
+    return <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400">{tag}</span>
+  }
+  const name = projectFromTag(tag)
+  return (
+    <span
+      className="rounded px-1.5 py-0.5 text-[9px]"
+      style={{ background: projectColorDim(name), color: projectColor(name) }}
+    >
+      {name}
     </span>
   )
 }
