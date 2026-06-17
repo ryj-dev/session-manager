@@ -535,7 +535,14 @@ function handlePipelineSetStage(body: string, res: import('http').ServerResponse
 function handlePipelineEmit(body: string, res: import('http').ServerResponse): void {
   try {
     const { taskId, sessionId, ...patch } = readJson<{ taskId: string; sessionId: string } & pipelineStore.MilestonePatch>(body)
-    pipelineStore.emitMilestone(taskId, sessionId, patch)
+    const { found } = pipelineStore.emitMilestone(taskId, sessionId, patch)
+    if (!found) {
+      // The task is no longer on the board — emitting was a silent no-op before,
+      // which masked a dropped task. Surface it so the orchestrator notices.
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Pipeline task ${taskId} not found`, unknownTask: true }))
+      return
+    }
     broadcastPipeline()
     // A finished worker → tear it down (keep its pointer + feed for resume).
     if (patch.status === 'done') scheduleSessionTeardown(sessionId)

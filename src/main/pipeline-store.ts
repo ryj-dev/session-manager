@@ -1,6 +1,6 @@
 import { app } from 'electron'
-import { join } from 'path'
-import { readFileSync, mkdirSync } from 'fs'
+import { join, dirname } from 'path'
+import { readFileSync, mkdirSync, watch, type FSWatcher } from 'fs'
 import { atomicWriteSync } from './atomic-write'
 
 // Source of truth for the agentic pipeline (Cmd+L) board state.
@@ -92,7 +92,13 @@ interface PipelineData {
   tasks: PipelineTask[]
 }
 
+// Fast-read cache. It is ONLY trusted for reads (getPipelineTasks/getPipelineTask)
+// and is invalidated whenever pipeline.json changes on disk (watcher below). All
+// MUTATORS deliberately ignore it and read the CURRENT on-disk state instead —
+// see updateTasks — so a stale in-memory snapshot can never clobber a task that
+// another writer (a concurrent task path, or a prior app instance) added.
 let cache: PipelineTask[] | null = null
+let watcher: FSWatcher | null = null
 
 function storePath(): string {
   const dir = join(app.getPath('userData'), 'state')
@@ -109,15 +115,35 @@ function migrateFeed(node?: PipelineSession): void {
   node.children?.forEach(migrateFeed)
 }
 
-export function loadPipeline(): PipelineTask[] {
-  if (cache) return cache
+/** Parse the current on-disk task list, migrating legacy entries. Never throws. */
+function readTasksFromDisk(): PipelineTask[] {
   try {
     const parsed: PipelineData = JSON.parse(readFileSync(storePath(), 'utf-8'))
-    cache = parsed.tasks || []
-    cache.forEach((t) => migrateFeed(t.orchestrator))
+    const tasks = parsed.tasks || []
+    tasks.forEach((t) => migrateFeed(t.orchestrator))
+    return tasks
   } catch {
-    cache = []
+    return []
   }
+}
+
+/** Watch pipeline.json so any write (out-of-process, or from a prior app
+ *  instance) drops our cache — the next read re-reads disk truth rather than
+ *  serving (and later persisting) a stale snapshot. Best-effort. */
+function ensureWatcher(): void {
+  if (watcher) return
+  try {
+    watcher = watch(dirname(storePath()), { recursive: false }, (_event, filename) => {
+      if (!filename || filename === 'pipeline.json') cache = null
+    })
+    watcher.unref?.()
+  } catch { /* watch is optional — mutators still read fresh from disk */ }
+}
+
+export function loadPipeline(): PipelineTask[] {
+  ensureWatcher()
+  if (cache) return cache
+  cache = readTasksFromDisk()
   return cache
 }
 
@@ -125,6 +151,14 @@ function persist(tasks: PipelineTask[]): PipelineTask[] {
   cache = tasks
   atomicWriteSync(storePath(), JSON.stringify({ tasks }, null, 2))
   return tasks
+}
+
+/** Atomic read-modify-write keyed off the CURRENT on-disk state. This is the
+ *  single write path for every mutator: it re-reads disk (never the cache) so a
+ *  concurrent or stale writer can't silently drop another task on persist. */
+function updateTasks(fn: (tasks: PipelineTask[]) => PipelineTask[]): PipelineTask[] {
+  ensureWatcher()
+  return persist(fn(readTasksFromDisk()))
 }
 
 export function getPipelineTasks(): PipelineTask[] {
@@ -135,27 +169,36 @@ export function getPipelineTask(id: string): PipelineTask | null {
   return loadPipeline().find((t) => t.id === id) ?? null
 }
 
+/** Fresh disk-truth existence check (bypasses the cache). Used to detect a task
+ *  that has been dropped from the board so callers can signal it instead of
+ *  silently no-opping. */
+export function hasPipelineTask(id: string): boolean {
+  return readTasksFromDisk().some((t) => t.id === id)
+}
+
 /** Move a todo into the pipeline at the Plan stage. No-op if already present. */
 export function startPipelineTask(
   todo: { id: string; title: string; tags: string[]; body?: string },
   defaultAutonomy: AutonomyLevel,
   projectPath?: string,
 ): PipelineTask[] {
-  const tasks = loadPipeline()
-  if (tasks.some((t) => t.id === todo.id)) return tasks
-  return persist([
-    ...tasks,
-    {
-      id: todo.id,
-      title: todo.title,
-      tags: todo.tags,
-      body: todo.body,
-      stage: 'plan',
-      autonomy: defaultAutonomy,
-      createdAt: Date.now(),
-      projectPath,
-    },
-  ])
+  return updateTasks((tasks) =>
+    tasks.some((t) => t.id === todo.id)
+      ? tasks
+      : [
+          ...tasks,
+          {
+            id: todo.id,
+            title: todo.title,
+            tags: todo.tags,
+            body: todo.body,
+            stage: 'plan',
+            autonomy: defaultAutonomy,
+            createdAt: Date.now(),
+            projectPath,
+          },
+        ],
+  )
 }
 
 /** Record the per-task worktree (set once when the orchestrator is spawned). */
@@ -163,12 +206,12 @@ export function setTaskWorktree(
   id: string,
   info: { repoRoot: string; worktreePath: string; worktreeBranch: string },
 ): PipelineTask[] {
-  return persist(loadPipeline().map((t) => (t.id === id ? { ...t, ...info } : t)))
+  return updateTasks((tasks) => tasks.map((t) => (t.id === id ? { ...t, ...info } : t)))
 }
 
 export function setPipelineStage(id: string, stage: PipelineStage): PipelineTask[] {
-  return persist(
-    loadPipeline().map((t) =>
+  return updateTasks((tasks) =>
+    tasks.map((t) =>
       t.id === id ? { ...t, stage, completedAt: stage === 'done' ? Date.now() : undefined } : t,
     ),
   )
@@ -181,8 +224,8 @@ export function setIntegrationStatus(
   status: 'pending' | 'merged' | 'conflict',
   conflictFiles?: string[],
 ): PipelineTask[] {
-  return persist(
-    loadPipeline().map((t) =>
+  return updateTasks((tasks) =>
+    tasks.map((t) =>
       t.id === id
         ? { ...t, integrationStatus: status, conflictFiles: status === 'conflict' ? conflictFiles : undefined }
         : t,
@@ -191,13 +234,13 @@ export function setIntegrationStatus(
 }
 
 export function setPipelineAutonomy(id: string, level: AutonomyLevel): PipelineTask[] {
-  return persist(loadPipeline().map((t) => (t.id === id ? { ...t, autonomy: level } : t)))
+  return updateTasks((tasks) => tasks.map((t) => (t.id === id ? { ...t, autonomy: level } : t)))
 }
 
 /** Resolve a pending gate: approve advances to the next stage; reject clears it. */
 export function resolvePipelineGate(id: string, approve: boolean): PipelineTask[] {
-  return persist(
-    loadPipeline().map((t) => {
+  return updateTasks((tasks) =>
+    tasks.map((t) => {
       if (t.id !== id) return t
       if (!approve) return { ...t, gate: null }
       const idx = STAGE_ORDER.indexOf(t.stage)
@@ -208,7 +251,7 @@ export function resolvePipelineGate(id: string, approve: boolean): PipelineTask[
 }
 
 export function removePipelineTask(id: string): PipelineTask[] {
-  return persist(loadPipeline().filter((t) => t.id !== id))
+  return updateTasks((tasks) => tasks.filter((t) => t.id !== id))
 }
 
 export function clearPipeline(): void {
@@ -267,16 +310,22 @@ function findNode(root: PipelineSession | undefined, id: string): PipelineSessio
   return undefined
 }
 
-/** Apply an in-place mutation to one task (cloned for immutability), then persist. */
-function mutateTask(taskId: string, fn: (task: PipelineTask) => void): PipelineTask[] {
-  return persist(
-    loadPipeline().map((t) => {
+/** Apply an in-place mutation to one task (cloned for immutability), then persist.
+ *  Reads disk-fresh (via updateTasks) so it never clobbers a concurrently-added
+ *  task. Returns whether the target task existed — callers surface "unknown task"
+ *  rather than silently no-opping (which previously masked a dropped task). */
+function mutateTask(taskId: string, fn: (task: PipelineTask) => void): { tasks: PipelineTask[]; found: boolean } {
+  let found = false
+  const tasks = updateTasks((current) =>
+    current.map((t) => {
       if (t.id !== taskId) return t
+      found = true
       const clone: PipelineTask = JSON.parse(JSON.stringify(t))
       fn(clone)
       return clone
     }),
   )
+  return { tasks, found }
 }
 
 export interface SessionUpsert {
@@ -311,7 +360,7 @@ export function upsertPipelineSession(taskId: string, node: SessionUpsert, paren
     const parent = parentSessionId ? findNode(task.orchestrator, parentSessionId) : undefined
     const target = parent ?? task.orchestrator
     target.children = [...(target.children ?? []), created]
-  })
+  }).tasks
 }
 
 export interface MilestonePatch {
@@ -327,8 +376,11 @@ export interface MilestonePatch {
 }
 
 /** Append a milestone to a session's feed and/or update its status fields.
- *  Upserts a minimal node if the session hasn't been registered yet. */
-export function emitMilestone(taskId: string, sessionId: string, patch: MilestonePatch): PipelineTask[] {
+ *  Upserts a minimal node if the session hasn't been registered yet. Returns
+ *  `found: false` when the task no longer exists on the board (a dropped task) —
+ *  callers MUST surface this instead of reporting a successful no-op, which is
+ *  what previously masked a task silently vanishing mid-run. */
+export function emitMilestone(taskId: string, sessionId: string, patch: MilestonePatch): { tasks: PipelineTask[]; found: boolean } {
   return mutateTask(taskId, (task) => {
     let node = findNode(task.orchestrator, sessionId)
     if (!node) {
@@ -373,7 +425,7 @@ export function renamePipelineSession(taskId: string, sessionId: string, label: 
   return mutateTask(taskId, (task) => {
     const node = findNode(task.orchestrator, sessionId)
     if (node) node.label = label
-  })
+  }).tasks
 }
 
 /** Mark a worktree worker's tree node as merged + removed (read-only, Option B). */
@@ -381,5 +433,5 @@ export function markWorktreeRemoved(taskId: string, sessionId: string): Pipeline
   return mutateTask(taskId, (task) => {
     const node = findNode(task.orchestrator, sessionId)
     if (node) node.worktreeRemoved = true
-  })
+  }).tasks
 }
