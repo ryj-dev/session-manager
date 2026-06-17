@@ -247,6 +247,32 @@ export function setPipelineStage(id: string, stage: PipelineStage): PipelineTask
   )
 }
 
+/** Reopen a task at an earlier stage for a fresh orchestrator run (backward
+ *  drag). Resets all transient run state — the session tree (clearing
+ *  `orchestrator` lets the fresh orchestrator register as the new root via
+ *  upsert), reviewRound, gate, completedAt, and integration state (so a later
+ *  re-completion performs a REAL merge instead of hitting the 'already merged'
+ *  fast-path) — and sets the stage to the target. KEEPS repoRoot / worktreePath
+ *  / worktreeBranch so the worktree-ensure logic can decide reuse vs recreate. */
+export function reopenPipelineTask(id: string, stage: PipelineStage): PipelineTask[] {
+  return updateTasks((tasks) =>
+    tasks.map((t) =>
+      t.id === id
+        ? {
+            ...t,
+            stage,
+            orchestrator: undefined,
+            reviewRound: undefined,
+            gate: null,
+            completedAt: undefined,
+            integrationStatus: undefined,
+            conflictFiles: undefined,
+          }
+        : t,
+    ),
+  )
+}
+
 /** Record the result of attempting to integrate the per-task branch. Clearing
  *  to 'merged' or 'pending' also drops any stale conflict file list. */
 export function setIntegrationStatus(

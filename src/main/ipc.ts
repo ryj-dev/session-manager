@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, finalizeTaskCompletion } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -497,11 +497,23 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return tasks
   })
   ipcMain.handle('pipeline:setStage', async (_e, id: string, stage: PipelineStage) => {
+    // Detect a BACKWARD move (target earlier than the current stage) on an
+    // already-running task. Done is excluded — it routes to the finalize/integrate
+    // path below. Doing this in MAIN makes it robust regardless of caller.
+    const task = pipelineStore.getPipelineTask(id)
+    const order: PipelineStage[] = ['plan', 'implement', 'review', 'done']
+    const backward = !!task?.orchestrator && order.indexOf(stage) < order.indexOf(task.stage)
     // Manual advance to Done is contingent on a clean merge: finalizeTaskCompletion
     // integrates first and only then moves the card to Done (on conflict it holds
     // the card in Review with a visible badge). Other stages advance directly.
     if (stage === 'done') {
       try { await finalizeTaskCompletion(id) } catch (err) { console.error('[pipeline] task completion failed:', err) }
+    } else if (backward) {
+      // Backward drag = RESTART from the target with a fresh orchestrator (the old
+      // session re-enters its concluded "task complete" conversation and refuses
+      // to work). Tears down the old tree, resets transient state, and respawns.
+      // restartPipelineOrchestrator broadcasts internally, so no explicit push here.
+      try { restartPipelineOrchestrator(id, stage) } catch (err) { console.error('[pipeline] task restart failed:', err) }
     } else {
       pipelineStore.setPipelineStage(id, stage)
       sendToRenderer('pipeline:changed', pipelineStore.getPipelineTasks())

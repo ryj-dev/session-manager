@@ -396,7 +396,14 @@ const ORCHESTRATOR_TOOLS = [
   'Read', 'Grep', 'Glob',
 ]
 
-function buildOrchestratorPrompt(task: pipelineStore.PipelineTask, isolated: boolean): string {
+function buildOrchestratorPrompt(
+  task: pipelineStore.PipelineTask,
+  isolated: boolean,
+  reopenedFrom?: pipelineStore.PipelineStage,
+): string {
+  const reopenNotice = reopenedFrom
+    ? `⚠ This task was REOPENED at the ${reopenedFrom} stage. Any prior "task complete" conclusion is VOID — do NOT assume earlier work is final. If reopened at the implement or review stage, SKIP planning and resume from the ${reopenedFrom} stage; otherwise re-plan from the start.\n\n`
+    : ''
   const tagLine = task.tags.length ? `\n- tags: ${task.tags.join(', ')}` : ''
   const bodyBlock = task.body && task.body.trim()
     ? `\n\nTASK DETAILS (the user's full intent, from the todo body — follow it closely and relay the relevant parts to the planner/implementers):\n"""\n${task.body.trim()}\n"""`
@@ -404,7 +411,7 @@ function buildOrchestratorPrompt(task: pipelineStore.PipelineTask, isolated: boo
   const isolationLine = isolated
     ? `\n\nISOLATION: You and ALL your stage sessions run in a dedicated git worktree on a per-task branch, so other tasks running concurrently can't collide with you. Your branch is merged back into the integration branch automatically when the task reaches Done — do not merge to the main branch yourself.`
     : `\n\nNOTE: This task is NOT running in an isolated worktree (the project isn't a git repo, or worktree creation failed). Avoid parallel file-editing fan-out; work sequentially.`
-  return `You are the ORCHESTRATOR for an agentic-pipeline task in the Session Manager app. You own this task end-to-end and drive it through the pipeline by coordinating SEPARATE Claude sessions — you do not write code yourself.
+  return `${reopenNotice}You are the ORCHESTRATOR for an agentic-pipeline task in the Session Manager app. You own this task end-to-end and drive it through the pipeline by coordinating SEPARATE Claude sessions — you do not write code yourself.
 
 TASK
 - taskId: ${task.id}
@@ -448,31 +455,43 @@ RULES
 Begin now.`
 }
 
-/** Spawn the orchestrator session for a task and register it as the tree root.
- *  Called from the renderer's pipeline:start IPC. */
-export function spawnPipelineOrchestrator(task: pipelineStore.PipelineTask): { id: string } {
+/** Resolve the working directory for a task's orchestrator + stage sessions,
+ *  creating or reusing its isolated git worktree. Per-task isolation runs the
+ *  whole task in its OWN worktree on a per-task branch so concurrent tasks can't
+ *  collide. Reuse the existing worktree when it is still on disk (preserves WIP
+ *  on a reopen); recreate it if it was merged+removed; fall back to the shared
+ *  dir if the project isn't a git repo. */
+function ensureTaskWorktree(task: pipelineStore.PipelineTask): { cwd: string; isolated: boolean } {
   const baseDir = task.projectPath || loadSettings().baseProjectsDir || app.getPath('home')
-  // Per-task isolation: run the whole task (orchestrator + every stage session,
-  // which inherit this cwd) in its OWN git worktree on a per-task branch, so
-  // concurrent tasks can't collide in the shared working tree. Integrated back
-  // into the main branch when the task reaches Done. Falls back to the shared
-  // dir if the project isn't a git repo.
-  let cwd = baseDir
-  let isolated = false
+  // Reuse an existing on-disk worktree (e.g. a reopened, not-yet-merged task).
+  if (task.repoRoot && task.worktreePath && task.worktreeBranch && existsSync(task.worktreePath)) {
+    return { cwd: task.worktreePath, isolated: true }
+  }
   const repoRoot = gitWorktree.getRepoRoot(baseDir)
   if (repoRoot) {
     try {
       const branch = gitWorktree.branchNameFor(task.id, 'task')
       const ref = gitWorktree.addWorktree({ repoRoot, taskId: task.id, branch })
-      cwd = ref.worktreePath
-      isolated = true
       pipelineStore.setTaskWorktree(task.id, { repoRoot, worktreePath: ref.worktreePath, worktreeBranch: ref.branch })
+      return { cwd: ref.worktreePath, isolated: true }
     } catch (err) {
       console.error('[hook-server] per-task worktree creation failed; running in shared dir:', err)
     }
   }
+  return { cwd: baseDir, isolated: false }
+}
+
+/** Spawn the orchestrator session for a task and register it as the tree root.
+ *  Called from the renderer's pipeline:start IPC. When `reopenedFrom` is set the
+ *  orchestrator prompt is annotated that this is a REOPENED task (a prior
+ *  completion is void). */
+export function spawnPipelineOrchestrator(
+  task: pipelineStore.PipelineTask,
+  opts: { reopenedFrom?: pipelineStore.PipelineStage } = {},
+): { id: string } {
+  const { cwd, isolated } = ensureTaskWorktree(task)
   const id = randomUUID()
-  const prompt = buildOrchestratorPrompt(task, isolated)
+  const prompt = buildOrchestratorPrompt(task, isolated, opts.reopenedFrom)
   // Auto permission mode so it can call its (scoped) tools without prompts.
   const args = ['--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--', prompt]
   const session = spawnSession(id, cwd, 'claude', args)
@@ -813,11 +832,13 @@ function handlePipelineMergeWorktree(body: string, res: import('http').ServerRes
   })()
 }
 
-/** Best-effort removal of any live worktrees in a task's tree — called on
- *  terminal states (Done / task removed) to clean up crashed/abandoned workers. */
-export function cleanupTaskWorktrees(taskId: string): void {
+/** Best-effort removal of the fan-out WORKER worktrees in a task's tree, leaving
+ *  the task-level worktree intact. Reads the LIVE session tree, so call it before
+ *  any state reset that clears `orchestrator`. Used on its own by the restart
+ *  path (clean abandoned workers, keep the task worktree's WIP) and as the first
+ *  step of cleanupTaskWorktrees. */
+export function cleanupWorkerWorktrees(taskId: string): void {
   const task = pipelineStore.getPipelineTask(taskId)
-  // Session-level fan-out worker worktrees.
   for (const node of pipelineStore.getWorktreeNodes(taskId)) {
     // Worker worktrees live off the TASK worktree (or main if not isolated).
     const root = task?.worktreePath || gitWorktree.getMainWorktreeRoot(task?.projectPath || node.cwd || process.cwd())
@@ -829,6 +850,14 @@ export function cleanupTaskWorktrees(taskId: string): void {
       console.error('[hook-server] worker worktree cleanup failed:', err)
     }
   }
+}
+
+/** Best-effort removal of any live worktrees in a task's tree — called on
+ *  terminal states (Done / task removed) to clean up crashed/abandoned workers. */
+export function cleanupTaskWorktrees(taskId: string): void {
+  const task = pipelineStore.getPipelineTask(taskId)
+  // Session-level fan-out worker worktrees.
+  cleanupWorkerWorktrees(taskId)
   // Task-level worktree (discard path). On the Done path the integrate step has
   // already removed it after a successful merge — best-effort no-op then; on
   // remove/discard this throws the work away.
@@ -839,6 +868,33 @@ export function cleanupTaskWorktrees(taskId: string): void {
       console.error('[hook-server] task-level worktree cleanup failed:', err)
     }
   }
+}
+
+/** Restart a task from an earlier stage with a FRESH orchestrator (backward
+ *  drag on the board). Old orchestrator + all child sessions are killed, the
+ *  abandoned fan-out worker worktrees are cleaned up (the task worktree's WIP is
+ *  kept if it's still on disk, recreated otherwise), transient run state is
+ *  reset, and a fresh orchestrator is spawned with a REOPENED notice. */
+export function restartPipelineOrchestrator(taskId: string, fromStage: pipelineStore.PipelineStage): void {
+  // 1. Tear down the whole live session tree (orchestrator + children) — mirror
+  //    pipeline:remove's teardown so no PTY keeps running/editing/burning tokens.
+  for (const sid of pipelineStore.getPipelineSessionIds(taskId)) {
+    try { killSession(sid); cleanupSession(sid) } catch (err) { console.error('[hook-server] session teardown on restart failed:', err) }
+  }
+  // 2. Clean abandoned fan-out workers BEFORE the reset — it reads the live tree.
+  //    The task-level worktree is deliberately left intact (preserves WIP).
+  try { cleanupWorkerWorktrees(taskId) } catch (err) { console.error('[hook-server] worker worktree cleanup on restart failed:', err) }
+  // 3. Reset transient state and set the target stage. Guarded for symmetry with
+  //    the other best-effort steps — a throw here must not leave a half-reset
+  //    (tree already killed, no respawn).
+  try { pipelineStore.reopenPipelineTask(taskId, fromStage) } catch (err) { console.error('[hook-server] task state reset on restart failed:', err) }
+  // 4. Spawn a fresh orchestrator (ensureTaskWorktree reuses or recreates the
+  //    task worktree, registers the fresh root, and broadcasts).
+  const fresh = pipelineStore.getPipelineTask(taskId)
+  if (fresh) {
+    try { spawnPipelineOrchestrator(fresh, { reopenedFrom: fromStage }) } catch (err) { console.error('[hook-server] orchestrator respawn on restart failed:', err) }
+  }
+  broadcastPipeline()
 }
 
 /** On task completion, merge the per-task branch into the integration (main)
