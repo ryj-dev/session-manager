@@ -92,6 +92,19 @@ interface PipelineData {
   tasks: PipelineTask[]
 }
 
+/** A hand-off artifact (plan/diff/review) stored OUT of pipeline.json so big
+ *  blobs don't bloat the hot board state that's rewritten + broadcast on every
+ *  milestone. Latest-write-wins per (taskId, kind). */
+export interface PipelineArtifact {
+  content: string
+  updatedAt: number
+  sessionId?: string
+}
+
+interface ArtifactData {
+  [taskId: string]: { [kind: string]: PipelineArtifact }
+}
+
 // Fast-read cache. It is ONLY trusted for reads (getPipelineTasks/getPipelineTask)
 // and is invalidated whenever pipeline.json changes on disk (watcher below). All
 // MUTATORS deliberately ignore it and read the CURRENT on-disk state instead —
@@ -104,6 +117,23 @@ function storePath(): string {
   const dir = join(app.getPath('userData'), 'state')
   mkdirSync(dir, { recursive: true })
   return join(dir, 'pipeline.json')
+}
+
+/** Sibling file to pipeline.json for hand-off artifacts (kept out of the
+ *  board's hot rewrite/broadcast path). */
+function artifactStorePath(): string {
+  const dir = join(app.getPath('userData'), 'state')
+  mkdirSync(dir, { recursive: true })
+  return join(dir, 'pipeline-artifacts.json')
+}
+
+/** Parse the current on-disk artifact map. Never throws (missing/corrupt → {}). */
+function readArtifactsFromDisk(): ArtifactData {
+  try {
+    return JSON.parse(readFileSync(artifactStorePath(), 'utf-8')) as ArtifactData
+  } catch {
+    return {}
+  }
 }
 
 /** Coerce legacy string log entries → FeedEntry across a session subtree. */
@@ -251,11 +281,50 @@ export function resolvePipelineGate(id: string, approve: boolean): PipelineTask[
 }
 
 export function removePipelineTask(id: string): PipelineTask[] {
+  deleteArtifacts(id)
   return updateTasks((tasks) => tasks.filter((t) => t.id !== id))
 }
 
 export function clearPipeline(): void {
+  try {
+    atomicWriteSync(artifactStorePath(), JSON.stringify({}, null, 2))
+  } catch { /* best-effort — artifacts are non-critical */ }
   persist([])
+}
+
+// ── Hand-off artifacts (plan/diff/review passed cleanly between stages) ──────
+
+/** Store (overwrite) one hand-off artifact for a task. Returns whether the task
+ *  exists on the board — matches how emitMilestone surfaces an unknown task so
+ *  callers can signal a dropped task instead of silently succeeding. */
+export function putArtifact(taskId: string, kind: string, content: string, sessionId?: string): boolean {
+  if (!hasPipelineTask(taskId)) return false
+  const data = readArtifactsFromDisk()
+  const bucket = data[taskId] ?? (data[taskId] = {})
+  bucket[kind] = { content, updatedAt: Date.now(), sessionId }
+  atomicWriteSync(artifactStorePath(), JSON.stringify(data, null, 2))
+  return true
+}
+
+/** Read one hand-off artifact, or null if none stored for (taskId, kind). */
+export function getArtifact(taskId: string, kind: string): PipelineArtifact | null {
+  return readArtifactsFromDisk()[taskId]?.[kind] ?? null
+}
+
+/** The kinds of artifact stored for a task (e.g. ['plan','diff']). */
+export function getArtifactKinds(taskId: string): string[] {
+  return Object.keys(readArtifactsFromDisk()[taskId] ?? {})
+}
+
+/** Drop a task's whole artifact bucket so it doesn't leak after the task is
+ *  removed/completed. Best-effort; no-op if nothing stored. */
+function deleteArtifacts(taskId: string): void {
+  try {
+    const data = readArtifactsFromDisk()
+    if (!(taskId in data)) return
+    delete data[taskId]
+    atomicWriteSync(artifactStorePath(), JSON.stringify(data, null, 2))
+  } catch { /* best-effort — artifacts are non-critical */ }
 }
 
 /** All Claude conversation ids referenced by any pipeline task tree. Used to

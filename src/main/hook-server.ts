@@ -150,6 +150,8 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/pipeline/request-approval') { handlePipelineApproval(body, res); return }
         if (url.pathname === '/pipeline/rename-session') { handlePipelineRename(body, res); return }
         if (url.pathname === '/pipeline/merge-worktree') { handlePipelineMergeWorktree(body, res); return }
+        if (url.pathname === '/pipeline/put-artifact') { handlePipelinePutArtifact(body, res); return }
+        if (url.pathname === '/pipeline/get-artifact') { handlePipelineGetArtifact(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -365,6 +367,8 @@ const ORCHESTRATOR_TOOLS = [
   'mcp__session-manager__pipeline-request-approval',
   'mcp__session-manager__pipeline-rename-session',
   'mcp__session-manager__pipeline-get-task',
+  'mcp__session-manager__pipeline-put-artifact',
+  'mcp__session-manager__pipeline-get-artifact',
   'mcp__session-manager__merge-worktree',
   'mcp__session-manager__send-message',
   'mcp__session-manager__list-sessions',
@@ -394,12 +398,13 @@ YOUR TOOLS (session-manager MCP):
 - pipeline-set-stage({ taskId, stage }) — advance the board (plan|implement|review|done).
 - pipeline-request-approval({ taskId, gate, detail }) — pause for the user. Under autonomy=auto it auto-approves and advances; under gated/manual it returns "pending" and you MUST STOP and wait for an approval message before continuing.
 - pipeline-get-task({ taskId }) — re-read full state (use this first if you are resuming).
+- pipeline-get-artifact({ taskId, kind }) — read a stored hand-off artifact ('plan'|'diff'|'review'). Use this to read review verdicts when deciding the review loop, instead of relaying big content through chat.
 
 WORKFLOW
 1. emit-milestone "Task accepted — planning."
-2. Spawn a PLANNER: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"plan", pipelineLabel:"Architect", reportBack:"true", prompt:"<gather context for: ${task.title}, then produce a concrete implementation plan. You MAY fan out research probes via spawn-session with pipelineTaskId='${task.id}', pipelineRole='plan', fanoutKind='research'. Report the final plan back.>" }).
+2. Spawn a PLANNER: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"plan", pipelineLabel:"Architect", reportBack:"true", prompt:"<gather context for: ${task.title}, then produce a concrete implementation plan. You MAY fan out research probes via spawn-session with pipelineTaskId='${task.id}', pipelineRole='plan', fanoutKind='research'. Store the FULL plan with pipeline-put-artifact({ taskId:'${task.id}', kind:'plan', content:<full plan> }), then report back only a 1-2 line summary — do NOT paste the whole plan into chat.>" }).
 3. When the planner reports its plan: emit-milestone "Plan ready", then pipeline-request-approval({ gate:"Begin implementation", detail:"<one-line plan summary>" }). If pending → STOP and wait. When approved/auto-approved → continue.
-4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement"). Wait for it to report completion.
+4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement"). Instruct it to FIRST call pipeline-get-artifact({ taskId:"${task.id}", kind:"plan" }) to fetch the full approved plan, implement it, and when done call pipeline-put-artifact({ taskId:"${task.id}", kind:"diff", content:<short summary of what changed> }) before reporting back a 1-2 line summary. Wait for it to report completion.
    PARALLEL WORKTREE FAN-OUT (when the work splits cleanly into independent pieces): spawn each worker with isolate:true, a UNIQUE worktreeBranch (a short descriptive label, e.g. "csv-export", "auth-guard"), fanoutKind:"worktrees", and a descriptive pipelineLabel. Each worker builds in its OWN isolated git worktree+branch, so they can't clobber each other. When a worker reports it has FINISHED, call merge-worktree({ taskId:"${task.id}", sessionId:<that worker's id> }): on success the branch is merged, its worktree removed, and the node goes read-only; on "MERGE CONFLICT" send-message that worker to resolve the conflict in its (still-present) worktree and then re-call merge-worktree, OR spawn a fix worker for it. Only advance to review once ALL workers are merged. NOTE: if the project is not a git repo, isolation is skipped automatically (a warning milestone is emitted) and workers run in the shared dir — in that case do NOT fan out into parallel worktrees; run sequentially instead.
 5. pipeline-set-stage "review". Spawn ONE reviewer session per RELEVANT dimension below (pipelineRole:"review", fanoutKind:"topics", pipelineLabel:<dimension>). Give each reviewer a SPECIFIC, contextual prompt scoped to THIS change — name the exact files/areas to inspect and what to check (e.g. "Inspect the auth changes in src/x.ts and verify the new token check can't be bypassed"). Do NOT spawn generic "security reviewer" sessions; write the concern into the prompt. Skip dimensions that don't apply to this change.
    Review dimensions to consider:
@@ -409,7 +414,7 @@ WORKFLOW
    - Architecture/design — fits existing patterns, coupling, abstractions
    - Tests — coverage present and passing
    - Performance — only if the change touches hot paths
-   Each reviewer reports a verdict back to you (pass, or changes-requested with specifics). Collect all verdicts and emit-milestone a summary each round. If any request changes, spawn an implementer (pipelineRole:"implement") to fix, then RE-REVIEW — re-run only the dimensions that failed. LOOP until all relevant reviewers pass.
+   Each reviewer should FIRST call pipeline-get-artifact({ taskId:"${task.id}", kind:"plan" }) (and kind:"diff") for context, then store its verdict with pipeline-put-artifact({ taskId:"${task.id}", kind:"review", content:<verdict + specifics> }) and report back only a 1-2 line summary. (For per-dimension verdicts use a kind like "review:security" so they don't overwrite each other.) Read the full verdicts via pipeline-get-artifact kind:"review" to decide the loop. Collect all verdicts and emit-milestone a one-line summary each round. If any request changes, spawn an implementer (pipelineRole:"implement") to fix, then RE-REVIEW — re-run only the dimensions that failed. LOOP until all relevant reviewers pass.
 6. pipeline-request-approval({ gate:"Merge to Done" }). When approved/auto → pipeline-set-stage "done". The set-stage response includes an "integration" result: only when integration.ok is true is the task actually Done (emit-milestone "Done."). If integration.ok is false there was a MERGE CONFLICT integrating your task branch into the integration branch — the card is held in Review (NOT Done), the worktree is kept, and integration.conflicts lists the conflicting files. In that case do NOT report success: emit-milestone a 'blocked'/'error' note, then spawn an implementer (pipelineRole:"implement") in the task worktree to merge the integration branch in and resolve the conflicts (or raise a gate for the user), and re-call pipeline-set-stage "done" to re-attempt integration. Loop until integration.ok is true.
 
 RULES
@@ -649,6 +654,44 @@ function handlePipelineRename(body: string, res: import('http').ServerResponse):
     broadcastPipeline()
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ ok: true }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Store a hand-off artifact (plan/diff/review). No broadcast — artifacts live
+ *  off the board, so they never touch the renderer mirror. */
+function handlePipelinePutArtifact(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId, kind, content, sessionId } = readJson<{ taskId: string; kind: string; content: string; sessionId?: string }>(body)
+    if (!taskId || !kind || typeof content !== 'string') {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'taskId, kind, content required' }))
+      return
+    }
+    const found = pipelineStore.putArtifact(taskId, kind, content, sessionId)
+    if (!found) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Pipeline task ${taskId} not found`, unknownTask: true }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, kind, bytes: content.length }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Read a hand-off artifact. A missing artifact is a NORMAL state (found:false,
+ *  200) — not an error — so downstream stages can probe without failing. */
+function handlePipelineGetArtifact(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { taskId, kind } = readJson<{ taskId: string; kind: string }>(body)
+    const a = pipelineStore.getArtifact(taskId, kind)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ taskId, kind, found: !!a, content: a?.content ?? null, updatedAt: a?.updatedAt ?? null }))
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
