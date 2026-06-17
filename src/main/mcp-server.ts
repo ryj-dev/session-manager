@@ -118,12 +118,17 @@ Not all sections are required. Each note type has recommended sections.
 | delete-memory | Delete a memory note (cleans up backlinks automatically) |
 | add-tags / remove-tags | Manage tags on notes |
 | repair-related | Rebuild ## Related from actual wikilinks (for fixing broken backlinks) |
-| spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager). Pass isolate:true + worktreeBranch for an isolated git worktree worker |
+| spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager). Pipeline: pass \`pipelineTaskId\` + \`pipelineRole\` (orchestrator/plan/implement/review) to link it into a task tree, \`pipelineLabel\` for its tree-node label, \`fanoutKind\` for parallel children, and \`isolate:true\` + \`worktreeBranch\` for an isolated git worktree worker |
 | merge-worktree | Merge a finished worktree worker's branch back into the integration branch, remove its worktree, and mark the node read-only (pipeline) |
 | spawn-agent | Spawn a specialised agent (researcher, debugger, etc.) in a new session with a task |
 | list-agents | List available specialised agents and their capabilities |
 | list-sessions | List all active sessions with IDs, status, and project paths |
 | send-message | Send a message to another session (delivered when idle, queued when busy) |
+| pipeline-get-task | Read a task's full state: stage, autonomy, pending gate, review round, and session tree. Call on resume to recover context (pipeline) |
+| pipeline-set-stage | Orchestrator-only: advance a task Backlog→Plan→Implement→Review→Done. Call \`pipeline-request-approval\` first when autonomy is gated/manual (pipeline) |
+| pipeline-request-approval | Pause at a user gate; auto-approves under 'auto' autonomy, otherwise sets a pending gate you must stop and wait on (pipeline) |
+| emit-milestone | Post a one-line milestone to your session's feed — drives the card line, badge, status, and feed colour (pipeline) |
+| pipeline-rename-session | Rename a node in your task tree to a descriptive board label (pipeline) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -174,6 +179,10 @@ Use **send-message** to communicate with another session. Messages are:
 - Prefixed with the sender's session ID so the recipient knows who sent it
 
 All spawned sessions (spawn-session and spawn-agent) automatically have send-message allowed so they can report back without permission prompts.
+
+## Agentic pipeline
+
+The session manager can run a task through an orchestrator/worker pipeline. An orchestrator session and its worker sessions are linked into one task tree via **spawn-session**'s pipeline params (\`pipelineTaskId\`, \`pipelineRole\`, \`pipelineLabel\`, \`fanoutKind\`). The orchestrator drives the board with **pipeline-set-stage** (Backlog→Plan→Implement→Review→Done) and gates progress at user checkpoints with **pipeline-request-approval**. Every session narrates its progress with **emit-milestone** (and can relabel tree nodes via **pipeline-rename-session**), while **pipeline-get-task** recovers full task state on resume. Finished worktree workers (spawned with \`isolate:true\`) are folded back in with **merge-worktree**.
 
 ## Notes & todo lists (separate from memory)
 
