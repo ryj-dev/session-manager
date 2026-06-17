@@ -163,6 +163,29 @@ test('removeWorktree deletes the directory and the branch', async () => {
   }
 })
 
+test('mergeWorktree is idempotent — a second pass after merge+prune reports merged:true', async () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    const branch = branchNameFor('idem1', 'feature')
+    const ref = addWorktree({ repoRoot, taskId: 'idem1', branch })
+    configureWorktreeUser(ref.worktreePath)
+    writeFileSync(join(ref.worktreePath, 'feature.txt'), 'hello\n')
+
+    // First completion: merge + prune (as finalizeTaskCompletion does on success).
+    const first = await mergeWorktree({ repoRoot, branch, worktreePath: ref.worktreePath })
+    assert.deepEqual(first, { merged: true })
+    removeWorktree({ repoRoot, worktreePath: ref.worktreePath, branch })
+    assert.equal(g(repoRoot, 'branch', '--list', branch), '', 'branch pruned after first pass')
+
+    // Second completion (the `auto`-mode double-fire): the branch is gone. This must
+    // NOT be misreported as a conflict — the work is already integrated.
+    const second = await mergeWorktree({ repoRoot, branch, worktreePath: ref.worktreePath })
+    assert.deepEqual(second, { merged: true }, 'a re-run against a pruned branch is a no-op success')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
 test('runExclusive serializes concurrent operations per key', async () => {
   const order: string[] = []
   const a = runExclusive('repoX', async () => {

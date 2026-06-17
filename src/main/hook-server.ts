@@ -787,6 +787,11 @@ export async function integrateTaskWorktree(
 ): Promise<{ ok: boolean; conflicts?: string[]; noWorktree?: boolean }> {
   const task = pipelineStore.getPipelineTask(taskId)
   if (!task?.repoRoot || !task.worktreePath || !task.worktreeBranch) return { ok: true, noWorktree: true }
+  // Idempotency fast-path: a prior completion already integrated this task. Re-running
+  // completion (e.g. `auto` mode: approval auto-advance merges, then the orchestrator's
+  // explicit set-stage 'done' fires again) must be a no-op success — never a second
+  // merge attempt against the now-pruned branch, which would be misreported as conflict.
+  if (task.integrationStatus === 'merged') return { ok: true }
   const feedId = task.orchestrator?.id ?? taskId
   try {
     const result = await gitWorktree.mergeWorktree({

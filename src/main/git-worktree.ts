@@ -185,6 +185,18 @@ export function runExclusive<T>(repoRoot: string, fn: () => Promise<T> | T): Pro
 export function mergeWorktree(opts: MergeWorktreeOpts): Promise<MergeResult> {
   const { repoRoot, branch, worktreePath } = opts
   return runExclusive(repoRoot, () => {
+    // (0) Idempotency backstop. Completion can run twice against the same task —
+    //     under `auto`, the approval auto-advance merges + prunes the branch, then
+    //     the orchestrator's explicit set-stage 'done' fires a SECOND completion.
+    //     By then the branch is gone, so `git merge` errors out with zero
+    //     conflicting files and would be misreported as a conflict (overwriting a
+    //     genuinely-merged task with integrationStatus:'conflict'). A branch we can
+    //     no longer resolve was already merged + pruned by the first pass — there is
+    //     nothing left to do, so report success.
+    if (git(['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `${branch}^{commit}`]).status !== 0) {
+      return { merged: true }
+    }
+
     // (a) Commit any uncommitted work in the worktree so the merge sees it.
     //     Verify the commit actually captured it — a failed commit (e.g. no git
     //     identity configured) would otherwise let us merge an INCOMPLETE branch
