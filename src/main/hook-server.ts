@@ -12,7 +12,7 @@ import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
-import { deriveRoleTools } from './pipeline-roles'
+import { deriveRoleTools, stripOrchestratorOnlyTools } from './pipeline-roles'
 
 let server: Server | null = null
 let serverPort = 0
@@ -242,6 +242,16 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       return
     }
 
+    // The orchestrator is never spawned via /spawn (it uses
+    // spawnPipelineOrchestrator with its own scoped tools). deriveRoleTools
+    // returns undefined for 'orchestrator', which on this path would yield an
+    // UNRESTRICTED child — strictly worse than any worker scoping. Reject it.
+    if (payload.pipelineRole === 'orchestrator') {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'orchestrator role cannot be spawned via /spawn' }))
+      return
+    }
+
     const projectPath = payload.projectPath || process.cwd()
     const id = randomUUID()
 
@@ -288,9 +298,13 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     // Explicit allowedTools wins; otherwise derive scoping from pipelineRole
     // (server-side enforcement, not convention). No role + no explicit list ⇒
     // unrestricted, unchanged from prior behavior.
-    const effective = (payload.allowedTools && payload.allowedTools.length > 0)
+    let effective = (payload.allowedTools && payload.allowedTools.length > 0)
       ? payload.allowedTools
       : deriveRoleTools(payload.pipelineRole)
+    // Hard invariant: workers never hold pipeline control tools, even when an
+    // explicit allowedTools override is supplied (override still wins for all
+    // other tools). Applied regardless of how `effective` was derived.
+    if (effective) effective = stripOrchestratorOnlyTools(effective)
     let args: string[] = []
     if (effective && effective.length > 0) {
       const tools = effective.includes(SEND_MESSAGE_TOOL)

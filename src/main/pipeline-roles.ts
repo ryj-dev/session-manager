@@ -22,3 +22,16 @@ export function deriveRoleTools(role?: PipelineRole): string[] | undefined {
   if (role === 'plan' || role === 'implement' || role === 'review') return ROLE_TOOLS[role]
   return undefined
 }
+
+// Control tools that drive the pipeline board. Hard invariant: only the
+// orchestrator may hold these — a worker must NEVER receive them, even when an
+// explicit allowedTools override is supplied.
+export const ORCHESTRATOR_ONLY_TOOLS = [
+  'mcp__session-manager__pipeline-set-stage',
+  'mcp__session-manager__pipeline-request-approval',
+]
+
+/** Remove orchestrator-only control tools from a worker's tool list. */
+export function stripOrchestratorOnlyTools(tools: string[]): string[] {
+  return tools.filter(t => !ORCHESTRATOR_ONLY_TOOLS.includes(t))
+}
