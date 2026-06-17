@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, integrateTaskWorktree } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, finalizeTaskCompletion } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -497,11 +497,14 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return tasks
   })
   ipcMain.handle('pipeline:setStage', async (_e, id: string, stage: PipelineStage) => {
-    const tasks = pipelineStore.setPipelineStage(id, stage)
-    sendToRenderer('pipeline:changed', tasks)
-    // Manual advance to Done → integrate the per-task branch into main.
+    // Manual advance to Done is contingent on a clean merge: finalizeTaskCompletion
+    // integrates first and only then moves the card to Done (on conflict it holds
+    // the card in Review with a visible badge). Other stages advance directly.
     if (stage === 'done') {
-      try { await integrateTaskWorktree(id) } catch (err) { console.error('[pipeline] task integration failed:', err) }
+      try { await finalizeTaskCompletion(id) } catch (err) { console.error('[pipeline] task completion failed:', err) }
+    } else {
+      pipelineStore.setPipelineStage(id, stage)
+      sendToRenderer('pipeline:changed', pipelineStore.getPipelineTasks())
     }
     return pipelineStore.getPipelineTasks()
   })
@@ -513,9 +516,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   ipcMain.handle('pipeline:resolveGate', async (_e, id: string, approve: boolean) => {
     const tasks = pipelineStore.resolvePipelineGate(id, approve)
     sendToRenderer('pipeline:changed', tasks)
-    // Approving a gate can advance the task to Done → integrate.
+    // Approving a gate can advance the task to Done. resolvePipelineGate already
+    // set the stage optimistically; re-run the gated completion so a merge
+    // conflict reverts the card to Review (not Done) and integration runs.
     if (approve && pipelineStore.getPipelineTask(id)?.stage === 'done') {
-      try { await integrateTaskWorktree(id) } catch (err) { console.error('[pipeline] task integration failed:', err) }
+      try { await finalizeTaskCompletion(id) } catch (err) { console.error('[pipeline] task completion failed:', err) }
     }
     return pipelineStore.getPipelineTasks()
   })

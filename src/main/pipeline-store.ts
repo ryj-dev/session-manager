@@ -76,6 +76,14 @@ export interface PipelineTask {
   worktreePath?: string
   /** Per-task isolation: the task's branch (merged → integration at Done). */
   worktreeBranch?: string
+  /** Integration state of the per-task branch into the integration branch.
+   *  'merged' = cleanly integrated (the only honest path into Done);
+   *  'conflict' = the merge failed, the worktree is KEPT and the card is held
+   *  out of Done; 'pending' = a worktree exists but hasn't been integrated yet.
+   *  Undefined for non-isolated tasks (no branch to merge). */
+  integrationStatus?: 'pending' | 'merged' | 'conflict'
+  /** Files that conflicted on the last failed integration (for the card badge). */
+  conflictFiles?: string[]
 }
 
 const STAGE_ORDER: PipelineStage[] = ['plan', 'implement', 'review', 'done']
@@ -162,6 +170,22 @@ export function setPipelineStage(id: string, stage: PipelineStage): PipelineTask
   return persist(
     loadPipeline().map((t) =>
       t.id === id ? { ...t, stage, completedAt: stage === 'done' ? Date.now() : undefined } : t,
+    ),
+  )
+}
+
+/** Record the result of attempting to integrate the per-task branch. Clearing
+ *  to 'merged' or 'pending' also drops any stale conflict file list. */
+export function setIntegrationStatus(
+  id: string,
+  status: 'pending' | 'merged' | 'conflict',
+  conflictFiles?: string[],
+): PipelineTask[] {
+  return persist(
+    loadPipeline().map((t) =>
+      t.id === id
+        ? { ...t, integrationStatus: status, conflictFiles: status === 'conflict' ? conflictFiles : undefined }
+        : t,
     ),
   )
 }

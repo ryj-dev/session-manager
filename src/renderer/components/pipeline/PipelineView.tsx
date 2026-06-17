@@ -50,6 +50,8 @@ interface BoardCard {
   reviewRound?: number
   gate?: { label: string; detail: string } | null
   orchestrator?: PipelineSession
+  integrationStatus?: 'pending' | 'merged' | 'conflict'
+  conflictFiles?: string[]
 }
 
 const STAGES: { id: BoardStage; label: string; hint: string; accent: string; dot: string }[] = [
@@ -207,17 +209,27 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     refreshBacklog()
   }, [refreshBacklog])
 
-  const moveToStage = useCallback((card: BoardCard, target: BoardStage) => {
+  // Mark the backing todo done ONLY if the task actually reached Done. A Done
+  // transition can be held back by a merge conflict (the card stays in Review),
+  // in which case the todo must NOT be closed.
+  const completeTodoIfDone = useCallback((tasks: PipelineTask[], id: string) => {
+    if (tasks.find((t) => t.id === id)?.stage === 'done') completeTodo(id)
+  }, [completeTodo])
+
+  const moveToStage = useCallback(async (card: BoardCard, target: BoardStage) => {
     if (card.stage === target) return
     if (target === 'backlog') { if (card.stage !== 'backlog') removeTask(card.id); return }
     if (card.stage === 'backlog') {
       startTask({ id: card.id, title: card.title, tags: card.tags })
-      if (target !== 'plan') setStage(card.id, target as PipelineStage)
-    } else {
-      setStage(card.id, target as PipelineStage)
+      if (target !== 'plan') {
+        const tasks = await setStage(card.id, target as PipelineStage)
+        if (target === 'done') completeTodoIfDone(tasks, card.id)
+      }
+      return
     }
-    if (target === 'done') completeTodo(card.id)
-  }, [removeTask, startTask, setStage, completeTodo])
+    const tasks = await setStage(card.id, target as PipelineStage)
+    if (target === 'done') completeTodoIfDone(tasks, card.id)
+  }, [removeTask, startTask, setStage, completeTodoIfDone])
 
   // Open the read-only detail panel for a Backlog card. Show a shell immediately
   // (title + tags are already known) then fetch the body; a race guard ignores a
@@ -328,9 +340,9 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
             initialSessionId={open?.sessionId ?? openTask.orchestrator?.id ?? null}
             onClose={() => setOpen(null)}
             onSetAutonomy={(level) => setAutonomy(openTask.id, level)}
-            onApprove={() => { const n = nextStage(openTask.stage); resolveGate(openTask.id, true); if (n === 'done') completeTodo(openTask.id) }}
+            onApprove={async () => { const n = nextStage(openTask.stage); const tasks = await resolveGate(openTask.id, true); if (n === 'done') completeTodoIfDone(tasks, openTask.id) }}
             onReject={() => resolveGate(openTask.id, false)}
-            onAdvance={() => { const n = nextStage(openTask.stage); setStage(openTask.id, n); if (n === 'done') completeTodo(openTask.id) }}
+            onAdvance={async () => { const n = nextStage(openTask.stage); const tasks = await setStage(openTask.id, n); if (n === 'done') completeTodoIfDone(tasks, openTask.id) }}
           />
         )}
       </AnimatePresence>
@@ -424,6 +436,12 @@ function CardTile({
           )}
           {fanCount > 0 && (
             <span className={`rounded px-1.5 py-0.5 text-[9px] ${accent.chipBg} ${accent.text}`}>⑂ {fanCount} {stage?.fanoutKind}</span>
+          )}
+          {card.integrationStatus === 'conflict' && (
+            <span
+              className="rounded bg-red-500/15 px-1.5 py-0.5 text-[9px] font-medium text-red-300"
+              title={card.conflictFiles?.length ? `Merge conflict — not integrated. Conflicting: ${card.conflictFiles.join(', ')}` : 'Task branch did not merge cleanly — not integrated.'}
+            >⚠ not merged — conflict</span>
           )}
           {card.stage === 'done' && <span className="text-[10px] text-green-400/80">✓ complete</span>}
           {card.stage === 'backlog' && (
@@ -532,6 +550,19 @@ function SessionDrawer({
         </div>
 
         <StageStepper current={card.stage} />
+
+        {card.integrationStatus === 'conflict' && (
+          <div className="border-b border-zinc-800 px-4 py-3">
+            <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-2.5">
+              <p className="text-[11px] font-medium text-red-200">⚠ Not merged — merge conflict</p>
+              <p className="mt-0.5 text-[10px] text-red-200/70">
+                The task branch didn't integrate cleanly, so it's held in Review (the worktree is kept).
+                {card.conflictFiles?.length ? <> Conflicting: <span className="font-mono">{card.conflictFiles.join(', ')}</span>.</> : null}
+                {' '}Resolve in the task worktree, then re-advance to Done to re-attempt integration.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Task-level controls: autonomy + pending gate */}
         <div className="space-y-2 border-b border-zinc-800 px-4 py-3">

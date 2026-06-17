@@ -400,7 +400,7 @@ WORKFLOW
    - Tests — coverage present and passing
    - Performance — only if the change touches hot paths
    Each reviewer reports a verdict back to you (pass, or changes-requested with specifics). Collect all verdicts and emit-milestone a summary each round. If any request changes, spawn an implementer (pipelineRole:"implement") to fix, then RE-REVIEW — re-run only the dimensions that failed. LOOP until all relevant reviewers pass.
-6. pipeline-request-approval({ gate:"Merge to Done" }). When approved/auto → pipeline-set-stage "done" and emit-milestone "Done."
+6. pipeline-request-approval({ gate:"Merge to Done" }). When approved/auto → pipeline-set-stage "done". The set-stage response includes an "integration" result: only when integration.ok is true is the task actually Done (emit-milestone "Done."). If integration.ok is false there was a MERGE CONFLICT integrating your task branch into the integration branch — the card is held in Review (NOT Done), the worktree is kept, and integration.conflicts lists the conflicting files. In that case do NOT report success: emit-milestone a 'blocked'/'error' note, then spawn an implementer (pipelineRole:"implement") in the task worktree to merge the integration branch in and resolve the conflicts (or raise a gate for the user), and re-call pipeline-set-stage "done" to re-attempt integration. Loop until integration.ok is true.
 
 RULES
 - Pass pipelineTaskId="${task.id}" on every spawn so sessions slot into this task's tree.
@@ -511,21 +511,18 @@ function handlePipelineSetStage(body: string, res: import('http').ServerResponse
   void (async (): Promise<void> => {
     try {
       const { taskId, stage } = readJson<{ taskId: string; stage: pipelineStore.PipelineStage }>(body)
-      pipelineStore.setPipelineStage(taskId, stage)
-      broadcastPipeline()
       if (stage === 'done') {
-        // Integrate the per-task branch into the main branch FIRST (safe
-        // ordering — never delete unmerged work). Only on success do we clean
-        // up worktrees + tear down sessions. On conflict, everything is kept.
-        const integ = await integrateTaskWorktree(taskId)
-        if (integ.ok) {
-          cleanupTaskWorktrees(taskId)
-          for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
-        }
+        // Done is contingent on a clean merge: integrate FIRST, advance only on
+        // success. On conflict the card is HELD in Review (not Done) with a
+        // visible conflict badge + the worktree kept — see finalizeTaskCompletion.
+        const integ = await finalizeTaskCompletion(taskId)
+        const current = pipelineStore.getPipelineTask(taskId)?.stage ?? stage
         res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ ok: true, stage, integration: integ }))
+        res.end(JSON.stringify({ ok: integ.ok, stage: current, integration: integ }))
         return
       }
+      pipelineStore.setPipelineStage(taskId, stage)
+      broadcastPipeline()
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ ok: true, stage }))
     } catch (err) {
@@ -551,16 +548,27 @@ function handlePipelineEmit(body: string, res: import('http').ServerResponse): v
 }
 
 function handlePipelineApproval(body: string, res: import('http').ServerResponse): void {
-  try {
-    const { taskId, gate, detail } = readJson<{ taskId: string; gate: string; detail?: string }>(body)
-    const result = pipelineStore.requestApproval(taskId, gate, detail ?? '')
-    broadcastPipeline()
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify(result))
-  } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: String(err) }))
-  }
+  void (async (): Promise<void> => {
+    try {
+      const { taskId, gate, detail } = readJson<{ taskId: string; gate: string; detail?: string }>(body)
+      const result = pipelineStore.requestApproval(taskId, gate, detail ?? '')
+      broadcastPipeline()
+      // Under `auto`, requestApproval optimistically advances the stage — if that
+      // lands on Done, the per-task branch must still integrate cleanly. Re-run
+      // the gated completion so a conflict holds the card in Review (not Done).
+      if (result.decision === 'auto-approved' && result.stage === 'done') {
+        const integ = await finalizeTaskCompletion(taskId)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ...result, stage: pipelineStore.getPipelineTask(taskId)?.stage ?? result.stage, integration: integ }))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(result))
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: String(err) }))
+    }
+  })()
 }
 
 function handlePipelineRename(body: string, res: import('http').ServerResponse): void {
@@ -738,6 +746,38 @@ export async function integrateTaskWorktree(
     broadcastPipeline()
     return { ok: false }
   }
+}
+
+/** Move a task into Done ONLY if its per-task branch integrates cleanly. Run on
+ *  every path that would complete a task (orchestrator set-stage, UI force-advance,
+ *  gate approval). SAFE ORDERING: integrate first, advance second.
+ *   - success → stage=done (+ completedAt), integrationStatus='merged', worktrees
+ *     cleaned up, sessions torn down.
+ *   - conflict → the card is HELD OUT of Done (reverted to Review), the worktree is
+ *     kept, integrationStatus='conflict' (+ conflicting files) so the board shows a
+ *     red "not merged" badge for the user / orchestrator to resolve.
+ *  Non-isolated tasks (no worktree) complete unconditionally. */
+export async function finalizeTaskCompletion(
+  taskId: string,
+): Promise<{ ok: boolean; conflicts?: string[]; noWorktree?: boolean }> {
+  const integ = await integrateTaskWorktree(taskId)
+  if (integ.ok) {
+    pipelineStore.setPipelineStage(taskId, 'done')
+    // Only flag 'merged' when there was an actual branch to merge; non-isolated
+    // tasks keep integrationStatus undefined (they render as a plain ✓ complete).
+    if (!integ.noWorktree) pipelineStore.setIntegrationStatus(taskId, 'merged')
+    cleanupTaskWorktrees(taskId)
+    for (const sid of pipelineStore.getPipelineSessionIds(taskId)) scheduleSessionTeardown(sid)
+  } else {
+    pipelineStore.setIntegrationStatus(taskId, 'conflict', integ.conflicts)
+    // Hold the card out of Done — revert to Review (the stage the merge gate sits
+    // after) so the board never shows "complete" for unmerged work.
+    if (pipelineStore.getPipelineTask(taskId)?.stage === 'done') {
+      pipelineStore.setPipelineStage(taskId, 'review')
+    }
+  }
+  broadcastPipeline()
+  return integ
 }
 
 function handleListSessions(res: import('http').ServerResponse): void {

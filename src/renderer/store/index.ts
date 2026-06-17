@@ -127,6 +127,12 @@ export interface PipelineTask {
   createdAt: number
   /** When the task entered the Done stage (ms). Used by the completed-filter. */
   completedAt?: number
+  /** Integration state of the per-task branch: 'merged' (cleanly integrated),
+   *  'conflict' (merge failed — card held out of Done, worktree kept), or
+   *  'pending'. Undefined for non-isolated tasks. */
+  integrationStatus?: 'pending' | 'merged' | 'conflict'
+  /** Files that conflicted on the last failed integration. */
+  conflictFiles?: string[]
 }
 
 export const PIPELINE_STAGE_ORDER: PipelineStage[] = ['plan', 'implement', 'review', 'done']
@@ -303,10 +309,13 @@ export interface AppState {
   setPipelineProjectFilter: (name: string | null) => void
   /** Move a todo into the pipeline at the Plan stage (no-op if already present). */
   startPipelineTask: (todo: { id: string; title: string; tags: string[] }) => void
-  setPipelineStage: (id: string, stage: PipelineStage) => void
+  /** Resolves to the updated task list once the main process has applied the
+   *  stage change (a Done transition only lands if the merge succeeds). */
+  setPipelineStage: (id: string, stage: PipelineStage) => Promise<PipelineTask[]>
   setPipelineAutonomy: (id: string, level: AutonomyLevel) => void
-  /** Resolve a pending gate: approve advances to the next stage; reject clears it. */
-  resolvePipelineGate: (id: string, approve: boolean) => void
+  /** Resolve a pending gate: approve advances to the next stage; reject clears it.
+   *  Resolves to the updated task list (an approve→Done only lands on clean merge). */
+  resolvePipelineGate: (id: string, approve: boolean) => Promise<PipelineTask[]>
   /** Remove a task from the pipeline (back to Backlog). */
   removePipelineTask: (id: string) => void
 
@@ -564,9 +573,9 @@ export const useStore = create<AppState>((set, get) => ({
     if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
     void window.api.pipelineStart(todo, state.pipelineDefaultAutonomy, projectPath)
   },
-  setPipelineStage: (id, stage) => { void window.api.pipelineSetStage(id, stage) },
+  setPipelineStage: (id, stage) => window.api.pipelineSetStage(id, stage) as Promise<PipelineTask[]>,
   setPipelineAutonomy: (id, level) => { void window.api.pipelineSetAutonomy(id, level) },
-  resolvePipelineGate: (id, approve) => { void window.api.pipelineResolveGate(id, approve) },
+  resolvePipelineGate: (id, approve) => window.api.pipelineResolveGate(id, approve) as Promise<PipelineTask[]>,
   removePipelineTask: (id) => { void window.api.pipelineRemove(id) },
 
   // Message notifications
