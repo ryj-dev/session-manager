@@ -321,6 +321,11 @@ export function App(): JSX.Element {
         return
       }
 
+      // No active sessions — true relaunch. Resume in-flight auto-pipeline
+      // orchestrators (best-effort, main-process driven; gated/manual resume on
+      // demand from the board). Independent of the saved-sessions prompt below.
+      window.api.pipelineAutoResume().catch((e) => console.warn('[pipeline] auto-resume failed', e))
+
       // No active sessions — check for saved sessions from a previous clean quit
       window.api.loadSavedSessions().then((saved) => {
         if (saved.length > 0) {

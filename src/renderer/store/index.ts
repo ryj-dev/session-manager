@@ -112,6 +112,8 @@ export interface PipelineSession {
   worktreePath?: string
   /** Worktree merged + removed → node is read-only (no live resume). */
   worktreeRemoved?: boolean
+  /** Best-effort live resume failed (transcript gone) → node is read-only. */
+  resumeFailed?: boolean
 }
 
 export interface PipelineTask {

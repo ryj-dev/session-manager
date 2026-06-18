@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -88,6 +88,14 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Broadcast Claude session ID changes to the renderer so the store can update.
   onClaudeSessionIdChange((id, claudeSessionId) => {
     sendToRenderer('session:claudeId', { id, claudeSessionId })
+    // Persist the id into the owning pipeline node so a later relaunch resumes the
+    // current conversation, not a stale fork (claudeSessionId can drift on resume).
+    for (const t of pipelineStore.getPipelineTasks()) {
+      if (pipelineStore.getPipelineSessionIds(t.id).includes(id)) {
+        pipelineStore.setSessionClaudeId(t.id, id, claudeSessionId)
+        break
+      }
+    }
   })
 
   // Spawn a new PTY session
@@ -481,6 +489,7 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // 'pipeline:changed' broadcast. Orchestrator sessions mutate the same store
   // through the hook-server bridge (added in a later phase).
   ipcMain.handle('pipeline:list', () => pipelineStore.getPipelineTasks())
+  ipcMain.handle('pipeline:autoResume', () => autoResumeInflightOrchestrators())
   ipcMain.handle('pipeline:start', (_e, todo: { id: string; title: string; tags: string[] }, defaultAutonomy: AutonomyLevel, projectPath?: string) => {
     // Pull the full todo body so the orchestrator gets the user's detailed
     // intent, not just the title.
