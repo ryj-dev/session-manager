@@ -526,6 +526,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return tasks
   })
   ipcMain.handle('pipeline:resolveGate', async (_e, id: string, approve: boolean) => {
+    // Capture BEFORE resolving — resolvePipelineGate clears the gate.
+    const before = pipelineStore.getPipelineTask(id)
+    const gateLabel = before?.gate?.label ?? 'gate'
+    const orchestratorId = before?.orchestrator?.id
+
     const tasks = pipelineStore.resolvePipelineGate(id, approve)
     sendToRenderer('pipeline:changed', tasks)
     // Approving a gate can advance the task to Done. resolvePipelineGate already
@@ -534,6 +539,20 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     if (approve && pipelineStore.getPipelineTask(id)?.stage === 'done') {
       try { await finalizeTaskCompletion(id) } catch (err) { console.error('[pipeline] task completion failed:', err) }
     }
+
+    // Wake the orchestrator so gated/manual tasks resume. The orchestrator STOPS
+    // after pipeline-request-approval returns "pending" and waits for this message.
+    // Read the stage AFTER finalize so the text reflects the real landing stage
+    // (a merge conflict holds the card in Review, not Done).
+    if (orchestratorId) {
+      const stage = pipelineStore.getPipelineTask(id)?.stage
+      const message = approve
+        ? `✅ The user APPROVED the gate "${gateLabel}". The board is now at the "${stage}" stage — resume the pipeline and proceed with the ${stage} work now. Call pipeline-get-task first if you need to recover context.`
+        : `↩️ The user SENT BACK the gate "${gateLabel}" (changes requested). The task stays at the "${stage}" stage — do NOT advance. Revise the current stage's work to address the feedback, then re-request approval (pipeline-request-approval) when ready.`
+      const res = deliverSessionMessage(orchestratorId, message, null)
+      if (!res.ok) console.warn(`[pipeline] gate resolve: could not wake orchestrator ${orchestratorId}: ${res.error}`)
+    }
+
     return pipelineStore.getPipelineTasks()
   })
   ipcMain.handle('pipeline:remove', (_e, id: string) => {
