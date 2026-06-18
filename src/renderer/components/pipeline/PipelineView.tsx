@@ -101,6 +101,20 @@ const AUTONOMY: Record<AutonomyLevel, { label: string; glyph: string; desc: stri
   auto:   { label: 'Autonomous', glyph: '●', desc: 'Runs the whole pipeline — accepts plans, implements, finishes review, moves to Done. Interrupts only for permissions or hard errors.' },
 }
 
+// Per-todo autonomy is persisted as a namespaced tag `autonomy:<level>` (same
+// convention as `project:<name>`), so a backlog card's chosen level survives
+// reopen and is honoured by the start funnel. No tag = fall back to the global
+// default; we never silently backfill one.
+const AUTONOMY_TAG_PREFIX = 'autonomy:'
+function autonomyFromTags(tags: string[]): AutonomyLevel | null {
+  const t = tags.find((x) => x.startsWith(AUTONOMY_TAG_PREFIX))
+  const v = t?.slice(AUTONOMY_TAG_PREFIX.length)
+  return v === 'manual' || v === 'gated' || v === 'auto' ? v : null
+}
+function withAutonomyTag(tags: string[], level: AutonomyLevel): string[] {
+  return [...tags.filter((t) => !t.startsWith(AUTONOMY_TAG_PREFIX)), `${AUTONOMY_TAG_PREFIX}${level}`]
+}
+
 function roleAccent(role: PipelineSession['role']): string {
   return role === 'orchestrator' ? 'rose' : role === 'plan' ? 'violet' : role === 'implement' ? 'amber' : 'sky'
 }
@@ -237,6 +251,19 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     finally { setBacklogLoadingId((id) => (id === card.id ? null : id)) }
   }, [])
 
+  // Persist a backlog todo's autonomy as an `autonomy:<level>` tag. todosUpdate
+  // replaces the whole tag set, so withAutonomyTag rebuilds from the current tags
+  // (preserving project: and any others). Optimistically reflect it in the open
+  // drawer immediately; onNotesChanged → refreshBacklog re-reads the card tiles.
+  const onSetBacklogAutonomy = useCallback(async (level: AutonomyLevel) => {
+    setBacklogDetail((cur) => {
+      if (!cur) return cur
+      const tags = withAutonomyTag(cur.tags, level)
+      window.api.todosUpdate(cur.id, { tags })
+      return { ...cur, tags }
+    })
+  }, [])
+
   useEffect(() => {
     if (!visible) return
     const handler = (e: KeyboardEvent): void => {
@@ -346,6 +373,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
             key={backlogDetail.id}
             todo={backlogDetail}
             loading={backlogLoadingId === backlogDetail.id}
+            defaultAutonomy={defaultAutonomy}
+            onSetAutonomy={onSetBacklogAutonomy}
             onClose={() => setBacklogDetail(null)}
           />
         )}
@@ -377,7 +406,11 @@ function CardTile({
   const fanCount = stage?.children?.length ?? 0
   const lastOrchEntry = orch?.log.at(-1)
   const narration = lastOrchEntry ? normalizeEntry(lastOrchEntry).text : undefined
-  const autonomy = card.autonomy ?? defaultAutonomy
+  // Backlog cards have no PipelineTask yet, so their chosen autonomy lives on the
+  // todo's `autonomy:<level>` tag; in-flight cards carry card.autonomy directly.
+  const explicitAutonomy = autonomyFromTags(card.tags)
+  const autonomy = card.autonomy ?? explicitAutonomy ?? defaultAutonomy
+  const showAutonomy = card.stage !== 'backlog' || explicitAutonomy != null
   const isInFlight = card.stage !== 'backlog' && card.stage !== 'done'
 
   return (
@@ -404,7 +437,7 @@ function CardTile({
 
         {card.tags.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1 pl-[18px]">
-            {card.tags.map((t) => (
+            {card.tags.filter((t) => !t.startsWith(AUTONOMY_TAG_PREFIX)).map((t) => (
               <TagPill key={t} tag={t} />
             ))}
           </div>
@@ -416,7 +449,7 @@ function CardTile({
               <StatusDot status={orch.status} /> orchestrator
             </span>
           )}
-          {card.stage !== 'backlog' && (
+          {showAutonomy && (
             <span className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400" title={AUTONOMY[autonomy].desc}>
               {AUTONOMY[autonomy].glyph} {AUTONOMY[autonomy].label}
             </span>
@@ -652,13 +685,18 @@ function SessionDrawer({
 // ---------------------------------------------------------------------------
 
 function BacklogDetailDrawer({
-  todo, loading, onClose,
+  todo, loading, defaultAutonomy, onSetAutonomy, onClose,
 }: {
   todo: { id: string; title: string; body: string; done: boolean; tags: string[] }
   loading: boolean
+  defaultAutonomy: AutonomyLevel
+  onSetAutonomy: (level: AutonomyLevel) => void
   onClose: () => void
 }): JSX.Element {
   const hasBody = todo.body.trim().length > 0
+  // Persisted choice wins; otherwise show the global default (no tag is written
+  // until the user explicitly picks a level).
+  const autonomy = autonomyFromTags(todo.tags) ?? defaultAutonomy
   return (
     <>
       <motion.div
@@ -686,9 +724,30 @@ function BacklogDetailDrawer({
             <span className={`h-1.5 w-1.5 rounded-full ${todo.done ? 'bg-green-400' : 'bg-zinc-500'}`} />
             {todo.done ? 'Completed' : 'Open'}
           </span>
-          {todo.tags.map((t) => (
+          {todo.tags.filter((t) => !t.startsWith(AUTONOMY_TAG_PREFIX)).map((t) => (
             <TagPill key={t} tag={t} />
           ))}
+        </div>
+
+        {/* Autonomy: persisted onto the todo as an `autonomy:<level>` tag and
+            honoured when the task is started. Mirrors the SessionDrawer control. */}
+        <div className="border-b border-zinc-800 px-4 py-3">
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Autonomy</p>
+          <div className="flex gap-1">
+            {(Object.keys(AUTONOMY) as AutonomyLevel[]).map((level) => {
+              const active = autonomy === level
+              return (
+                <button
+                  key={level}
+                  onClick={() => onSetAutonomy(level)}
+                  className={`flex-1 rounded-lg border px-2 py-1.5 text-left ${active ? `${ACCENT.rose.ring} bg-rose-500/10` : 'border-zinc-800 hover:border-zinc-700'}`}
+                >
+                  <span className={`text-[11px] font-medium ${active ? 'text-rose-200' : 'text-zinc-300'}`}>{AUTONOMY[level].glyph} {AUTONOMY[level].label}</span>
+                </button>
+              )
+            })}
+          </div>
+          <p className="mt-1 text-[10px] text-zinc-500">{AUTONOMY[autonomy].desc}</p>
         </div>
 
         {/* Body */}
