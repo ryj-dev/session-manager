@@ -160,6 +160,7 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         }
 
         // ── Agentic pipeline endpoints (called by orchestrator/worker sessions) ──
+        if (url.pathname === '/pipeline/start') { handlePipelineStart(body, res); return }
         if (url.pathname === '/pipeline/get-task') { handlePipelineGetTask(body, res); return }
         if (url.pathname === '/pipeline/set-stage') { handlePipelineSetStage(body, res); return }
         if (url.pathname === '/pipeline/emit-milestone') { handlePipelineEmit(body, res); return }
@@ -534,6 +535,68 @@ export function spawnPipelineOrchestrator(
   return { id }
 }
 
+export interface StartPipelineResult {
+  ok: boolean
+  alreadyRunning: boolean
+  taskId: string
+  orchestratorSessionId: string | null
+  tasks: pipelineStore.PipelineTask[]
+}
+
+/** Shared backlog→pipeline start path used by BOTH the renderer IPC
+ *  (pipeline:start) and the pipeline-start MCP tool. Reads the todo, creates the
+ *  PipelineTask, spawns the orchestrator (per-task worktree isolation), and
+ *  broadcasts pipeline:changed. Idempotent: if the todo is already a running task
+ *  it returns alreadyRunning:true without re-spawning. Throws if the todo does
+ *  not exist (notesManager.readTodo throws "Todo not found: <id>"). */
+export function startPipelineTaskFlow(opts: {
+  todoId: string
+  defaultAutonomy?: pipelineStore.AutonomyLevel
+  projectPath?: string
+}): StartPipelineResult {
+  // Double-start guard: a todo already on the board is a no-op (mirrors the UI
+  // hiding started todos from the backlog). Report it instead of re-spawning.
+  const existing = pipelineStore.getPipelineTask(opts.todoId)
+  if (existing) {
+    return {
+      ok: true,
+      alreadyRunning: true,
+      taskId: existing.id,
+      orchestratorSessionId: existing.orchestrator?.id ?? null,
+      tasks: pipelineStore.getPipelineTasks(),
+    }
+  }
+  // Pull the full todo (title/tags/body) so the orchestrator gets the user's
+  // detailed intent, not just the title. Throws if the todo is gone.
+  const todo = notesManager.readTodo(opts.todoId)
+  const autonomy = opts.defaultAutonomy ?? 'gated'
+  // Derive projectPath: explicit param → baseProjectsDir/<project-tag-name> →
+  // baseProjectsDir. Final fallback to home happens in ensureTaskWorktree.
+  let projectPath = opts.projectPath
+  if (!projectPath) {
+    const baseDir = loadSettings().baseProjectsDir
+    const projectTag = todo.tags.find((t) => t.startsWith('project:'))
+    const name = projectTag?.slice('project:'.length)
+    projectPath = baseDir ? (name ? `${baseDir}/${name}` : baseDir) : undefined
+  }
+  pipelineStore.startPipelineTask({ id: todo.id, title: todo.title, tags: todo.tags, body: todo.body }, autonomy, projectPath)
+  // Spawn the real orchestrator session for newly-started tasks.
+  const task = pipelineStore.getPipelineTask(todo.id)
+  let orchestratorSessionId: string | null = task?.orchestrator?.id ?? null
+  if (task && !task.orchestrator) {
+    try { orchestratorSessionId = spawnPipelineOrchestrator(task).id }
+    catch (err) { console.error('[pipeline] orchestrator spawn failed:', err) }
+  }
+  broadcastPipeline()
+  return {
+    ok: true,
+    alreadyRunning: false,
+    taskId: todo.id,
+    orchestratorSessionId,
+    tasks: pipelineStore.getPipelineTasks(),
+  }
+}
+
 // ── Pipeline session teardown ───────────────────────────────────────────────
 // Finished pipeline sessions are killed to free resources (each idle session is
 // a live `claude` process + a WebGL terminal context). Their pointer + milestone
@@ -617,6 +680,34 @@ function stopEphemeralSweep(): void {
 
 function readJson<T>(body: string): T {
   return JSON.parse(body) as T
+}
+
+/** Launch a backlog todo into the pipeline (shared by the renderer IPC and the
+ *  pipeline-start MCP tool, both via startPipelineTaskFlow). A missing todo maps
+ *  to 404 (readTodo throws "Todo not found"); other failures are 500. */
+function handlePipelineStart(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { todoId, defaultAutonomy, projectPath } =
+      readJson<{ todoId: string; defaultAutonomy?: pipelineStore.AutonomyLevel; projectPath?: string }>(body)
+    if (!todoId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'todoId required' }))
+      return
+    }
+    const result = startPipelineTaskFlow({ todoId, defaultAutonomy, projectPath })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      ok: result.ok,
+      alreadyRunning: result.alreadyRunning,
+      taskId: result.taskId,
+      orchestratorSessionId: result.orchestratorSessionId,
+    }))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const notFound = /not found/i.test(msg)
+    res.writeHead(notFound ? 404 : 500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: msg, todoNotFound: notFound }))
+  }
 }
 
 function handlePipelineGetTask(body: string, res: import('http').ServerResponse): void {
