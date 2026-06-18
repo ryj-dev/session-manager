@@ -1,10 +1,10 @@
-import { createServer, type Server } from 'http'
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { app, BrowserWindow } from 'electron'
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes, timingSafeEqual } from 'crypto'
 import { spawnSession, writeToSession, getSession, getAllSessions, getActiveSessions, updateClaudeSessionId, killSession } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
@@ -12,11 +12,15 @@ import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
-import { deriveRoleTools, stripOrchestratorOnlyTools } from './pipeline-roles'
+import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
 let server: Server | null = null
 let serverPort = 0
+// Per-launch shared secret guarding the mutating hook-server endpoints. Rotated
+// on every app start; distributed to the MCP server via SECRET_FILE (read fresh
+// per call there), so sessions surviving a restart pick up the new secret.
+let serverSecret = ''
 
 /** Broadcast the latest pipeline task list to the renderer mirror. */
 function broadcastPipeline(): void {
@@ -109,6 +113,7 @@ export function onPtyData(appSessionId: string, data: string): void {
 
 const APP_DATA_DIR = join(app.getPath('userData'))
 const PORT_FILE = join(APP_DATA_DIR, 'hook-server.port')
+const SECRET_FILE = join(APP_DATA_DIR, 'hook-server.secret')
 
 function writePortFile(port: number): void {
   try {
@@ -122,6 +127,48 @@ function removePortFile(): void {
   } catch { /* non-critical */ }
 }
 
+// mode 0600 is best-effort hardening (it blocks other-user reads) — it is NOT a
+// guarantee against a same-user process, which can still read the file. The
+// secret's real job is to block all NON-session local processes from the
+// mutating endpoints; same-user containment comes from role clamping (F3/F4).
+function writeSecretFile(secret: string): void {
+  try {
+    writeFileSync(SECRET_FILE, secret, { encoding: 'utf-8', mode: 0o600 })
+  } catch { /* non-critical */ }
+}
+
+function removeSecretFile(): void {
+  try {
+    if (existsSync(SECRET_FILE)) unlinkSync(SECRET_FILE)
+  } catch { /* non-critical */ }
+}
+
+/** Constant-time check of the X-Hook-Secret header against the launch secret. */
+function isAuthed(req: IncomingMessage): boolean {
+  const provided = req.headers['x-hook-secret']
+  if (typeof provided !== 'string' || !serverSecret) return false
+  const a = Buffer.from(provided)
+  const b = Buffer.from(serverSecret)
+  if (a.length !== b.length) return false        // timingSafeEqual throws on length mismatch
+  try { return timingSafeEqual(a, b) } catch { return false }
+}
+
+function denyUnauthed(res: ServerResponse): void {
+  res.writeHead(401, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ error: 'unauthorized: missing or invalid X-Hook-Secret' }))
+}
+
+// Mutating / spawning / side-effecting endpoints — gated behind the launch
+// secret. Reads (/sessions, /agents, /pipeline/get-*) and the hook pings
+// (/hook, /hook-sync) stay open: reads have no side effects, and the installed
+// hook curls have no channel to carry the secret (keeps them reinstall-free).
+const GUARDED = new Set([
+  '/spawn', '/spawn-agent', '/message',
+  '/pipeline/start', '/pipeline/set-stage', '/pipeline/emit-milestone',
+  '/pipeline/request-approval', '/pipeline/rename-session',
+  '/pipeline/merge-worktree', '/pipeline/put-artifact',
+])
+
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
   return new Promise((resolve, reject) => {
     server = createServer((req, res) => {
@@ -129,6 +176,9 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
       req.on('data', (chunk: Buffer) => { body += chunk.toString() })
       req.on('end', () => {
         const url = new URL(req.url ?? '/', `http://127.0.0.1`)
+
+        // ── Auth gate: mutating endpoints require the per-launch secret ──
+        if (GUARDED.has(url.pathname) && !isAuthed(req)) { denyUnauthed(res); return }
 
         // ── Spawn session endpoint ──
         if (url.pathname === '/spawn') {
@@ -209,6 +259,11 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         serverPort = addr.port
         console.log(`[hook-server] listening on port ${serverPort}`)
         writePortFile(serverPort)
+        // Generate + persist the per-launch secret BEFORE installing hooks /
+        // resolving, so the first guarded call already has a valid secret to
+        // match. Rotated every launch; the MCP server reads it fresh per call.
+        serverSecret = randomBytes(32).toString('hex')
+        writeSecretFile(serverSecret)
         if (!opts.skipInstall) installHooks(serverPort)
         startEphemeralSweep()
         resolve(serverPort)
@@ -229,6 +284,7 @@ export function stopHookServer(): void {
   stopEphemeralSweep()
   removeHooks()
   removePortFile()
+  removeSecretFile()
   // Wipe all inbox files on shutdown (may fail on Windows if files are still locked)
   try { rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true }) } catch { /* best-effort */ }
   server?.close()
@@ -271,6 +327,16 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     if (payload.pipelineRole === 'orchestrator') {
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'orchestrator role cannot be spawned via /spawn' }))
+      return
+    }
+
+    // F4: a pipeline-linked spawn MUST carry a role. Without one, the child
+    // would be both UNRESTRICTED (no role → no --allowedTools) AND a ghost
+    // (tree registration below requires both fields). Default-deny the
+    // malformed spawn so it surfaces to the caller instead of silently leaking.
+    if (payload.pipelineTaskId && !payload.pipelineRole) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'pipelineRole is required when pipelineTaskId is set' }))
       return
     }
 
@@ -320,9 +386,26 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     // Explicit allowedTools wins; otherwise derive scoping from pipelineRole
     // (server-side enforcement, not convention). No role + no explicit list ⇒
     // unrestricted, unchanged from prior behavior.
-    let effective = (payload.allowedTools && payload.allowedTools.length > 0)
-      ? payload.allowedTools
-      : deriveRoleTools(payload.pipelineRole)
+    const hasExplicit = !!(payload.allowedTools && payload.allowedTools.length > 0)
+    let effective = hasExplicit ? payload.allowedTools! : deriveRoleTools(payload.pipelineRole)
+    // F3: an explicit override may narrow WITHIN the role envelope but never
+    // exceed it. Applied ONLY for pipeline roles — non-pipeline explicit lists
+    // (no role) stay unrestricted. Dropped tools are logged + surfaced as a
+    // milestone, never silently truncated.
+    if (hasExplicit && payload.pipelineRole) {
+      const clamped = clampToRole(payload.allowedTools!, payload.pipelineRole)
+      if (clamped.length !== payload.allowedTools!.length) {
+        const dropped = payload.allowedTools!.filter(t => !clamped.includes(t))
+        console.warn(`[hook-server] clamped explicit allowedTools for role ${payload.pipelineRole}; dropped: ${dropped.join(', ')}`)
+        if (payload.pipelineTaskId) {
+          pipelineStore.emitMilestone(payload.pipelineTaskId, id, {
+            text: `⚠ Requested tools outside the ${payload.pipelineRole} role envelope were dropped: ${dropped.join(', ')}.`,
+            tone: 'warn', kind: 'blocked',
+          })
+        }
+      }
+      effective = clamped.length > 0 ? clamped : deriveRoleTools(payload.pipelineRole)
+    }
     // Hard invariant: workers never hold pipeline control tools, even when an
     // explicit allowedTools override is supplied (override still wins for all
     // other tools). Applied regardless of how `effective` was derived.
@@ -740,7 +823,11 @@ export function startPipelineTaskFlow(opts: {
   // Pull the full todo (title/tags/body) so the orchestrator gets the user's
   // detailed intent, not just the title. Throws if the todo is gone.
   const todo = notesManager.readTodo(opts.todoId)
-  const autonomy = opts.defaultAutonomy ?? 'gated'
+  // Honour a per-todo autonomy choice persisted from the backlog card (the
+  // `autonomy:<level>` tag) over the global default; fall back to today's default.
+  const tagged = todo.tags.find((t) => t.startsWith('autonomy:'))?.slice('autonomy:'.length)
+  const fromTag = (tagged === 'manual' || tagged === 'gated' || tagged === 'auto') ? tagged : undefined
+  const autonomy = fromTag ?? opts.defaultAutonomy ?? 'gated'
   // Derive projectPath: explicit param → baseProjectsDir/<project-tag-name> →
   // baseProjectsDir. Final fallback to home happens in ensureTaskWorktree.
   let projectPath = opts.projectPath

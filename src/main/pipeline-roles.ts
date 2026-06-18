@@ -23,6 +23,19 @@ export function deriveRoleTools(role?: PipelineRole): string[] | undefined {
   return undefined
 }
 
+/**
+ * Clamp an explicit allowedTools list to the role's envelope. With no envelope
+ * (orchestrator / absent role) the list is returned unchanged, preserving
+ * unrestricted non-pipeline spawns. For a worker role, any tool outside the
+ * role envelope is dropped — an explicit override can narrow but never exceed.
+ */
+export function clampToRole(tools: string[], role?: PipelineRole): string[] {
+  const envelope = deriveRoleTools(role)   // undefined for orchestrator / absent role
+  if (!envelope) return tools
+  const allowed = new Set(envelope)
+  return tools.filter(t => allowed.has(t))
+}
+
 // Control tools that drive the pipeline board. Hard invariant: only the
 // orchestrator may hold these — a worker must NEVER receive them, even when an
 // explicit allowedTools override is supplied.
