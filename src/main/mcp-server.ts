@@ -758,14 +758,29 @@ function getHookServerPort(): number | null {
   }
 }
 
+// Read the per-launch hook-server secret fresh per call (NO caching). The
+// secret rotates every app start; reading it per call lets sessions surviving a
+// restart pick up the new secret transparently. Missing file → null → header
+// omitted → server replies 401 (fails closed).
+function getHookSecret(): string | null {
+  try {
+    const secretFile = path.join(APP_DATA_DIR, 'hook-server.secret')
+    if (!fs.existsSync(secretFile)) return null
+    return fs.readFileSync(secretFile, 'utf-8').trim() || null
+  } catch {
+    return null
+  }
+}
+
 async function callHookServer(endpoint: string, body: unknown): Promise<unknown> {
   const port = getHookServerPort()
   if (!port) throw new Error('Session manager hook server is not running')
 
   const payload = JSON.stringify(body)
+  const secret = getHookSecret()
   const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(secret ? { 'X-Hook-Secret': secret } : {}) },
     body: payload,
   })
 
