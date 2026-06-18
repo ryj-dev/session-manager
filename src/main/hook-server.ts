@@ -913,11 +913,14 @@ export function autoResumeInflightOrchestrators(): { resumed: number; skipped: n
       else if (r === 'skipped-live') skipped++
       else failed++
     } catch (err) {
-      console.error('[hook-server] auto-resume failed for task', task.id, err)
+      console.error('[hook-server] pipeline orchestrator auto-resume failed for task', task.id, err)
       failed++
     }
   }
-  console.log('[hook-server] auto-resume summary:', { total: tasks.length, resumed, skipped, failed })
+  // NB: this counts in-flight auto-pipeline ORCHESTRATORS only — not regular
+  // terminal sessions (those restore via the renderer's saved-sessions path).
+  // total:0 simply means there were no running auto-pipelines to resume.
+  console.log('[hook-server] pipeline orchestrator auto-resume summary:', { pipelineTasks: tasks.length, resumed, skipped, failed })
   return { resumed, skipped, failed }
 }
 
