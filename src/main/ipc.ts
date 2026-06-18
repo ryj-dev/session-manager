@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators, pausePipelineTask, resumePipelineTask } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -550,6 +550,20 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     const tasks = pipelineStore.removePipelineTask(id)
     sendToRenderer('pipeline:changed', tasks)
     return tasks
+  })
+  ipcMain.handle('pipeline:pause', (_e, id: string) => {
+    // Graceful stop: kill the live session tree, keep the worktree +
+    // claudeSessionId, mark paused. pausePipelineTask broadcasts internally.
+    try { pausePipelineTask(id) } catch (err) { console.error('[pipeline] pause failed:', err) }
+    return pipelineStore.getPipelineTasks()
+  })
+  ipcMain.handle('pipeline:resume', (_e, id: string) => {
+    // Re-wake the orchestrator from its saved claudeSessionId + re-attach the
+    // worktree (reuses the relaunch resume path).
+    let result: 'resumed' | 'skipped-live' | 'failed' = 'failed'
+    try { result = resumePipelineTask(id) } catch (err) { console.error('[pipeline] resume failed:', err) }
+    sendToRenderer('pipeline:changed', pipelineStore.getPipelineTasks())
+    return { result, tasks: pipelineStore.getPipelineTasks() }
   })
 
   // Send an inter-session message (used by notes dispatch + future hooks)
