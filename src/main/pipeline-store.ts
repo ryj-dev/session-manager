@@ -50,6 +50,9 @@ export interface PipelineSession {
   worktreePath?: string
   /** Set once the worktree has been merged + removed → node is read-only (Option B). */
   worktreeRemoved?: boolean
+  /** Set when a best-effort live resume failed (transcript gone / process exited
+   *  early). The node becomes read-only and never re-offers auto/drawer resume. */
+  resumeFailed?: boolean
 }
 
 export interface PipelineTask {
@@ -529,4 +532,58 @@ export function markWorktreeRemoved(taskId: string, sessionId: string): Pipeline
     const node = findNode(task.orchestrator, sessionId)
     if (node) node.worktreeRemoved = true
   }).tasks
+}
+
+/** Re-key an existing session node to the fresh app/PTY id produced by a live
+ *  resume, refreshing its claudeSessionId/cwd and clearing stale resume/read-only
+ *  state. The node KEEPS its position, label, feed, and children — only the
+ *  identity the resumed process now reports (APP_SESSION_ID) is rebound, so its
+ *  milestones land on this node instead of forking a duplicate. Returns whether
+ *  the node existed. */
+export function rekeyPipelineSession(
+  taskId: string,
+  oldId: string,
+  next: { id: string; claudeSessionId?: string | null; cwd?: string },
+): boolean {
+  let nodeFound = false
+  mutateTask(taskId, (task) => {
+    const node = findNode(task.orchestrator, oldId)
+    if (!node) return
+    nodeFound = true
+    node.id = next.id
+    if (next.claudeSessionId !== undefined) node.claudeSessionId = next.claudeSessionId
+    if (next.cwd !== undefined) node.cwd = next.cwd
+    node.resumeFailed = false
+    node.status = 'working'
+  })
+  return nodeFound
+}
+
+/** Mark a session node read-only after a failed live resume (transcript gone).
+ *  Keeps claudeSessionId/feed for display but flags it so neither auto-resume nor
+ *  the drawer re-offers a live resume. */
+export function markSessionResumeFailed(taskId: string, sessionId: string): PipelineTask[] {
+  return mutateTask(taskId, (task) => {
+    const node = findNode(task.orchestrator, sessionId)
+    if (node) { node.resumeFailed = true; node.status = 'idle'; node.tone = 'fail' }
+  }).tasks
+}
+
+/** Persist a claudeSessionId change for a session node so a later relaunch resumes
+ *  the current conversation, not a stale fork. No-op if no node matches. */
+export function setSessionClaudeId(taskId: string, sessionId: string, claudeSessionId: string): void {
+  mutateTask(taskId, (task) => {
+    const node = findNode(task.orchestrator, sessionId)
+    if (node) node.claudeSessionId = claudeSessionId
+  })
+}
+
+/** In-flight tasks eligible for automatic orchestrator resume on relaunch:
+ *  not done, autonomy 'auto', has an orchestrator with a claudeSessionId that
+ *  hasn't already been flagged read-only. */
+export function getInflightAutoTasks(): PipelineTask[] {
+  return loadPipeline().filter(
+    (t) => t.stage !== 'done' && t.autonomy === 'auto' &&
+      !!t.orchestrator?.claudeSessionId && !t.orchestrator.resumeFailed,
+  )
 }

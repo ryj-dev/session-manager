@@ -5,7 +5,7 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID } from 'crypto'
-import { spawnSession, writeToSession, getSession, getAllSessions, updateClaudeSessionId, killSession } from './pty-manager'
+import { spawnSession, writeToSession, getSession, getAllSessions, getActiveSessions, updateClaudeSessionId, killSession } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
 import * as notesManager from './notes-manager'
@@ -533,6 +533,153 @@ export function spawnPipelineOrchestrator(
 
   console.log(`[hook-server] spawned orchestrator ${id} for task ${task.id} in ${cwd}`)
   return { id }
+}
+
+// ── Pipeline orchestrator auto-resume on app relaunch ───────────────────────
+
+/** Short continuation nudge for a resumed orchestrator (NOT the full task brief —
+ *  it recovers that via pipeline-get-task). Executed immediately on resume. */
+function buildOrchestratorResumePrompt(task: pipelineStore.PipelineTask): string {
+  return [
+    `You are RESUMING after an app restart. Your previous run was interrupted mid-task.`,
+    `Call pipeline-get-task({ taskId: "${task.id}" }) to reload the current stage, session tree,`,
+    `and any hand-off artifacts (pipeline-get-artifact), then CONTINUE the pipeline from where it`,
+    `left off. The current stage is "${task.stage}". Do NOT redo already-completed stages.`,
+    `Always pass pipelineTaskId="${task.id}" on every spawn/milestone so work slots into this tree.`,
+  ].join(' ')
+}
+
+/** Grace window for best-effort resume-failure detection. A successfully resumed
+ *  orchestrator runs far longer than this; an exit within it means the resume
+ *  never really took (transcript gone, or it exited without continuing). */
+const RESUME_GRACE_MS = 10_000
+
+/** Best-effort live resume of a task's orchestrator on relaunch. Spawns
+ *  `claude --resume <claudeSessionId>` in the node's recorded cwd, re-keys the
+ *  orchestrator node onto the fresh PTY id, and nudges it to recover context.
+ *  Returns 'resumed' | 'skipped-live' | 'failed'. */
+export function resumePipelineOrchestrator(
+  task: pipelineStore.PipelineTask,
+): 'resumed' | 'skipped-live' | 'failed' {
+  const node = task.orchestrator
+  const cid = node?.claudeSessionId
+  const cwd = node?.cwd
+  if (!node || !cid) return 'failed'
+
+  // EDGE: orchestrator already running (renderer-crash reload, or double trigger) → skip.
+  const alreadyLive = getActiveSessions().some(
+    (s) => s.claudeSessionId === cid || s.id === node.id,
+  )
+  if (alreadyLive) return 'skipped-live'
+
+  // EDGE: working dir gone (worktree removed) → can't resume → read-only.
+  if (!cwd || !existsSync(cwd)) {
+    pipelineStore.markSessionResumeFailed(task.id, node.id)
+    broadcastPipeline()
+    return 'failed'
+  }
+
+  const id = randomUUID()
+  const resumeStartedAt = Date.now()
+  const prompt = buildOrchestratorResumePrompt(task)
+  // Re-pass scoped tools + auto perms (they don't persist across CLI invocations).
+  // Positional `-- prompt` executes immediately on resume (mirrors the fresh-spawn path).
+  const args = ['--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--resume', cid, '--', prompt]
+  let session: ReturnType<typeof spawnSession>
+  try {
+    session = spawnSession(id, cwd, 'claude', args)
+  } catch (err) {
+    console.error('[hook-server] orchestrator resume spawn failed:', err)
+    pipelineStore.markSessionResumeFailed(task.id, node.id)
+    broadcastPipeline()
+    return 'failed'
+  }
+  if (attachListenersFn) attachListenersFn(id, session)
+
+  // Re-key the node onto the fresh PTY id BEFORE the resumed process emits anything,
+  // so emitMilestone/upsertPipelineSession (keyed by id) hit the existing node
+  // instead of forking a duplicate root/child.
+  const oldId = node.id
+  pipelineStore.rekeyPipelineSession(task.id, oldId, {
+    id,
+    claudeSessionId: session.claudeSessionId ?? cid,
+    cwd,
+  })
+
+  // Best-effort failure detection via a TIME-BASED grace window. A healthy
+  // resumed orchestrator keeps running far longer than the grace window, whereas
+  // a transcript-gone failure (`claude --resume` on a missing/bad session file)
+  // exits within a second or two — usually AFTER the TUI has already painted a
+  // frame, so the old `!alive` gate almost never fired. Instead, treat any exit
+  // INSIDE the grace window as a non-continued resume, regardless of output:
+  //   • non-zero exit  → transcript gone → mark the (re-keyed) node read-only;
+  //   • clean exit (0) → did no work     → drop the 'resuming' badge + settle to
+  //                                          idle so the node isn't stuck showing
+  //                                          "resuming" forever this session.
+  // An exit AFTER the window is a normal long-lived teardown and is left alone.
+  // node-pty allows multiple onExit listeners, so this coexists with
+  // attachSessionListeners' own onExit. markSessionResumeFailed/emitMilestone are
+  // keyed by `id`, so if the node was re-keyed away or torn down they no-op —
+  // and `handled` guards against acting twice.
+  let handled = false
+  session.process.onExit(({ exitCode }) => {
+    if (handled) return
+    if (Date.now() - resumeStartedAt >= RESUME_GRACE_MS) return
+    handled = true
+    if (exitCode !== 0) {
+      pipelineStore.markSessionResumeFailed(task.id, id)
+      pipelineStore.emitMilestone(task.id, id, {
+        text: 'Live resume failed — transcript unavailable. Node is read-only.',
+        kind: 'error', tone: 'fail', status: 'idle',
+      })
+    } else {
+      pipelineStore.emitMilestone(task.id, id, {
+        text: 'Resumed process exited early without continuing the task. Node is idle until the next relaunch.',
+        kind: 'info', tone: 'neutral', status: 'idle', badge: '',
+      })
+    }
+    broadcastPipeline()
+  })
+
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? cid, isPipeline: true })
+  }
+  // Refresh badge/tone on the already-re-keyed node (its id now matches).
+  pipelineStore.upsertPipelineSession(task.id, {
+    id,
+    role: 'orchestrator',
+    label: node.label,
+    status: 'working',
+    badge: 'resuming',
+    tone: 'active',
+    claudeSessionId: session.claudeSessionId ?? cid,
+    cwd,
+  })
+  broadcastPipeline()
+  console.log(`[hook-server] resumed orchestrator ${oldId}→${id} for task ${task.id} (claude ${cid})`)
+  return 'resumed'
+}
+
+/** On a true app relaunch, resume every in-flight `auto` task's orchestrator.
+ *  Gated/manual tasks are intentionally skipped (on-demand drawer resume only).
+ *  Best-effort and independent per task. Returns a summary for logging. */
+export function autoResumeInflightOrchestrators(): { resumed: number; skipped: number; failed: number } {
+  const tasks = pipelineStore.getInflightAutoTasks()
+  let resumed = 0, skipped = 0, failed = 0
+  for (const task of tasks) {
+    try {
+      const r = resumePipelineOrchestrator(task)
+      if (r === 'resumed') resumed++
+      else if (r === 'skipped-live') skipped++
+      else failed++
+    } catch (err) {
+      console.error('[hook-server] auto-resume failed for task', task.id, err)
+      failed++
+    }
+  }
+  console.log('[hook-server] auto-resume summary:', { total: tasks.length, resumed, skipped, failed })
+  return { resumed, skipped, failed }
 }
 
 export interface StartPipelineResult {

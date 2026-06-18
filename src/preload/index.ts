@@ -258,6 +258,8 @@ const api = {
   pipelineSetAutonomy: (id: string, level: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:setAutonomy', id, level),
   pipelineResolveGate: (id: string, approve: boolean): Promise<unknown[]> => ipcRenderer.invoke('pipeline:resolveGate', id, approve),
   pipelineRemove: (id: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:remove', id),
+  pipelineAutoResume: (): Promise<{ resumed: number; skipped: number; failed: number }> =>
+    ipcRenderer.invoke('pipeline:autoResume'),
   onPipelineChanged: (callback: (tasks: unknown[]) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, tasks: unknown[]) => callback(tasks)
     ipcRenderer.on('pipeline:changed', handler)

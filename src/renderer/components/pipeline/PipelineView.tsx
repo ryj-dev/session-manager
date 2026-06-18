@@ -885,8 +885,8 @@ function SessionTerminalPane({ sess, active }: { sess: PipelineSession; active: 
   useEffect(() => {
     // Not yet revealed — don't spawn anything (and never mount xterm into a hidden 0×0 box).
     if (!armed) return
-    // worktreeRemoved is read-only and must never offer resume.
-    if (sess.worktreeRemoved) {
+    // worktreeRemoved / resumeFailed are read-only and must never offer resume.
+    if (sess.worktreeRemoved || sess.resumeFailed) {
       setState({ mode: 'readonly', ptyId: null })
       return
     }
@@ -946,7 +946,7 @@ function SessionTerminalPane({ sess, active }: { sess: PipelineSession; active: 
         disposeTerminal(owned)
       }
     }
-  }, [armed, sess.id, sess.claudeSessionId, sess.cwd, sess.worktreeRemoved])
+  }, [armed, sess.id, sess.claudeSessionId, sess.cwd, sess.worktreeRemoved, sess.resumeFailed])
 
   const showTerminal = (state.mode === 'live' || state.mode === 'ephemeral') && state.ptyId
 
@@ -967,6 +967,14 @@ function SessionTerminalPane({ sess, active }: { sess: PipelineSession; active: 
           <p className="text-[11px] text-zinc-400">Read-only — worktree removed</p>
           <p className="max-w-xs text-[10px] text-zinc-600">
             This worker built on{sess.worktreeBranch ? <> branch <code className="text-zinc-500">{sess.worktreeBranch}</code></> : ' a worktree'}, which was merged and deleted. The transcript above is preserved; live resume is unavailable.
+          </p>
+        </div>
+      ) : sess.resumeFailed ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-800 bg-black/40 p-3 text-center">
+          <span className="text-lg text-zinc-700">🔒</span>
+          <p className="text-[11px] text-zinc-400">Resume unavailable — transcript missing</p>
+          <p className="max-w-xs text-[10px] text-zinc-600">
+            Auto-resume after restart failed (the working directory or saved conversation was gone). The milestone feed above is preserved.
           </p>
         </div>
       ) : (
