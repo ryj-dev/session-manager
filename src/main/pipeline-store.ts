@@ -12,6 +12,13 @@ import { atomicWriteSync } from './atomic-write'
 
 export type PipelineStage = 'plan' | 'implement' | 'review' | 'done'
 export type AutonomyLevel = 'manual' | 'gated' | 'auto'
+
+/** Where a send-to-review task's diff comes from. `working-tree` = uncommitted
+ *  changes in the project dir (reviewed in place, no worktree). `range` =
+ *  committed work between two refs (base...target, e.g. main...HEAD). */
+export type DiffSource =
+  | { kind: 'working-tree' }
+  | { kind: 'range'; base: string; target: string }
 export type PipelineRole = 'orchestrator' | 'plan' | 'implement' | 'review'
 export type PipelineSessionStatus = 'working' | 'idle' | 'permission' | 'done' | 'queued'
 export type PipelineTone = 'pass' | 'fail' | 'warn' | 'active' | 'neutral'
@@ -89,6 +96,13 @@ export interface PipelineTask {
   integrationStatus?: 'pending' | 'merged' | 'conflict'
   /** Files that conflicted on the last failed integration (for the card badge). */
   conflictFiles?: string[]
+  /** The stage the orchestrator BEGINS at. Default 'plan'. When 'review', this is
+   *  a send-to-review task: plan+implement are skipped, the orchestrator jumps
+   *  straight to the review⇄fix loop against an existing diff. Persisted so a
+   *  restart/resume re-enters review mode (NOT cleared by reopenPipelineTask). */
+  startStage?: PipelineStage
+  /** Where the diff under review comes from (send-to-review tasks only). */
+  diffSource?: DiffSource
   /** True while the task is paused: live sessions gracefully stopped, worktree +
    *  claudeSessionId preserved for resume. Distinct from Done and from removal. */
   paused?: boolean
@@ -217,12 +231,16 @@ export function hasPipelineTask(id: string): boolean {
   return readTasksFromDisk().some((t) => t.id === id)
 }
 
-/** Move a todo into the pipeline at the Plan stage. No-op if already present. */
+/** Move a todo into the pipeline. No-op if already present. Defaults to the Plan
+ *  stage; pass `opts.startStage` (e.g. 'review' for a send-to-review task) to
+ *  begin elsewhere, with `opts.diffSource` describing the diff under review. */
 export function startPipelineTask(
   todo: { id: string; title: string; tags: string[]; body?: string },
   defaultAutonomy: AutonomyLevel,
   projectPath?: string,
+  opts?: { startStage?: PipelineStage; diffSource?: DiffSource },
 ): PipelineTask[] {
+  const startStage = opts?.startStage ?? 'plan'
   return updateTasks((tasks) =>
     tasks.some((t) => t.id === todo.id)
       ? tasks
@@ -233,7 +251,9 @@ export function startPipelineTask(
             title: todo.title,
             tags: todo.tags,
             body: todo.body,
-            stage: 'plan',
+            stage: startStage,
+            startStage,
+            diffSource: opts?.diffSource,
             autonomy: defaultAutonomy,
             createdAt: Date.now(),
             projectPath,

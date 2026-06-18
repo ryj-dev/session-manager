@@ -597,6 +597,88 @@ function ensureTaskWorktree(task: pipelineStore.PipelineTask): { cwd: string; is
   return { cwd: baseDir, isolated: false }
 }
 
+/** Resolve the working directory for a SEND-TO-REVIEW task. Unlike
+ *  ensureTaskWorktree, working-tree mode NEVER gets a worktree — a fresh
+ *  worktree is a clean checkout and can't see the uncommitted edits we're here
+ *  to review, so the orchestrator + fixers must run in the real project dir. */
+function ensureReviewWorkdir(task: pipelineStore.PipelineTask): { cwd: string; isolated: boolean; repoRoot: string | null } {
+  const baseDir = task.projectPath || loadSettings().baseProjectsDir || app.getPath('home')
+  const repoRoot = gitWorktree.getRepoRoot(baseDir)
+  const ds = task.diffSource ?? { kind: 'working-tree' as const }
+  if (ds.kind === 'working-tree') {
+    // MUST run in the real project dir — that's where the uncommitted edits live.
+    return { cwd: baseDir, isolated: false, repoRoot }
+  }
+  // range: `git diff base...target` needs no checkout, so v1 reviews read-only
+  // from the repo root (shared dir) and lets fixers commit to `target`. FUTURE:
+  // for isolation, create a worktree on `target` lazily only when a fix is
+  // required (via gitWorktree.addWorktree + setTaskWorktree so
+  // finalizeTaskCompletion cleans it up). Not built in v1.
+  return { cwd: baseDir, isolated: false, repoRoot }
+}
+
+/** Build the orchestrator prompt for a SEND-TO-REVIEW task. The work already
+ *  exists (written outside the pipeline); the orchestrator does NOT plan or
+ *  implement from scratch — it reviews the given diff against the rubric (the
+ *  todo body) and drives a fix loop until clean. Reuses ORCHESTRATOR_TOOLS. */
+function buildReviewOrchestratorPrompt(
+  task: pipelineStore.PipelineTask,
+  diff: gitWorktree.DiffResult,
+): string {
+  const tagLine = task.tags.length ? `\n- tags: ${task.tags.join(', ')}` : ''
+  const rubricBlock = task.body && task.body.trim()
+    ? `\n- RUBRIC (the user's intent / acceptance criteria — what the change MUST achieve):\n  """\n${task.body.trim()}\n  """`
+    : `\n- RUBRIC: (no todo body provided — judge the diff on correctness/safety and infer intent from the title)`
+  const ds = task.diffSource ?? { kind: 'working-tree' as const }
+  const sourceLine = ds.kind === 'working-tree'
+    ? `working-tree (uncommitted changes in the project dir)`
+    : `range ${ds.base}...${ds.target} (committed work)`
+  const isolationLine = ds.kind === 'working-tree'
+    ? `running IN PLACE in the shared project dir, NOT a worktree — fixers edit files directly; do NOT fan out into parallel worktrees`
+    : `reviewing a committed range read-only from the repo root; if a fix is needed, fixers commit to ${ds.target}`
+  const diffNote = !diff.ok
+    ? `\n\n⚠ DIFF UNAVAILABLE: ${diff.error}. There is nothing concrete to review. Emit a 'blocked' milestone and raise a gate (gated/manual) or mark done with a note (auto) — do NOT fabricate a diff.`
+    : diff.empty
+      ? `\n\n⚠ EMPTY DIFF: the selected diff source has no changes. Emit a 'blocked'/warn milestone and raise a gate or mark done with a note — there is nothing to review.`
+      : diff.truncated
+        ? `\n\nNOTE: the diff is large and was TRUNCATED in storage. Reviewers should still read the 'diff' artifact, but be aware the tail may be cut.`
+        : ``
+  return `You are the ORCHESTRATOR for a SEND-TO-REVIEW pipeline task in the Session Manager app. Existing work — written OUTSIDE the pipeline — must be reviewed against the user's intent. You do NOT plan or implement from scratch; you review a given diff and drive a fix loop until it's clean. You do not write code yourself — you coordinate SEPARATE Claude sessions.
+
+TASK
+- taskId: ${task.id}
+- title: ${task.title}
+- autonomy: ${task.autonomy}   (manual = pause at every hand-off · gated = pause at gates · auto = run unattended)${tagLine}${rubricBlock}
+- DIFF SOURCE: ${sourceLine}
+- ISOLATION: ${isolationLine}
+
+The full git DIFF is stored as the 'diff' artifact and the RUBRIC as the 'rubric' artifact. Reviewers read those via pipeline-get-artifact rather than getting them pasted into chat.${diffNote}
+
+YOUR TOOLS (session-manager MCP):
+- emit-milestone({ taskId, text, status?, badge?, tone?, kind? }) — narrate to the board at EVERY notable step. kind: 'fanout' | 'review-verdict' | 'blocked' | 'done' | 'error' | 'info'.
+- spawn-session({ prompt, pipelineTaskId, pipelineRole, pipelineLabel?, fanoutKind?, reportBack }) — spawn a reviewer or fixer. ALWAYS pass pipelineTaskId="${task.id}".
+- pipeline-set-stage({ taskId, stage }) — advance the board (you are already at 'review'; the only move is to 'done').
+- pipeline-request-approval({ taskId, gate, detail }) — pause for the user. Under autonomy=auto it auto-approves; under gated/manual it returns "pending" and you MUST STOP and wait for an approval message.
+- pipeline-get-task({ taskId }) — re-read full state (use first if resuming).
+- pipeline-get-artifact({ taskId, kind }) — read 'diff', 'rubric', or a 'review:<dimension>' verdict.
+
+WORKFLOW
+1. emit-milestone "Reviewing existing work." (kind:'info'). You are already at the 'review' stage — there is NO plan/implement stage.
+2. Fan out ONE reviewer per RELEVANT dimension (pipelineRole:"review", fanoutKind:"topics", pipelineLabel:<dimension>). Each reviewer FIRST calls pipeline-get-artifact({ taskId:"${task.id}", kind:"diff" }) and kind:"rubric", then judges whether the diff (a) is correct/safe AND (b) actually satisfies the rubric — catching both bugs AND "doesn't do what was asked". Store its verdict via pipeline-put-artifact({ taskId:"${task.id}", kind:"review:<dimension>", content:<verdict + specifics> }) and report back only a 1-2 line summary. Give each a SPECIFIC prompt naming the exact files/areas to inspect; skip dimensions that don't apply.
+   Dimensions to consider: Correctness vs rubric · Bugs/runtime safety · Security (if touched) · Architecture/design · Tests · Performance (if hot paths).
+3. Read the verdicts via pipeline-get-artifact. Collect them and emit-milestone a one-line summary each round (kind:'review-verdict'). If any reviewer requests changes → spawn a FIXER (pipelineRole:"implement") to apply the fixes IN THE REVIEW WORKDIR (${ds.kind === 'working-tree' ? 'the shared project dir — run fixers SEQUENTIALLY, no parallel worktrees' : `committing to ${ds.target}`}), then RE-REVIEW only the dimensions that failed. LOOP until all relevant reviewers pass.
+4. pipeline-request-approval({ gate:"Mark reviewed / Done", detail:"<one-line summary>" }). If pending → STOP and wait. On approval/auto → pipeline-set-stage "done", then emit-milestone "Done." (kind:'done').
+
+RULES
+- Pass pipelineTaskId="${task.id}" on every spawn so sessions slot into this task's tree.
+- Give every session a DESCRIPTIVE pipelineLabel (e.g. "Security review · auth token check", "Fix · null guard").
+- Respect autonomy: under manual/gated, request approval at gates and WAIT; under auto, proceed.
+- When a spawned session reports it has FINISHED, mark it done: emit-milestone({ taskId:"${task.id}", sessionId:<that session's id>, status:"done", text:"<short>" }).
+- You coordinate only — never edit code or run builds yourself; delegate to spawned sessions.
+
+Begin now.`
+}
+
 /** Spawn the orchestrator session for a task and register it as the tree root.
  *  Called from the renderer's pipeline:start IPC. When `reopenedFrom` is set the
  *  orchestrator prompt is annotated that this is a REOPENED task (a prior
@@ -605,9 +687,34 @@ export function spawnPipelineOrchestrator(
   task: pipelineStore.PipelineTask,
   opts: { reopenedFrom?: pipelineStore.PipelineStage } = {},
 ): { id: string } {
-  const { cwd, isolated } = ensureTaskWorktree(task)
+  let cwd: string
+  let isolated: boolean
+  let prompt: string
+  // For review tasks, the resolved diff so we can emit board milestones AFTER the
+  // orchestrator node is registered (emitting before upsert would create a phantom
+  // root node keyed to task.id and break the orchestrator-is-root invariant).
+  let reviewDiff: gitWorktree.DiffResult | null = null
+  if (task.startStage === 'review') {
+    // SEND-TO-REVIEW: resolve the diff, store rubric + diff artifacts BEFORE
+    // building the prompt (the task already exists in the store). Board
+    // milestones for non-git / empty / truncated cases are emitted later (after
+    // upsertPipelineSession) so they land on the real orchestrator's feed.
+    const wd = ensureReviewWorkdir(task)
+    cwd = wd.cwd; isolated = wd.isolated
+    const source = task.diffSource ?? { kind: 'working-tree' as const }
+    const diff: gitWorktree.DiffResult = wd.repoRoot
+      ? gitWorktree.resolveDiff(source, { workdir: cwd, repoRoot: wd.repoRoot })
+      : { ok: false, empty: true, diff: '', files: [], error: 'not a git repository' }
+    if (task.body?.trim()) pipelineStore.putArtifact(task.id, 'rubric', task.body.trim())
+    pipelineStore.putArtifact(task.id, 'diff', diff.ok ? diff.diff : `(diff unavailable: ${diff.error})`)
+    reviewDiff = diff
+    prompt = buildReviewOrchestratorPrompt(task, diff)
+  } else {
+    const r = ensureTaskWorktree(task)
+    cwd = r.cwd; isolated = r.isolated
+    prompt = buildOrchestratorPrompt(task, isolated, opts.reopenedFrom)
+  }
   const id = randomUUID()
-  const prompt = buildOrchestratorPrompt(task, isolated, opts.reopenedFrom)
   // Auto permission mode so it can call its (scoped) tools without prompts.
   // The orchestrator runs on Sonnet — it coordinates only and never edits code,
   // so the long-lived token sink stays on the cheaper tier.
@@ -627,6 +734,19 @@ export function spawnPipelineOrchestrator(
     claudeSessionId: session.claudeSessionId ?? null,
     cwd,
   })
+
+  // Surface non-git / empty / truncated review cases on the orchestrator's own
+  // feed — emitted AFTER upsert so the orchestrator node is the registered root
+  // (keying to `id`, the real orchestrator UUID, not task.id).
+  if (reviewDiff) {
+    if (!reviewDiff.ok) {
+      pipelineStore.emitMilestone(task.id, id, { text: `⚠ ${reviewDiff.error} — nothing to review.`, tone: 'fail', kind: 'blocked' })
+    } else if (reviewDiff.empty) {
+      pipelineStore.emitMilestone(task.id, id, { text: 'No changes found for the selected diff source.', tone: 'warn', kind: 'blocked' })
+    } else if (reviewDiff.truncated) {
+      pipelineStore.emitMilestone(task.id, id, { text: 'Diff is large — stored copy was truncated for review.', tone: 'warn', kind: 'info' })
+    }
+  }
 
   const win = BrowserWindow.getAllWindows()[0]
   if (win && !win.isDestroyed()) {
@@ -819,6 +939,8 @@ export function startPipelineTaskFlow(opts: {
   todoId: string
   defaultAutonomy?: pipelineStore.AutonomyLevel
   projectPath?: string
+  startStage?: pipelineStore.PipelineStage
+  diffSource?: pipelineStore.DiffSource
 }): StartPipelineResult {
   // Double-start guard: a todo already on the board is a no-op (mirrors the UI
   // hiding started todos from the backlog). Report it instead of re-spawning.
@@ -849,7 +971,12 @@ export function startPipelineTaskFlow(opts: {
     const name = projectTag?.slice('project:'.length)
     projectPath = baseDir ? (name ? `${baseDir}/${name}` : baseDir) : undefined
   }
-  pipelineStore.startPipelineTask({ id: todo.id, title: todo.title, tags: todo.tags, body: todo.body }, autonomy, projectPath)
+  pipelineStore.startPipelineTask(
+    { id: todo.id, title: todo.title, tags: todo.tags, body: todo.body },
+    autonomy,
+    projectPath,
+    { startStage: opts.startStage, diffSource: opts.diffSource },
+  )
   // Spawn the real orchestrator session for newly-started tasks.
   const task = pipelineStore.getPipelineTask(todo.id)
   let orchestratorSessionId: string | null = task?.orchestrator?.id ?? null
@@ -957,14 +1084,20 @@ function readJson<T>(body: string): T {
  *  to 404 (readTodo throws "Todo not found"); other failures are 500. */
 function handlePipelineStart(body: string, res: import('http').ServerResponse): void {
   try {
-    const { todoId, defaultAutonomy, projectPath } =
-      readJson<{ todoId: string; defaultAutonomy?: pipelineStore.AutonomyLevel; projectPath?: string }>(body)
+    const { todoId, defaultAutonomy, projectPath, startStage, diffSource } =
+      readJson<{
+        todoId: string
+        defaultAutonomy?: pipelineStore.AutonomyLevel
+        projectPath?: string
+        startStage?: pipelineStore.PipelineStage
+        diffSource?: pipelineStore.DiffSource
+      }>(body)
     if (!todoId) {
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'todoId required' }))
       return
     }
-    const result = startPipelineTaskFlow({ todoId, defaultAutonomy, projectPath })
+    const result = startPipelineTaskFlow({ todoId, defaultAutonomy, projectPath, startStage, diffSource })
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
       ok: result.ok,

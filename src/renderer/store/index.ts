@@ -80,6 +80,11 @@ export type PipelineSessionStatus = 'working' | 'idle' | 'permission' | 'done' |
 export type PipelineTone = 'pass' | 'fail' | 'warn' | 'active' | 'neutral'
 export type PipelineKind = 'info' | 'plan-ready' | 'fanout' | 'review-verdict' | 'blocked' | 'done' | 'error'
 
+/** Where a send-to-review task's diff comes from. Mirrors pipeline-store.ts. */
+export type DiffSource =
+  | { kind: 'working-tree' }
+  | { kind: 'range'; base: string; target: string }
+
 /** One entry in a session's curated milestone feed. Legacy persisted entries
  *  may be bare strings; the renderer normalizes those defensively. */
 export interface FeedEntry {
@@ -135,6 +140,11 @@ export interface PipelineTask {
   integrationStatus?: 'pending' | 'merged' | 'conflict'
   /** Files that conflicted on the last failed integration. */
   conflictFiles?: string[]
+  /** The stage the orchestrator began at (default 'plan'). 'review' marks a
+   *  send-to-review task — plan/implement were skipped. */
+  startStage?: PipelineStage
+  /** Where the diff under review comes from (send-to-review tasks only). */
+  diffSource?: DiffSource
   /** True while paused: live sessions gracefully stopped, worktree +
    *  claudeSessionId preserved for resume. */
   paused?: boolean
@@ -316,6 +326,9 @@ export interface AppState {
   setPipelineProjectFilter: (name: string | null) => void
   /** Move a todo into the pipeline at the Plan stage (no-op if already present). */
   startPipelineTask: (todo: { id: string; title: string; tags: string[] }) => void
+  /** Send EXISTING work straight into the review⇄fix loop (skip plan/implement).
+   *  The diff is resolved from git per `diffSource`; the todo body is the rubric. */
+  startPipelineReview: (todo: { id: string; title: string; tags: string[] }, diffSource: DiffSource) => void
   /** Resolves to the updated task list once the main process has applied the
    *  stage change (a Done transition only lands if the merge succeeds). */
   setPipelineStage: (id: string, stage: PipelineStage) => Promise<PipelineTask[]>
@@ -584,6 +597,20 @@ export const useStore = create<AppState>((set, get) => ({
     }
     if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
     void window.api.pipelineStart(todo, state.pipelineDefaultAutonomy, projectPath)
+  },
+  startPipelineReview: (todo, diffSource) => {
+    const state = get()
+    // Same projectPath derivation as startPipelineTask — the repo holding the
+    // changes is where the orchestrator (and, for working-tree, the diff) lives.
+    const projectTag = todo.tags.find((t) => t.startsWith('project:'))
+    const name = projectTag ? projectTag.slice('project:'.length) : null
+    let projectPath: string | undefined
+    if (name) {
+      const match = state.sessions.find((s) => s.projectName === name)
+      projectPath = match?.projectPath ?? (state.baseProjectsDir ? `${state.baseProjectsDir}/${name}` : undefined)
+    }
+    if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
+    void window.api.pipelineStartReview(todo, state.pipelineDefaultAutonomy, diffSource, projectPath)
   },
   setPipelineStage: (id, stage) => window.api.pipelineSetStage(id, stage) as Promise<PipelineTask[]>,
   setPipelineAutonomy: (id, level) => { void window.api.pipelineSetAutonomy(id, level) },
