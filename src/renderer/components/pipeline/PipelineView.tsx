@@ -56,6 +56,7 @@ interface BoardCard {
   conflictFiles?: string[]
   /** 'review' marks a send-to-review task (plan/implement skipped). */
   startStage?: PipelineStage
+  paused?: boolean
 }
 
 const STAGES: { id: BoardStage; label: string; hint: string; accent: string; dot: string }[] = [
@@ -104,8 +105,29 @@ const AUTONOMY: Record<AutonomyLevel, { label: string; glyph: string; desc: stri
   auto:   { label: 'Autonomous', glyph: '●', desc: 'Runs the whole pipeline — accepts plans, implements, finishes review, moves to Done. Interrupts only for permissions or hard errors.' },
 }
 
+// Per-todo autonomy is persisted as a namespaced tag `autonomy:<level>` (same
+// convention as `project:<name>`), so a backlog card's chosen level survives
+// reopen and is honoured by the start funnel. No tag = fall back to the global
+// default; we never silently backfill one.
+const AUTONOMY_TAG_PREFIX = 'autonomy:'
+function autonomyFromTags(tags: string[]): AutonomyLevel | null {
+  const t = tags.find((x) => x.startsWith(AUTONOMY_TAG_PREFIX))
+  const v = t?.slice(AUTONOMY_TAG_PREFIX.length)
+  return v === 'manual' || v === 'gated' || v === 'auto' ? v : null
+}
+function withAutonomyTag(tags: string[], level: AutonomyLevel): string[] {
+  return [...tags.filter((t) => !t.startsWith(AUTONOMY_TAG_PREFIX)), `${AUTONOMY_TAG_PREFIX}${level}`]
+}
+
 function roleAccent(role: PipelineSession['role']): string {
   return role === 'orchestrator' ? 'rose' : role === 'plan' ? 'violet' : role === 'implement' ? 'amber' : 'sky'
+}
+
+/** Resume needs a saved conversation that wasn't flagged read-only. A task paused
+ *  before its orchestrator captured a claudeSessionId can't be live-resumed.
+ *  Single source of truth for Resume-button enablement across CardTile + drawer. */
+function canResumeOrchestrator(orch: PipelineSession | undefined): boolean {
+  return !!orch?.claudeSessionId && !orch.resumeFailed
 }
 
 /** Recursive lookup through the session tree. */
@@ -143,6 +165,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
   const setAutonomy = useStore((s) => s.setPipelineAutonomy)
   const resolveGate = useStore((s) => s.resolvePipelineGate)
   const removeTask = useStore((s) => s.removePipelineTask)
+  const pauseTask = useStore((s) => s.pausePipelineTask)
+  const resumeTask = useStore((s) => s.resumePipelineTask)
   const completedFilter = useStore((s) => s.completedFilter)
   const projectFilter = useStore((s) => s.pipelineProjectFilter)
   const setProjectFilter = useStore((s) => s.setPipelineProjectFilter)
@@ -256,6 +280,19 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     finally { setBacklogLoadingId((id) => (id === card.id ? null : id)) }
   }, [])
 
+  // Persist a backlog todo's autonomy as an `autonomy:<level>` tag. todosUpdate
+  // replaces the whole tag set, so withAutonomyTag rebuilds from the current tags
+  // (preserving project: and any others). Optimistically reflect it in the open
+  // drawer immediately; onNotesChanged → refreshBacklog re-reads the card tiles.
+  const onSetBacklogAutonomy = useCallback(async (level: AutonomyLevel) => {
+    setBacklogDetail((cur) => {
+      if (!cur) return cur
+      const tags = withAutonomyTag(cur.tags, level)
+      window.api.todosUpdate(cur.id, { tags })
+      return { ...cur, tags }
+    })
+  }, [])
+
   useEffect(() => {
     if (!visible) return
     const handler = (e: KeyboardEvent): void => {
@@ -329,6 +366,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
                       onOpen={(sessionId) => { if (card.stage === 'backlog') openBacklogDetail(card); else setOpen({ cardId: card.id, sessionId }) }}
                       onStart={() => startTask({ id: card.id, title: card.title, tags: card.tags })}
                       onReview={() => setReviewCard({ id: card.id, title: card.title, tags: card.tags })}
+                      onPause={() => pauseTask(card.id)}
+                      onResume={() => resumeTask(card.id)}
                       onDragStart={() => setDragCard(card)}
                       onDragEnd={() => { setDragCard(null); setDragOver(null) }}
                     />
@@ -356,6 +395,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
             onApprove={() => resolveGate(openTask.id, true)}
             onReject={() => resolveGate(openTask.id, false)}
             onAdvance={() => setStage(openTask.id, nextStage(openTask.stage))}
+            onPause={() => pauseTask(openTask.id)}
+            onResume={() => resumeTask(openTask.id)}
           />
         )}
       </AnimatePresence>
@@ -366,6 +407,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
             key={backlogDetail.id}
             todo={backlogDetail}
             loading={backlogLoadingId === backlogDetail.id}
+            defaultAutonomy={defaultAutonomy}
+            onSetAutonomy={onSetBacklogAutonomy}
             onClose={() => setBacklogDetail(null)}
           />
         )}
@@ -484,7 +527,7 @@ function ReviewChangesDialog({
 // ---------------------------------------------------------------------------
 
 function CardTile({
-  card, defaultAutonomy, expanded, onToggleExpand, onOpen, onStart, onReview, onDragStart, onDragEnd,
+  card, defaultAutonomy, expanded, onToggleExpand, onOpen, onStart, onReview, onPause, onResume, onDragStart, onDragEnd,
 }: {
   card: BoardCard
   defaultAutonomy: AutonomyLevel
@@ -493,6 +536,8 @@ function CardTile({
   onOpen: (sessionId: string | null) => void
   onStart: () => void
   onReview: () => void
+  onPause: () => void
+  onResume: () => void
   onDragStart: () => void
   onDragEnd: () => void
 }): JSX.Element {
@@ -503,8 +548,13 @@ function CardTile({
   const fanCount = stage?.children?.length ?? 0
   const lastOrchEntry = orch?.log.at(-1)
   const narration = lastOrchEntry ? normalizeEntry(lastOrchEntry).text : undefined
-  const autonomy = card.autonomy ?? defaultAutonomy
+  // Backlog cards have no PipelineTask yet, so their chosen autonomy lives on the
+  // todo's `autonomy:<level>` tag; in-flight cards carry card.autonomy directly.
+  const explicitAutonomy = autonomyFromTags(card.tags)
+  const autonomy = card.autonomy ?? explicitAutonomy ?? defaultAutonomy
+  const showAutonomy = card.stage !== 'backlog' || explicitAutonomy != null
   const isInFlight = card.stage !== 'backlog' && card.stage !== 'done'
+  const canResume = canResumeOrchestrator(orch)
 
   return (
     <motion.div
@@ -530,7 +580,7 @@ function CardTile({
 
         {card.tags.length > 0 && (
           <div className="mt-1.5 flex flex-wrap gap-1 pl-[18px]">
-            {card.tags.map((t) => (
+            {card.tags.filter((t) => !t.startsWith(AUTONOMY_TAG_PREFIX)).map((t) => (
               <TagPill key={t} tag={t} />
             ))}
           </div>
@@ -542,7 +592,7 @@ function CardTile({
               <StatusDot status={orch.status} /> orchestrator
             </span>
           )}
-          {card.stage !== 'backlog' && (
+          {showAutonomy && (
             <span className="flex items-center gap-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-400" title={AUTONOMY[autonomy].desc}>
               {AUTONOMY[autonomy].glyph} {AUTONOMY[autonomy].label}
             </span>
@@ -562,6 +612,9 @@ function CardTile({
               title={card.conflictFiles?.length ? `Merge conflict — not integrated. Conflicting: ${card.conflictFiles.join(', ')}` : 'Task branch did not merge cleanly — not integrated.'}
             >⚠ not merged — conflict</span>
           )}
+          {card.paused && (
+            <span className="rounded bg-zinc-700/60 px-1.5 py-0.5 text-[9px] font-medium text-zinc-300">⏸ paused</span>
+          )}
           {card.stage === 'done' && <span className="text-[10px] text-green-400/80">✓ complete</span>}
           {card.stage === 'backlog' && (
             <div className="ml-auto flex items-center gap-1">
@@ -576,15 +629,31 @@ function CardTile({
               >▶ Start</button>
             </div>
           )}
+          {isInFlight && (
+            card.paused ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); if (canResume) onResume() }}
+                disabled={!canResume}
+                className={`ml-auto rounded bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-300 transition-opacity hover:bg-rose-500/25 ${canResume ? 'opacity-0 group-hover:opacity-100' : 'cursor-not-allowed opacity-40'}`}
+                title={canResume ? 'Resume — re-wake the orchestrator from its saved conversation' : 'Cannot resume — no saved conversation id was captured'}
+              >▶ Resume</button>
+            ) : (
+              <button
+                onClick={(e) => { e.stopPropagation(); onPause() }}
+                className="ml-auto rounded bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-300 opacity-0 transition-opacity hover:bg-rose-500/25 group-hover:opacity-100"
+                title="Pause — gracefully stop sessions, keep the worktree for resume"
+              >⏸ Pause</button>
+            )
+          )}
         </div>
 
         {/* In-flight but not yet wired to real sessions */}
-        {isInFlight && !orch && (
+        {isInFlight && !orch && !card.paused && (
           <p className="mt-2 flex items-center gap-1.5 pl-[18px] text-[10px] text-zinc-500">
             <StatusDot status="queued" /> awaiting orchestrator
           </p>
         )}
-        {narration && card.stage !== 'done' && (
+        {narration && card.stage !== 'done' && !card.paused && (
           <p className="mt-2 truncate pl-[18px] font-mono text-[10px] text-zinc-500">{narration}</p>
         )}
       </div>
@@ -640,7 +709,7 @@ function SessionTree({
 // ---------------------------------------------------------------------------
 
 function SessionDrawer({
-  card, initialSessionId, onClose, onAdvance, onSetAutonomy, onApprove, onReject,
+  card, initialSessionId, onClose, onAdvance, onSetAutonomy, onApprove, onReject, onPause, onResume,
 }: {
   card: PipelineTask
   initialSessionId: string | null
@@ -649,7 +718,14 @@ function SessionDrawer({
   onSetAutonomy: (level: AutonomyLevel) => void
   onApprove: () => void
   onReject: () => void
+  onPause: () => void
+  onResume: () => void
 }): JSX.Element {
+  // card is a PipelineTask, whose stage type can never be 'backlog' (the board
+  // routes backlog cards to openBacklogDetail, not the drawer) — so excluding
+  // 'done' alone already matches CardTile's backlog-and-done exclusion here.
+  const isInFlight = card.stage !== 'done'
+  const canResume = canResumeOrchestrator(card.orchestrator)
   const [selectedId, setSelectedId] = useState<string | null>(initialSessionId)
   const selected = useMemo(() => findSession(card.orchestrator, selectedId), [card.orchestrator, selectedId])
   const stageMeta = STAGES.find((s) => s.id === card.stage)!
@@ -710,6 +786,22 @@ function SessionDrawer({
             </div>
             <p className="mt-1 text-[10px] text-zinc-500">{AUTONOMY[card.autonomy].desc}</p>
           </div>
+
+          {isInFlight && (
+            card.paused ? (
+              <button
+                onClick={onResume}
+                disabled={!canResume}
+                title={canResume ? undefined : 'Cannot resume — no saved conversation id was captured'}
+                className="w-full rounded-lg border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-[11px] font-medium text-rose-200 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >▶ Resume — re-wake the orchestrator</button>
+            ) : (
+              <button
+                onClick={onPause}
+                className="w-full rounded-lg border border-zinc-800 px-2 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-zinc-700"
+              >⏸ Pause — stop sessions, keep the worktree</button>
+            )
+          )}
 
           {card.gate && (
             <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5">
@@ -785,13 +877,18 @@ function SessionDrawer({
 // ---------------------------------------------------------------------------
 
 function BacklogDetailDrawer({
-  todo, loading, onClose,
+  todo, loading, defaultAutonomy, onSetAutonomy, onClose,
 }: {
   todo: { id: string; title: string; body: string; done: boolean; tags: string[] }
   loading: boolean
+  defaultAutonomy: AutonomyLevel
+  onSetAutonomy: (level: AutonomyLevel) => void
   onClose: () => void
 }): JSX.Element {
   const hasBody = todo.body.trim().length > 0
+  // Persisted choice wins; otherwise show the global default (no tag is written
+  // until the user explicitly picks a level).
+  const autonomy = autonomyFromTags(todo.tags) ?? defaultAutonomy
   return (
     <>
       <motion.div
@@ -819,9 +916,30 @@ function BacklogDetailDrawer({
             <span className={`h-1.5 w-1.5 rounded-full ${todo.done ? 'bg-green-400' : 'bg-zinc-500'}`} />
             {todo.done ? 'Completed' : 'Open'}
           </span>
-          {todo.tags.map((t) => (
+          {todo.tags.filter((t) => !t.startsWith(AUTONOMY_TAG_PREFIX)).map((t) => (
             <TagPill key={t} tag={t} />
           ))}
+        </div>
+
+        {/* Autonomy: persisted onto the todo as an `autonomy:<level>` tag and
+            honoured when the task is started. Mirrors the SessionDrawer control. */}
+        <div className="border-b border-zinc-800 px-4 py-3">
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Autonomy</p>
+          <div className="flex gap-1">
+            {(Object.keys(AUTONOMY) as AutonomyLevel[]).map((level) => {
+              const active = autonomy === level
+              return (
+                <button
+                  key={level}
+                  onClick={() => onSetAutonomy(level)}
+                  className={`flex-1 rounded-lg border px-2 py-1.5 text-left ${active ? `${ACCENT.rose.ring} bg-rose-500/10` : 'border-zinc-800 hover:border-zinc-700'}`}
+                >
+                  <span className={`text-[11px] font-medium ${active ? 'text-rose-200' : 'text-zinc-300'}`}>{AUTONOMY[level].glyph} {AUTONOMY[level].label}</span>
+                </button>
+              )
+            })}
+          </div>
+          <p className="mt-1 text-[10px] text-zinc-500">{AUTONOMY[autonomy].desc}</p>
         </div>
 
         {/* Body */}

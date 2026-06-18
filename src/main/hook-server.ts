@@ -1,10 +1,10 @@
-import { createServer, type Server } from 'http'
+import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { app, BrowserWindow } from 'electron'
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes, timingSafeEqual } from 'crypto'
 import { spawnSession, writeToSession, getSession, getAllSessions, getActiveSessions, updateClaudeSessionId, killSession } from './pty-manager'
 import { installSkillCommand } from './fs-service'
 import { atomicWriteSync } from './atomic-write'
@@ -12,10 +12,15 @@ import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
-import { deriveRoleTools, stripOrchestratorOnlyTools } from './pipeline-roles'
+import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
+import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
 let server: Server | null = null
 let serverPort = 0
+// Per-launch shared secret guarding the mutating hook-server endpoints. Rotated
+// on every app start; distributed to the MCP server via SECRET_FILE (read fresh
+// per call there), so sessions surviving a restart pick up the new secret.
+let serverSecret = ''
 
 /** Broadcast the latest pipeline task list to the renderer mirror. */
 function broadcastPipeline(): void {
@@ -108,6 +113,7 @@ export function onPtyData(appSessionId: string, data: string): void {
 
 const APP_DATA_DIR = join(app.getPath('userData'))
 const PORT_FILE = join(APP_DATA_DIR, 'hook-server.port')
+const SECRET_FILE = join(APP_DATA_DIR, 'hook-server.secret')
 
 function writePortFile(port: number): void {
   try {
@@ -121,6 +127,48 @@ function removePortFile(): void {
   } catch { /* non-critical */ }
 }
 
+// mode 0600 is best-effort hardening (it blocks other-user reads) — it is NOT a
+// guarantee against a same-user process, which can still read the file. The
+// secret's real job is to block all NON-session local processes from the
+// mutating endpoints; same-user containment comes from role clamping (F3/F4).
+function writeSecretFile(secret: string): void {
+  try {
+    writeFileSync(SECRET_FILE, secret, { encoding: 'utf-8', mode: 0o600 })
+  } catch { /* non-critical */ }
+}
+
+function removeSecretFile(): void {
+  try {
+    if (existsSync(SECRET_FILE)) unlinkSync(SECRET_FILE)
+  } catch { /* non-critical */ }
+}
+
+/** Constant-time check of the X-Hook-Secret header against the launch secret. */
+function isAuthed(req: IncomingMessage): boolean {
+  const provided = req.headers['x-hook-secret']
+  if (typeof provided !== 'string' || !serverSecret) return false
+  const a = Buffer.from(provided)
+  const b = Buffer.from(serverSecret)
+  if (a.length !== b.length) return false        // timingSafeEqual throws on length mismatch
+  try { return timingSafeEqual(a, b) } catch { return false }
+}
+
+function denyUnauthed(res: ServerResponse): void {
+  res.writeHead(401, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ error: 'unauthorized: missing or invalid X-Hook-Secret' }))
+}
+
+// Mutating / spawning / side-effecting endpoints — gated behind the launch
+// secret. Reads (/sessions, /agents, /pipeline/get-*) and the hook pings
+// (/hook, /hook-sync) stay open: reads have no side effects, and the installed
+// hook curls have no channel to carry the secret (keeps them reinstall-free).
+const GUARDED = new Set([
+  '/spawn', '/spawn-agent', '/message',
+  '/pipeline/start', '/pipeline/set-stage', '/pipeline/emit-milestone',
+  '/pipeline/request-approval', '/pipeline/rename-session',
+  '/pipeline/merge-worktree', '/pipeline/put-artifact',
+])
+
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
   return new Promise((resolve, reject) => {
     server = createServer((req, res) => {
@@ -128,6 +176,9 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
       req.on('data', (chunk: Buffer) => { body += chunk.toString() })
       req.on('end', () => {
         const url = new URL(req.url ?? '/', `http://127.0.0.1`)
+
+        // ── Auth gate: mutating endpoints require the per-launch secret ──
+        if (GUARDED.has(url.pathname) && !isAuthed(req)) { denyUnauthed(res); return }
 
         // ── Spawn session endpoint ──
         if (url.pathname === '/spawn') {
@@ -208,6 +259,11 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         serverPort = addr.port
         console.log(`[hook-server] listening on port ${serverPort}`)
         writePortFile(serverPort)
+        // Generate + persist the per-launch secret BEFORE installing hooks /
+        // resolving, so the first guarded call already has a valid secret to
+        // match. Rotated every launch; the MCP server reads it fresh per call.
+        serverSecret = randomBytes(32).toString('hex')
+        writeSecretFile(serverSecret)
         if (!opts.skipInstall) installHooks(serverPort)
         startEphemeralSweep()
         resolve(serverPort)
@@ -228,6 +284,7 @@ export function stopHookServer(): void {
   stopEphemeralSweep()
   removeHooks()
   removePortFile()
+  removeSecretFile()
   // Wipe all inbox files on shutdown (may fail on Windows if files are still locked)
   try { rmSync(join(app.getPath('userData'), 'messages'), { recursive: true, force: true }) } catch { /* best-effort */ }
   server?.close()
@@ -245,6 +302,9 @@ interface SpawnRequest {
   parentSessionId?: string
   pipelineLabel?: string
   fanoutKind?: string
+  /** Model for this session: alias "opus"|"sonnet"|"haiku" or a full model id.
+   *  Omitted → falls back to the per-role default (or inherits the user default). */
+  modelId?: string
   worktreeBranch?: string
   /** Create an isolated git worktree + branch for this worker. Implied when
    *  fanoutKind==='worktrees'. Requires worktreeBranch + a git projectPath. */
@@ -267,6 +327,16 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     if (payload.pipelineRole === 'orchestrator') {
       res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'orchestrator role cannot be spawned via /spawn' }))
+      return
+    }
+
+    // F4: a pipeline-linked spawn MUST carry a role. Without one, the child
+    // would be both UNRESTRICTED (no role → no --allowedTools) AND a ghost
+    // (tree registration below requires both fields). Default-deny the
+    // malformed spawn so it surfaces to the caller instead of silently leaking.
+    if (payload.pipelineTaskId && !payload.pipelineRole) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'pipelineRole is required when pipelineTaskId is set' }))
       return
     }
 
@@ -316,9 +386,26 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     // Explicit allowedTools wins; otherwise derive scoping from pipelineRole
     // (server-side enforcement, not convention). No role + no explicit list ⇒
     // unrestricted, unchanged from prior behavior.
-    let effective = (payload.allowedTools && payload.allowedTools.length > 0)
-      ? payload.allowedTools
-      : deriveRoleTools(payload.pipelineRole)
+    const hasExplicit = !!(payload.allowedTools && payload.allowedTools.length > 0)
+    let effective = hasExplicit ? payload.allowedTools! : deriveRoleTools(payload.pipelineRole)
+    // F3: an explicit override may narrow WITHIN the role envelope but never
+    // exceed it. Applied ONLY for pipeline roles — non-pipeline explicit lists
+    // (no role) stay unrestricted. Dropped tools are logged + surfaced as a
+    // milestone, never silently truncated.
+    if (hasExplicit && payload.pipelineRole) {
+      const clamped = clampToRole(payload.allowedTools!, payload.pipelineRole)
+      if (clamped.length !== payload.allowedTools!.length) {
+        const dropped = payload.allowedTools!.filter(t => !clamped.includes(t))
+        console.warn(`[hook-server] clamped explicit allowedTools for role ${payload.pipelineRole}; dropped: ${dropped.join(', ')}`)
+        if (payload.pipelineTaskId) {
+          pipelineStore.emitMilestone(payload.pipelineTaskId, id, {
+            text: `⚠ Requested tools outside the ${payload.pipelineRole} role envelope were dropped: ${dropped.join(', ')}.`,
+            tone: 'warn', kind: 'blocked',
+          })
+        }
+      }
+      effective = clamped.length > 0 ? clamped : deriveRoleTools(payload.pipelineRole)
+    }
     // Hard invariant: workers never hold pipeline control tools, even when an
     // explicit allowedTools override is supplied (override still wins for all
     // other tools). Applied regardless of how `effective` was derived.
@@ -335,12 +422,20 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       args = ['--permission-mode', 'auto', ...args]
     }
 
+    // Model tier: explicit modelId wins; otherwise fall back to the per-role
+    // default keyed on (role, fanoutKind). Prepend so `--model <id>` leads the
+    // arg list (CLI arg order is irrelevant; spawnSession prepends --session-id).
+    const modelId = resolveModelId(payload.modelId) ?? defaultModelForRole(payload.pipelineRole, payload.fanoutKind)
+    if (modelId) args = ['--model', modelId, ...args]
+    // Per-role env (e.g. cheap built-in subagent model for plan/implement workers).
+    const extraEnv = defaultEnvForRole(payload.pipelineRole, payload.fanoutKind)
+
     // Pass prompt as CLI positional arg — Claude Code parses it on startup,
     // bypassing the PTY paste/timing issues of writing to the TUI.
     // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
     let session: ReturnType<typeof spawnSession>
     try {
-      session = spawnSession(id, cwd, 'claude', [...args, '--', payload.prompt])
+      session = spawnSession(id, cwd, 'claude', [...args, '--', payload.prompt], extraEnv)
     } catch (err) {
       // Don't leak the worktree we just created if the PTY spawn fails.
       if (worktreePath && worktreeBranch && worktreeRepoRoot) {
@@ -373,6 +468,7 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
           label: payload.pipelineLabel ?? payload.pipelineRole,
           status: 'working',
           fanoutKind: payload.fanoutKind,
+          modelId,
           claudeSessionId: session.claudeSessionId ?? null,
           cwd,
           worktreeBranch,
@@ -438,19 +534,21 @@ PIPELINE: Plan → Implement → Review (review⇄implement loop) → Done.
 
 YOUR TOOLS (session-manager MCP):
 - emit-milestone({ taskId, text, status?, badge?, tone?, kind? }) — narrate to the board. Call it at EVERY notable step; the user watches this feed. Set kind to colour-code the feed: 'plan-ready' | 'fanout' | 'review-verdict' | 'blocked' | 'done' | 'error' | 'info'.
-- spawn-session({ prompt, pipelineTaskId, pipelineRole, pipelineLabel?, fanoutKind?, reportBack }) — spawn a stage session or fan-out worker. ALWAYS pass pipelineTaskId="${task.id}". Children report back to you automatically.
+- spawn-session({ prompt, pipelineTaskId, pipelineRole, pipelineLabel?, fanoutKind?, modelId?, reportBack }) — spawn a stage session or fan-out worker. ALWAYS pass pipelineTaskId="${task.id}". Pass modelId to pick the model for that session (see MODEL SELECTION). Children report back to you automatically.
 - pipeline-set-stage({ taskId, stage }) — advance the board (plan|implement|review|done).
 - pipeline-request-approval({ taskId, gate, detail }) — pause for the user. Under autonomy=auto it auto-approves and advances; under gated/manual it returns "pending" and you MUST STOP and wait for an approval message before continuing.
 - pipeline-get-task({ taskId }) — re-read full state (use this first if you are resuming).
 - pipeline-get-artifact({ taskId, kind }) — read a stored hand-off artifact ('plan'|'diff'|'review'). Use this to read review verdicts when deciding the review loop, instead of relaying big content through chat.
 
+MODEL SELECTION — pass modelId on EVERY spawn-session. Defaults (override per task when justified): planner/architect → "opus"; plan research probes (fanoutKind:"research") → "haiku"; implementers → "opus"; per-dimension reviewers → "sonnet"; the final full-diff verification reviewer → "opus". You (the orchestrator) already run on Sonnet — you coordinate only, you do not pick your own model. PER-TASK OVERRIDE: for trivial/mechanical tasks you MAY drop implementers to "sonnet"; for high-stakes or complex changes you MAY escalate per-dimension reviewers to "opus". Spend tokens where code quality is born (planning, implementation, final verification); save where verification breadth or context-gathering dominates (research probes, routine per-dimension review). If you omit modelId, the server applies these same role defaults — but set it explicitly so the choice is visible on the board.
+
 WORKFLOW
 1. emit-milestone "Task accepted — planning."
-2. Spawn a PLANNER: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"plan", pipelineLabel:"Architect", reportBack:"true", prompt:"<gather context for: ${task.title}, then produce a concrete implementation plan. You MAY fan out research probes via spawn-session with pipelineTaskId='${task.id}', pipelineRole='plan', fanoutKind='research'. Store the FULL plan with pipeline-put-artifact({ taskId:'${task.id}', kind:'plan', content:<full plan> }), then report back only a 1-2 line summary — do NOT paste the whole plan into chat.>" }).
+2. Spawn a PLANNER: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"plan", pipelineLabel:"Architect", modelId:"opus", reportBack:"true", prompt:"<gather context for: ${task.title}, then produce a concrete implementation plan. You MAY fan out research probes via spawn-session with pipelineTaskId='${task.id}', pipelineRole='plan', fanoutKind='research', modelId:'haiku' (research probes only read/look up — keep them on Haiku). Store the FULL plan with pipeline-put-artifact({ taskId:'${task.id}', kind:'plan', content:<full plan> }), then report back only a 1-2 line summary — do NOT paste the whole plan into chat.>" }).
 3. When the planner reports its plan: emit-milestone "Plan ready", then pipeline-request-approval({ gate:"Begin implementation", detail:"<one-line plan summary>" }). If pending → STOP and wait. When approved/auto-approved → continue.
-4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement"). Instruct it to FIRST call pipeline-get-artifact({ taskId:"${task.id}", kind:"plan" }) to fetch the full approved plan, implement it, and when done call pipeline-put-artifact({ taskId:"${task.id}", kind:"diff", content:<short summary of what changed> }) before reporting back a 1-2 line summary. Wait for it to report completion.
-   PARALLEL WORKTREE FAN-OUT (when the work splits cleanly into independent pieces): spawn each worker with isolate:true, a UNIQUE worktreeBranch (a short descriptive label, e.g. "csv-export", "auth-guard"), fanoutKind:"worktrees", and a descriptive pipelineLabel. Each worker builds in its OWN isolated git worktree+branch, so they can't clobber each other. When a worker reports it has FINISHED, call merge-worktree({ taskId:"${task.id}", sessionId:<that worker's id> }): on success the branch is merged, its worktree removed, and the node goes read-only; on "MERGE CONFLICT" send-message that worker to resolve the conflict in its (still-present) worktree and then re-call merge-worktree, OR spawn a fix worker for it. Only advance to review once ALL workers are merged. NOTE: if the project is not a git repo, isolation is skipped automatically (a warning milestone is emitted) and workers run in the shared dir — in that case do NOT fan out into parallel worktrees; run sequentially instead.
-5. pipeline-set-stage "review". Spawn ONE reviewer session per RELEVANT dimension below (pipelineRole:"review", fanoutKind:"topics", pipelineLabel:<dimension>). Give each reviewer a SPECIFIC, contextual prompt scoped to THIS change — name the exact files/areas to inspect and what to check (e.g. "Inspect the auth changes in src/x.ts and verify the new token check can't be bypassed"). Do NOT spawn generic "security reviewer" sessions; write the concern into the prompt. Skip dimensions that don't apply to this change.
+4. pipeline-set-stage "implement". Spawn an IMPLEMENTER (pipelineRole:"implement", modelId:"opus" — this is where code quality is born; only drop to "sonnet" for a trivial/mechanical task). Instruct it to FIRST call pipeline-get-artifact({ taskId:"${task.id}", kind:"plan" }) to fetch the full approved plan, implement it, and when done call pipeline-put-artifact({ taskId:"${task.id}", kind:"diff", content:<short summary of what changed> }) before reporting back a 1-2 line summary. Wait for it to report completion.
+   PARALLEL WORKTREE FAN-OUT (when the work splits cleanly into independent pieces): spawn each worker with modelId:"opus" (unless trivial), isolate:true, a UNIQUE worktreeBranch (a short descriptive label, e.g. "csv-export", "auth-guard"), fanoutKind:"worktrees", and a descriptive pipelineLabel. Each worker builds in its OWN isolated git worktree+branch, so they can't clobber each other. When a worker reports it has FINISHED, call merge-worktree({ taskId:"${task.id}", sessionId:<that worker's id> }): on success the branch is merged, its worktree removed, and the node goes read-only; on "MERGE CONFLICT" send-message that worker to resolve the conflict in its (still-present) worktree and then re-call merge-worktree, OR spawn a fix worker for it. Only advance to review once ALL workers are merged. NOTE: if the project is not a git repo, isolation is skipped automatically (a warning milestone is emitted) and workers run in the shared dir — in that case do NOT fan out into parallel worktrees; run sequentially instead.
+5. pipeline-set-stage "review". Spawn ONE reviewer session per RELEVANT dimension below (pipelineRole:"review", fanoutKind:"topics", pipelineLabel:<dimension>, modelId:"sonnet" — verification fans out N×, so keep per-dimension review cheap; escalate a single dimension to "opus" only when the change is high-stakes for that concern). Give each reviewer a SPECIFIC, contextual prompt scoped to THIS change — name the exact files/areas to inspect and what to check (e.g. "Inspect the auth changes in src/x.ts and verify the new token check can't be bypassed"). Do NOT spawn generic "security reviewer" sessions; write the concern into the prompt. Skip dimensions that don't apply to this change.
    Review dimensions to consider:
    - Correctness/logic — does it match the plan; edge cases handled
    - Bugs/runtime safety — null/undefined, async, error handling, regressions
@@ -458,7 +556,8 @@ WORKFLOW
    - Architecture/design — fits existing patterns, coupling, abstractions
    - Tests — coverage present and passing
    - Performance — only if the change touches hot paths
-   Each reviewer should FIRST call pipeline-get-artifact({ taskId:"${task.id}", kind:"plan" }) (and kind:"diff") for context, then store its verdict with pipeline-put-artifact({ taskId:"${task.id}", kind:"review", content:<verdict + specifics> }) and report back only a 1-2 line summary. (For per-dimension verdicts use a kind like "review:security" so they don't overwrite each other.) Read the full verdicts via pipeline-get-artifact kind:"review" to decide the loop. Collect all verdicts and emit-milestone a one-line summary each round. If any request changes, spawn an implementer (pipelineRole:"implement") to fix, then RE-REVIEW — re-run only the dimensions that failed. LOOP until all relevant reviewers pass.
+   Each reviewer should FIRST call pipeline-get-artifact({ taskId:"${task.id}", kind:"plan" }) (and kind:"diff") for context, then store its verdict with pipeline-put-artifact({ taskId:"${task.id}", kind:"review", content:<verdict + specifics> }) and report back only a 1-2 line summary. (For per-dimension verdicts use a kind like "review:security" so they don't overwrite each other.) Read the full verdicts via pipeline-get-artifact kind:"review" to decide the loop. Collect all verdicts and emit-milestone a one-line summary each round. If any request changes, spawn an implementer (pipelineRole:"implement", modelId:"opus") to fix, then RE-REVIEW — re-run only the dimensions that failed. LOOP until all relevant reviewers pass.
+5b. FINAL VERIFICATION (Opus) — after ALL per-dimension reviewers pass and BEFORE any "Merge to Done" gate, spawn ONE final reviewer: spawn-session({ pipelineTaskId:"${task.id}", pipelineRole:"review", modelId:"opus", pipelineLabel:"Final verification", fanoutKind:"topics", reportBack:"true", prompt:"<FIRST call pipeline-get-artifact({ taskId:'${task.id}', kind:'diff' }) and ({ kind:'plan' }). Verify the FULL assembled change end-to-end against this rubric = the task's full intent (the todo body / TASK DETAILS above). Check the change is complete, correct, internally consistent, and free of regressions the per-dimension reviewers may have missed. Store your verdict with pipeline-put-artifact({ taskId:'${task.id}', kind:'review:final', content:<PASS/CHANGES-REQUESTED + specifics> }), then report back a 1-2 line summary.>" }). This guarantees a weaker (Sonnet) reviewer never has the last word over Opus-written code. If final verification REQUESTS CHANGES → spawn an implementer (pipelineRole:"implement", modelId:"opus") to fix → re-run the affected per-dimension reviewers → re-run final verification. Only when final verification PASSES → proceed to step 6.
 6. pipeline-request-approval({ gate:"Merge to Done" }). When approved/auto → pipeline-set-stage "done". The set-stage response includes an "integration" result: only when integration.ok is true is the task actually Done (emit-milestone "Done."). If integration.ok is false there was a MERGE CONFLICT integrating your task branch into the integration branch — the card is held in Review (NOT Done), the worktree is kept, and integration.conflicts lists the conflicting files. In that case do NOT report success: emit-milestone a 'blocked'/'error' note, then spawn an implementer (pipelineRole:"implement") in the task worktree to merge the integration branch in and resolve the conflicts (or raise a gate for the user), and re-call pipeline-set-stage "done" to re-attempt integration. Loop until integration.ok is true.
 
 RULES
@@ -467,6 +566,7 @@ RULES
 - Respect autonomy: under manual/gated, request approval at gates and WAIT; under auto, proceed.
 - When a spawned session reports it has FINISHED, mark it done so it can be cleaned up (frees resources): emit-milestone({ taskId:"${task.id}", sessionId:<that session's id>, status:"done", text:"<short>" }). All sessions are torn down automatically when the task reaches Done.
 - You coordinate only — never edit code or run builds yourself; delegate to spawned sessions.
+- CONTEXT HYGIENE: keep worker prompts TIGHT — give each session only the context it needs and point it at artifacts (pipeline-get-artifact) rather than pasting large content into prompts. Tell long-running workers (e.g. a big implementer) that they MAY run /compact if their own context balloons. Keep your own coordination chatter lean so this Sonnet conversation stays cheap over the life of the task.
 
 Begin now.`
 }
@@ -616,7 +716,9 @@ export function spawnPipelineOrchestrator(
   }
   const id = randomUUID()
   // Auto permission mode so it can call its (scoped) tools without prompts.
-  const args = ['--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--', prompt]
+  // The orchestrator runs on Sonnet — it coordinates only and never edits code,
+  // so the long-lived token sink stays on the cheaper tier.
+  const args = ['--model', MODEL_IDS.sonnet, '--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--', prompt]
   const session = spawnSession(id, cwd, 'claude', args)
 
   if (attachListenersFn) attachListenersFn(id, session)
@@ -628,6 +730,7 @@ export function spawnPipelineOrchestrator(
     status: 'working',
     badge: 'starting',
     tone: 'active',
+    modelId: MODEL_IDS.sonnet,
     claudeSessionId: session.claudeSessionId ?? null,
     cwd,
   })
@@ -658,10 +761,16 @@ export function spawnPipelineOrchestrator(
 // ── Pipeline orchestrator auto-resume on app relaunch ───────────────────────
 
 /** Short continuation nudge for a resumed orchestrator (NOT the full task brief —
- *  it recovers that via pipeline-get-task). Executed immediately on resume. */
+ *  it recovers that via pipeline-get-task). Executed immediately on resume. The
+ *  paused branch tells the orchestrator it was deliberately stopped (not crashed)
+ *  so it re-establishes any fan-out workers the current stage needs rather than
+ *  assuming they're still live. */
 function buildOrchestratorResumePrompt(task: pipelineStore.PipelineTask): string {
+  const lead = task.paused
+    ? `You are RESUMING after a deliberate PAUSE. Your previous run was gracefully stopped; any in-flight worker sessions were torn down, but the task worktree and your conversation are intact. Re-spawn whatever workers the current stage needs.`
+    : `You are RESUMING after an app restart. Your previous run was interrupted mid-task.`
   return [
-    `You are RESUMING after an app restart. Your previous run was interrupted mid-task.`,
+    lead,
     `Call pipeline-get-task({ taskId: "${task.id}" }) to reload the current stage, session tree,`,
     `and any hand-off artifacts (pipeline-get-artifact), then CONTINUE the pipeline from where it`,
     `left off. The current stage is "${task.stage}". Do NOT redo already-completed stages.`,
@@ -703,8 +812,11 @@ export function resumePipelineOrchestrator(
   const resumeStartedAt = Date.now()
   const prompt = buildOrchestratorResumePrompt(task)
   // Re-pass scoped tools + auto perms (they don't persist across CLI invocations).
+  // Re-pass --model sonnet too: this keeps the resumed conversation on the SAME
+  // tier the orchestrator already ran on (not a model switch). Harmless if the
+  // CLI ignores --model alongside --resume.
   // Positional `-- prompt` executes immediately on resume (mirrors the fresh-spawn path).
-  const args = ['--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--resume', cid, '--', prompt]
+  const args = ['--model', MODEL_IDS.sonnet, '--permission-mode', 'auto', '--allowedTools', ...ORCHESTRATOR_TOOLS, '--resume', cid, '--', prompt]
   let session: ReturnType<typeof spawnSession>
   try {
     session = spawnSession(id, cwd, 'claude', args)
@@ -745,6 +857,12 @@ export function resumePipelineOrchestrator(
   session.process.onExit(({ exitCode }) => {
     if (handled) return
     if (Date.now() - resumeStartedAt >= RESUME_GRACE_MS) return
+    // A deliberate pause kills the orchestrator PTY inside the grace window, which
+    // would otherwise look like a crashed/failed resume. If the task is paused at
+    // exit time the exit was intentional — skip the failure marking + milestone so
+    // pausePipelineTask's own idle/'paused' settle (already applied) stands and the
+    // node stays resumable (not flipped read-only).
+    if (pipelineStore.getPipelineTask(task.id)?.paused) return
     handled = true
     if (exitCode !== 0) {
       pipelineStore.markSessionResumeFailed(task.id, id)
@@ -773,6 +891,7 @@ export function resumePipelineOrchestrator(
     status: 'working',
     badge: 'resuming',
     tone: 'active',
+    modelId: MODEL_IDS.sonnet,
     claudeSessionId: session.claudeSessionId ?? cid,
     cwd,
   })
@@ -838,7 +957,11 @@ export function startPipelineTaskFlow(opts: {
   // Pull the full todo (title/tags/body) so the orchestrator gets the user's
   // detailed intent, not just the title. Throws if the todo is gone.
   const todo = notesManager.readTodo(opts.todoId)
-  const autonomy = opts.defaultAutonomy ?? 'gated'
+  // Honour a per-todo autonomy choice persisted from the backlog card (the
+  // `autonomy:<level>` tag) over the global default; fall back to today's default.
+  const tagged = todo.tags.find((t) => t.startsWith('autonomy:'))?.slice('autonomy:'.length)
+  const fromTag = (tagged === 'manual' || tagged === 'gated' || tagged === 'auto') ? tagged : undefined
+  const autonomy = fromTag ?? opts.defaultAutonomy ?? 'gated'
   // Derive projectPath: explicit param → baseProjectsDir/<project-tag-name> →
   // baseProjectsDir. Final fallback to home happens in ensureTaskWorktree.
   let projectPath = opts.projectPath
@@ -1283,6 +1406,63 @@ export function restartPipelineOrchestrator(taskId: string, fromStage: pipelineS
   broadcastPipeline()
 }
 
+/** PAUSE a task: hold new work and gracefully stop the live session tree while
+ *  PRESERVING the task worktree + each node's claudeSessionId for resume. This is
+ *  precisely pipeline:remove's teardown MINUS the task-worktree cleanup MINUS
+ *  task removal, plus a `paused` flag. Killing the PTYs loses only the current
+ *  in-flight turn; the conversation resumes cleanly from claudeSessionId (same as
+ *  relaunch auto-resume). In-flight fan-out workers are discarded (their isolated
+ *  worktrees removed) — mirrors restart; the re-woken orchestrator re-spawns
+ *  whatever the current stage needs. Distinct from Done (merge + cleanup) and
+ *  drag-to-backlog (discard worktree + remove task). */
+export function pausePipelineTask(taskId: string): void {
+  // 1. Gracefully stop the whole live session tree (orchestrator + workers).
+  for (const sid of pipelineStore.getPipelineSessionIds(taskId)) {
+    try { killSession(sid); cleanupSession(sid) }
+    catch (err) { console.error('[hook-server] pause session teardown failed:', err) }
+  }
+  // 2. Clean ABANDONED fan-out worker worktrees only (reads the live tree, so do
+  //    it before any state reset). The TASK-level worktree is left intact.
+  try { cleanupWorkerWorktrees(taskId) }
+  catch (err) { console.error('[hook-server] pause worker-worktree cleanup failed:', err) }
+  // 3. Mark paused and settle the lingering orchestrator node to idle + a
+  //    'paused' badge so the board reads as paused rather than stalled.
+  pipelineStore.setPipelineTaskPaused(taskId, true)
+  const orch = pipelineStore.getPipelineTask(taskId)?.orchestrator
+  if (orch) {
+    pipelineStore.upsertPipelineSession(taskId, {
+      id: orch.id, role: 'orchestrator', label: orch.label,
+      status: 'idle', badge: 'paused', tone: 'neutral',
+      claudeSessionId: orch.claudeSessionId ?? null, cwd: orch.cwd,
+    })
+    pipelineStore.emitMilestone(taskId, orch.id, {
+      text: 'Task paused — sessions stopped, worktree preserved. Resume to continue.',
+      kind: 'info', tone: 'neutral', status: 'idle',
+    })
+  }
+  broadcastPipeline()
+}
+
+/** RESUME a paused task: clear the flag and re-wake the orchestrator from its
+ *  saved claudeSessionId via the existing resume path (which re-attaches the
+ *  worktree, re-keys the node, and handles already-live / worktree-gone edges).
+ *  On failure (worktree/transcript gone) the task is re-marked paused so the card
+ *  stays in a coherent — now read-only — state rather than silently dead-unpaused. */
+export function resumePipelineTask(taskId: string): 'resumed' | 'skipped-live' | 'failed' {
+  const task = pipelineStore.getPipelineTask(taskId)
+  if (!task) return 'failed'
+  // Clear the flag in the STORE first so resumePipelineOrchestrator's broadcasts
+  // render unpaused — but pass the captured (still-paused) task object so the
+  // resume PROMPT keeps its pause-aware framing.
+  pipelineStore.setPipelineTaskPaused(taskId, false)
+  const r = resumePipelineOrchestrator(task)
+  if (r === 'failed') {
+    pipelineStore.setPipelineTaskPaused(taskId, true)
+    broadcastPipeline()
+  }
+  return r
+}
+
 /** On task completion, merge the per-task branch into the integration (main)
  *  branch and remove the task worktree. SAFE ORDERING: the worktree is removed
  *  ONLY after a successful merge, so unmerged work is never lost. On conflict
@@ -1497,8 +1677,8 @@ function handleListAgents(res: import('http').ServerResponse): void {
 
 function handleSpawnAgent(body: string, res: import('http').ServerResponse): void {
   try {
-    const { agentName, prompt, projectPath } = JSON.parse(body) as {
-      agentName: string; prompt: string; projectPath?: string
+    const { agentName, prompt, projectPath, modelId: modelIdRaw } = JSON.parse(body) as {
+      agentName: string; prompt: string; projectPath?: string; modelId?: string
     }
 
     if (!agentName || !prompt) {
@@ -1529,9 +1709,12 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
     // skill commands from CLI args, bypassing PTY paste/timing issues.
     // Use '--' to end option parsing so --allowedTools (variadic) doesn't consume the prompt.
     const baseArgs = ['--allowedTools', ...allowedTools, '--', `/${commandName} ${prompt}`]
-    const args = loadSettings().autoModeForChildSessions
+    let args = loadSettings().autoModeForChildSessions
       ? ['--permission-mode', 'auto', ...baseArgs]
       : baseArgs
+    // Honor an explicit model override (no role default on the agent path).
+    const modelId = resolveModelId(modelIdRaw)
+    if (modelId) args = ['--model', modelId, ...args]
     const session = spawnSession(id, cwd, 'claude', args)
 
     if (attachListenersFn) {

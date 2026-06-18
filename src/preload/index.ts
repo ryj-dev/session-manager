@@ -265,6 +265,9 @@ const api = {
   pipelineSetAutonomy: (id: string, level: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:setAutonomy', id, level),
   pipelineResolveGate: (id: string, approve: boolean): Promise<unknown[]> => ipcRenderer.invoke('pipeline:resolveGate', id, approve),
   pipelineRemove: (id: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:remove', id),
+  pipelinePause: (id: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:pause', id),
+  pipelineResume: (id: string): Promise<{ result: 'resumed' | 'skipped-live' | 'failed'; tasks: unknown[] }> =>
+    ipcRenderer.invoke('pipeline:resume', id),
   pipelineAutoResume: (): Promise<{ resumed: number; skipped: number; failed: number }> =>
     ipcRenderer.invoke('pipeline:autoResume'),
   onPipelineChanged: (callback: (tasks: unknown[]) => void) => {

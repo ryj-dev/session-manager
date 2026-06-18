@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators, pausePipelineTask, resumePipelineTask } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -547,6 +547,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     return tasks
   })
   ipcMain.handle('pipeline:resolveGate', async (_e, id: string, approve: boolean) => {
+    // Capture BEFORE resolving — resolvePipelineGate clears the gate.
+    const before = pipelineStore.getPipelineTask(id)
+    const gateLabel = before?.gate?.label ?? 'gate'
+    const orchestratorId = before?.orchestrator?.id
+
     const tasks = pipelineStore.resolvePipelineGate(id, approve)
     sendToRenderer('pipeline:changed', tasks)
     // Approving a gate can advance the task to Done. resolvePipelineGate already
@@ -555,6 +560,20 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     if (approve && pipelineStore.getPipelineTask(id)?.stage === 'done') {
       try { await finalizeTaskCompletion(id) } catch (err) { console.error('[pipeline] task completion failed:', err) }
     }
+
+    // Wake the orchestrator so gated/manual tasks resume. The orchestrator STOPS
+    // after pipeline-request-approval returns "pending" and waits for this message.
+    // Read the stage AFTER finalize so the text reflects the real landing stage
+    // (a merge conflict holds the card in Review, not Done).
+    if (orchestratorId) {
+      const stage = pipelineStore.getPipelineTask(id)?.stage
+      const message = approve
+        ? `✅ The user APPROVED the gate "${gateLabel}". The board is now at the "${stage}" stage — resume the pipeline and proceed with the ${stage} work now. Call pipeline-get-task first if you need to recover context.`
+        : `↩️ The user SENT BACK the gate "${gateLabel}" (changes requested). The task stays at the "${stage}" stage — do NOT advance. Revise the current stage's work to address the feedback, then re-request approval (pipeline-request-approval) when ready.`
+      const res = deliverSessionMessage(orchestratorId, message, null)
+      if (!res.ok) console.warn(`[pipeline] gate resolve: could not wake orchestrator ${orchestratorId}: ${res.error}`)
+    }
+
     return pipelineStore.getPipelineTasks()
   })
   ipcMain.handle('pipeline:remove', (_e, id: string) => {
@@ -571,6 +590,20 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     const tasks = pipelineStore.removePipelineTask(id)
     sendToRenderer('pipeline:changed', tasks)
     return tasks
+  })
+  ipcMain.handle('pipeline:pause', (_e, id: string) => {
+    // Graceful stop: kill the live session tree, keep the worktree +
+    // claudeSessionId, mark paused. pausePipelineTask broadcasts internally.
+    try { pausePipelineTask(id) } catch (err) { console.error('[pipeline] pause failed:', err) }
+    return pipelineStore.getPipelineTasks()
+  })
+  ipcMain.handle('pipeline:resume', (_e, id: string) => {
+    // Re-wake the orchestrator from its saved claudeSessionId + re-attach the
+    // worktree (reuses the relaunch resume path).
+    let result: 'resumed' | 'skipped-live' | 'failed' = 'failed'
+    try { result = resumePipelineTask(id) } catch (err) { console.error('[pipeline] resume failed:', err) }
+    sendToRenderer('pipeline:changed', pipelineStore.getPipelineTasks())
+    return { result, tasks: pipelineStore.getPipelineTasks() }
   })
 
   // Send an inter-session message (used by notes dispatch + future hooks)

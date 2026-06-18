@@ -118,7 +118,7 @@ Not all sections are required. Each note type has recommended sections.
 | delete-memory | Delete a memory note (cleans up backlinks automatically) |
 | add-tags / remove-tags | Manage tags on notes |
 | repair-related | Rebuild ## Related from actual wikilinks (for fixing broken backlinks) |
-| spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager). Pipeline: pass \`pipelineTaskId\` + \`pipelineRole\` (orchestrator/plan/implement/review) to link it into a task tree, \`pipelineLabel\` for its tree-node label, \`fanoutKind\` for parallel children, and \`isolate:true\` + \`worktreeBranch\` for an isolated git worktree worker |
+| spawn-session | Spawn a new Claude Code session with an initial prompt (visible in session manager). Pipeline: pass \`pipelineTaskId\` + \`pipelineRole\` (orchestrator/plan/implement/review) to link it into a task tree, \`pipelineLabel\` for its tree-node label, \`fanoutKind\` for parallel children, \`modelId\` (alias "opus"/"sonnet"/"haiku" or full id) to pick the model per stage, and \`isolate:true\` + \`worktreeBranch\` for an isolated git worktree worker |
 | merge-worktree | Merge a finished worktree worker's branch back into the integration branch, remove its worktree, and mark the node read-only (pipeline) |
 | spawn-agent | Spawn a specialised agent (researcher, debugger, etc.) in a new session with a task |
 | list-agents | List available specialised agents and their capabilities |
@@ -759,14 +759,29 @@ function getHookServerPort(): number | null {
   }
 }
 
+// Read the per-launch hook-server secret fresh per call (NO caching). The
+// secret rotates every app start; reading it per call lets sessions surviving a
+// restart pick up the new secret transparently. Missing file → null → header
+// omitted → server replies 401 (fails closed).
+function getHookSecret(): string | null {
+  try {
+    const secretFile = path.join(APP_DATA_DIR, 'hook-server.secret')
+    if (!fs.existsSync(secretFile)) return null
+    return fs.readFileSync(secretFile, 'utf-8').trim() || null
+  } catch {
+    return null
+  }
+}
+
 async function callHookServer(endpoint: string, body: unknown): Promise<unknown> {
   const port = getHookServerPort()
   if (!port) throw new Error('Session manager hook server is not running')
 
   const payload = JSON.stringify(body)
+  const secret = getHookSecret()
   const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(secret ? { 'X-Hook-Secret': secret } : {}) },
     body: payload,
   })
 
@@ -805,10 +820,11 @@ server.tool(
     pipelineRole: z.enum(['orchestrator', 'plan', 'implement', 'review']).optional().describe('Agentic pipeline: this session\'s role in the task tree. Required with pipelineTaskId.'),
     pipelineLabel: z.string().optional().describe('Agentic pipeline: short label for the tree node (e.g. "Research · auth flow", "worktree: feat/export-ui").'),
     fanoutKind: z.string().optional().describe('Agentic pipeline: when this spawn is a parallel child, the kind of fan-out (e.g. "research", "worktrees", "topics").'),
+    modelId: z.string().optional().describe('Model for this session: alias "opus" | "sonnet" | "haiku", or a full model id. Omit to use the per-role default (or inherit the user default). Pipeline orchestrators set this per stage (plan/implement → opus, research probes → haiku, review → sonnet, final verification → opus).'),
     worktreeBranch: z.string().optional().describe('Agentic pipeline: for worktree workers, the branch they build on (recorded for resume / read-only-after-merge).'),
     isolate: z.boolean().optional().describe('Agentic pipeline: create an isolated git worktree+branch for this worker so parallel workers cannot clobber each other. Requires worktreeBranch and a git projectPath; falls back to the shared dir (with a warning) for non-git projects.'),
   },
-  async ({ prompt, projectPath, allowedTools, reportBack, pipelineTaskId, pipelineRole, pipelineLabel, fanoutKind, worktreeBranch, isolate }) => {
+  async ({ prompt, projectPath, allowedTools, reportBack, pipelineTaskId, pipelineRole, pipelineLabel, fanoutKind, modelId, worktreeBranch, isolate }) => {
     try {
       const parentContext = buildParentContext(reportBack)
       const cwd = projectPath || process.cwd()
@@ -820,6 +836,7 @@ server.tool(
         pipelineRole,
         pipelineLabel,
         fanoutKind,
+        modelId,
         worktreeBranch,
         isolate,
         // The spawner becomes the parent node in the tree.
@@ -938,8 +955,9 @@ server.tool(
     prompt: z.string().describe('The task prompt for the agent. Include full context — the agent has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the session. Defaults to the current working directory.'),
     reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): agent must report back findings. "done": agent sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
+    modelId: z.string().optional().describe('Model for this agent: alias "opus" | "sonnet" | "haiku", or a full model id. Omit to inherit the user default.'),
   },
-  async ({ agentName, prompt, projectPath, reportBack }) => {
+  async ({ agentName, prompt, projectPath, reportBack, modelId }) => {
     try {
       const parentContext = buildParentContext(reportBack)
       const cwd = projectPath || process.cwd()
@@ -947,6 +965,7 @@ server.tool(
         agentName,
         prompt: prompt + parentContext,
         projectPath: cwd,
+        modelId,
       }) as { id: string; projectPath: string; agent: string }
 
       return {

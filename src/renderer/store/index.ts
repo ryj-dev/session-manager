@@ -145,6 +145,11 @@ export interface PipelineTask {
   startStage?: PipelineStage
   /** Where the diff under review comes from (send-to-review tasks only). */
   diffSource?: DiffSource
+  /** True while paused: live sessions gracefully stopped, worktree +
+   *  claudeSessionId preserved for resume. */
+  paused?: boolean
+  /** When the task was paused (ms). */
+  pausedAt?: number
 }
 
 export const PIPELINE_STAGE_ORDER: PipelineStage[] = ['plan', 'implement', 'review', 'done']
@@ -333,6 +338,11 @@ export interface AppState {
   resolvePipelineGate: (id: string, approve: boolean) => Promise<PipelineTask[]>
   /** Remove a task from the pipeline (back to Backlog). */
   removePipelineTask: (id: string) => void
+  /** Pause a task: gracefully stop its live sessions, keep the worktree +
+   *  claudeSessionId so it can be resumed. */
+  pausePipelineTask: (id: string) => void
+  /** Resume a paused task: re-wake the orchestrator from its saved conversation. */
+  resumePipelineTask: (id: string) => void
 
   // Message notifications
   pendingMessages: MessageNotification[]
@@ -606,6 +616,8 @@ export const useStore = create<AppState>((set, get) => ({
   setPipelineAutonomy: (id, level) => { void window.api.pipelineSetAutonomy(id, level) },
   resolvePipelineGate: (id, approve) => window.api.pipelineResolveGate(id, approve) as Promise<PipelineTask[]>,
   removePipelineTask: (id) => { void window.api.pipelineRemove(id) },
+  pausePipelineTask: (id) => { void window.api.pipelinePause(id) },
+  resumePipelineTask: (id) => { void window.api.pipelineResume(id) },
 
   // Message notifications
   pendingMessages: [],

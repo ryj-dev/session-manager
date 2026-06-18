@@ -47,6 +47,8 @@ export interface PipelineSession {
   log: FeedEntry[]
   children?: PipelineSession[]
   fanoutKind?: string
+  /** Resolved model id this session was spawned with (audit / cost tracking). */
+  modelId?: string
   /** Stable Claude conversation id for best-effort live resume (`claude --resume`). */
   claudeSessionId?: string | null
   /** Working directory the session ran in (for resume). */
@@ -101,6 +103,12 @@ export interface PipelineTask {
   startStage?: PipelineStage
   /** Where the diff under review comes from (send-to-review tasks only). */
   diffSource?: DiffSource
+  /** True while the task is paused: live sessions gracefully stopped, worktree +
+   *  claudeSessionId preserved for resume. Distinct from Done and from removal. */
+  paused?: boolean
+  /** When the task was paused (ms). Persisted metadata for future use (e.g. a
+   *  "paused 5m ago" badge); not yet read anywhere. */
+  pausedAt?: number
 }
 
 const STAGE_ORDER: PipelineStage[] = ['plan', 'implement', 'review', 'done']
@@ -316,6 +324,17 @@ export function setPipelineAutonomy(id: string, level: AutonomyLevel): PipelineT
   return updateTasks((tasks) => tasks.map((t) => (t.id === id ? { ...t, autonomy: level } : t)))
 }
 
+/** Flag/unflag a task as paused. Pausing stamps `pausedAt`; resuming clears it.
+ *  Idempotent — pure flag flip, no session/worktree side effects (those live in
+ *  hook-server's pausePipelineTask / resumePipelineTask). */
+export function setPipelineTaskPaused(id: string, paused: boolean): PipelineTask[] {
+  return updateTasks((tasks) =>
+    tasks.map((t) =>
+      t.id === id ? { ...t, paused, pausedAt: paused ? Date.now() : undefined } : t,
+    ),
+  )
+}
+
 /** Resolve a pending gate: approve advances to the next stage; reject clears it. */
 export function resolvePipelineGate(id: string, approve: boolean): PipelineTask[] {
   return updateTasks((tasks) =>
@@ -454,6 +473,7 @@ export interface SessionUpsert {
   badge?: string
   tone?: PipelineTone
   fanoutKind?: string
+  modelId?: string
   claudeSessionId?: string | null
   cwd?: string
   worktreeBranch?: string
@@ -600,10 +620,11 @@ export function setSessionClaudeId(taskId: string, sessionId: string, claudeSess
 
 /** In-flight tasks eligible for automatic orchestrator resume on relaunch:
  *  not done, autonomy 'auto', has an orchestrator with a claudeSessionId that
- *  hasn't already been flagged read-only. */
+ *  hasn't already been flagged read-only. Paused tasks are EXCLUDED — they must
+ *  stay paused until the user explicitly resumes (else relaunch un-pauses them). */
 export function getInflightAutoTasks(): PipelineTask[] {
   return loadPipeline().filter(
-    (t) => t.stage !== 'done' && t.autonomy === 'auto' &&
+    (t) => t.stage !== 'done' && t.autonomy === 'auto' && !t.paused &&
       !!t.orchestrator?.claudeSessionId && !t.orchestrator.resumeFailed,
   )
 }
