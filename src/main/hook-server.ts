@@ -641,10 +641,16 @@ export function spawnPipelineOrchestrator(
 // ── Pipeline orchestrator auto-resume on app relaunch ───────────────────────
 
 /** Short continuation nudge for a resumed orchestrator (NOT the full task brief —
- *  it recovers that via pipeline-get-task). Executed immediately on resume. */
+ *  it recovers that via pipeline-get-task). Executed immediately on resume. The
+ *  paused branch tells the orchestrator it was deliberately stopped (not crashed)
+ *  so it re-establishes any fan-out workers the current stage needs rather than
+ *  assuming they're still live. */
 function buildOrchestratorResumePrompt(task: pipelineStore.PipelineTask): string {
+  const lead = task.paused
+    ? `You are RESUMING after a deliberate PAUSE. Your previous run was gracefully stopped; any in-flight worker sessions were torn down, but the task worktree and your conversation are intact. Re-spawn whatever workers the current stage needs.`
+    : `You are RESUMING after an app restart. Your previous run was interrupted mid-task.`
   return [
-    `You are RESUMING after an app restart. Your previous run was interrupted mid-task.`,
+    lead,
     `Call pipeline-get-task({ taskId: "${task.id}" }) to reload the current stage, session tree,`,
     `and any hand-off artifacts (pipeline-get-artifact), then CONTINUE the pipeline from where it`,
     `left off. The current stage is "${task.stage}". Do NOT redo already-completed stages.`,
@@ -731,6 +737,12 @@ export function resumePipelineOrchestrator(
   session.process.onExit(({ exitCode }) => {
     if (handled) return
     if (Date.now() - resumeStartedAt >= RESUME_GRACE_MS) return
+    // A deliberate pause kills the orchestrator PTY inside the grace window, which
+    // would otherwise look like a crashed/failed resume. If the task is paused at
+    // exit time the exit was intentional — skip the failure marking + milestone so
+    // pausePipelineTask's own idle/'paused' settle (already applied) stands and the
+    // node stays resumable (not flipped read-only).
+    if (pipelineStore.getPipelineTask(task.id)?.paused) return
     handled = true
     if (exitCode !== 0) {
       pipelineStore.markSessionResumeFailed(task.id, id)
@@ -1259,6 +1271,63 @@ export function restartPipelineOrchestrator(taskId: string, fromStage: pipelineS
     try { spawnPipelineOrchestrator(fresh, { reopenedFrom: fromStage }) } catch (err) { console.error('[hook-server] orchestrator respawn on restart failed:', err) }
   }
   broadcastPipeline()
+}
+
+/** PAUSE a task: hold new work and gracefully stop the live session tree while
+ *  PRESERVING the task worktree + each node's claudeSessionId for resume. This is
+ *  precisely pipeline:remove's teardown MINUS the task-worktree cleanup MINUS
+ *  task removal, plus a `paused` flag. Killing the PTYs loses only the current
+ *  in-flight turn; the conversation resumes cleanly from claudeSessionId (same as
+ *  relaunch auto-resume). In-flight fan-out workers are discarded (their isolated
+ *  worktrees removed) — mirrors restart; the re-woken orchestrator re-spawns
+ *  whatever the current stage needs. Distinct from Done (merge + cleanup) and
+ *  drag-to-backlog (discard worktree + remove task). */
+export function pausePipelineTask(taskId: string): void {
+  // 1. Gracefully stop the whole live session tree (orchestrator + workers).
+  for (const sid of pipelineStore.getPipelineSessionIds(taskId)) {
+    try { killSession(sid); cleanupSession(sid) }
+    catch (err) { console.error('[hook-server] pause session teardown failed:', err) }
+  }
+  // 2. Clean ABANDONED fan-out worker worktrees only (reads the live tree, so do
+  //    it before any state reset). The TASK-level worktree is left intact.
+  try { cleanupWorkerWorktrees(taskId) }
+  catch (err) { console.error('[hook-server] pause worker-worktree cleanup failed:', err) }
+  // 3. Mark paused and settle the lingering orchestrator node to idle + a
+  //    'paused' badge so the board reads as paused rather than stalled.
+  pipelineStore.setPipelineTaskPaused(taskId, true)
+  const orch = pipelineStore.getPipelineTask(taskId)?.orchestrator
+  if (orch) {
+    pipelineStore.upsertPipelineSession(taskId, {
+      id: orch.id, role: 'orchestrator', label: orch.label,
+      status: 'idle', badge: 'paused', tone: 'neutral',
+      claudeSessionId: orch.claudeSessionId ?? null, cwd: orch.cwd,
+    })
+    pipelineStore.emitMilestone(taskId, orch.id, {
+      text: 'Task paused — sessions stopped, worktree preserved. Resume to continue.',
+      kind: 'info', tone: 'neutral', status: 'idle',
+    })
+  }
+  broadcastPipeline()
+}
+
+/** RESUME a paused task: clear the flag and re-wake the orchestrator from its
+ *  saved claudeSessionId via the existing resume path (which re-attaches the
+ *  worktree, re-keys the node, and handles already-live / worktree-gone edges).
+ *  On failure (worktree/transcript gone) the task is re-marked paused so the card
+ *  stays in a coherent — now read-only — state rather than silently dead-unpaused. */
+export function resumePipelineTask(taskId: string): 'resumed' | 'skipped-live' | 'failed' {
+  const task = pipelineStore.getPipelineTask(taskId)
+  if (!task) return 'failed'
+  // Clear the flag in the STORE first so resumePipelineOrchestrator's broadcasts
+  // render unpaused — but pass the captured (still-paused) task object so the
+  // resume PROMPT keeps its pause-aware framing.
+  pipelineStore.setPipelineTaskPaused(taskId, false)
+  const r = resumePipelineOrchestrator(task)
+  if (r === 'failed') {
+    pipelineStore.setPipelineTaskPaused(taskId, true)
+    broadcastPipeline()
+  }
+  return r
 }
 
 /** On task completion, merge the per-task branch into the integration (main)
