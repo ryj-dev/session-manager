@@ -716,7 +716,11 @@ export function startPipelineTaskFlow(opts: {
   // Pull the full todo (title/tags/body) so the orchestrator gets the user's
   // detailed intent, not just the title. Throws if the todo is gone.
   const todo = notesManager.readTodo(opts.todoId)
-  const autonomy = opts.defaultAutonomy ?? 'gated'
+  // Honour a per-todo autonomy choice persisted from the backlog card (the
+  // `autonomy:<level>` tag) over the global default; fall back to today's default.
+  const tagged = todo.tags.find((t) => t.startsWith('autonomy:'))?.slice('autonomy:'.length)
+  const fromTag = (tagged === 'manual' || tagged === 'gated' || tagged === 'auto') ? tagged : undefined
+  const autonomy = fromTag ?? opts.defaultAutonomy ?? 'gated'
   // Derive projectPath: explicit param → baseProjectsDir/<project-tag-name> →
   // baseProjectsDir. Final fallback to home happens in ensureTaskWorktree.
   let projectPath = opts.projectPath
