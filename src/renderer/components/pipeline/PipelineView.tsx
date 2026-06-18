@@ -15,6 +15,7 @@ import type {
   PipelineTone,
   PipelineKind,
   FeedEntry,
+  DiffSource,
 } from '../../store'
 
 /**
@@ -53,6 +54,8 @@ interface BoardCard {
   orchestrator?: PipelineSession
   integrationStatus?: 'pending' | 'merged' | 'conflict'
   conflictFiles?: string[]
+  /** 'review' marks a send-to-review task (plan/implement skipped). */
+  startStage?: PipelineStage
 }
 
 const STAGES: { id: BoardStage; label: string; hint: string; accent: string; dot: string }[] = [
@@ -135,6 +138,7 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
   const pipelineTasks = useStore((s) => s.pipelineTasks)
   const defaultAutonomy = useStore((s) => s.pipelineDefaultAutonomy)
   const startTask = useStore((s) => s.startPipelineTask)
+  const startReview = useStore((s) => s.startPipelineReview)
   const setStage = useStore((s) => s.setPipelineStage)
   const setAutonomy = useStore((s) => s.setPipelineAutonomy)
   const resolveGate = useStore((s) => s.resolvePipelineGate)
@@ -162,6 +166,8 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
   // {id, title, tags}; the body is fetched lazily via todosRead on click.
   const [backlogDetail, setBacklogDetail] = useState<{ id: string; title: string; body: string; done: boolean; tags: string[] } | null>(null)
   const [backlogLoadingId, setBacklogLoadingId] = useState<string | null>(null)
+  // Backlog card whose "Review changes…" dialog is open (choose the diff source).
+  const [reviewCard, setReviewCard] = useState<{ id: string; title: string; tags: string[] } | null>(null)
   // True while the ProjectPicker dropdown is open. Checked in the global Escape
   // handler so it never closes the drawer/view while the popover owns Escape —
   // robust regardless of window-listener registration order.
@@ -208,10 +214,23 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
     if (card.stage === target) return
     if (target === 'backlog') { if (card.stage !== 'backlog') removeTask(card.id); return }
     if (card.stage === 'backlog') {
+      // Backlog → Review = SEND TO REVIEW: review existing work (uncommitted
+      // edits, by default) in place against the todo body as rubric, skipping
+      // plan/implement. The range option is chosen via the "Review changes…"
+      // action; a drag defaults to the common working-tree case.
+      if (target === 'review') {
+        startReview({ id: card.id, title: card.title, tags: card.tags }, { kind: 'working-tree' })
+        return
+      }
       startTask({ id: card.id, title: card.title, tags: card.tags })
       if (target !== 'plan') {
         await setStage(card.id, target as PipelineStage)
       }
+      return
+    }
+    // Send-to-review tasks have no meaningful plan/implement stage — block a
+    // backward drag to the left of review (there's nothing there to re-run).
+    if (card.startStage === 'review' && STAGE_FLOW.indexOf(target as PipelineStage) < STAGE_FLOW.indexOf('review')) {
       return
     }
     // A BACKWARD drag restarts the task from the target stage with a fresh
@@ -222,7 +241,7 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
       return
     }
     await setStage(card.id, target as PipelineStage)
-  }, [removeTask, startTask, setStage])
+  }, [removeTask, startTask, startReview, setStage])
 
   // Open the read-only detail panel for a Backlog card. Show a shell immediately
   // (title + tags are already known) then fetch the body; a race guard ignores a
@@ -309,6 +328,7 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
                       onToggleExpand={() => toggleExpand(card.id)}
                       onOpen={(sessionId) => { if (card.stage === 'backlog') openBacklogDetail(card); else setOpen({ cardId: card.id, sessionId }) }}
                       onStart={() => startTask({ id: card.id, title: card.title, tags: card.tags })}
+                      onReview={() => setReviewCard({ id: card.id, title: card.title, tags: card.tags })}
                       onDragStart={() => setDragCard(card)}
                       onDragEnd={() => { setDragCard(null); setDragOver(null) }}
                     />
@@ -350,7 +370,112 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
           />
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {reviewCard && (
+          <ReviewChangesDialog
+            key={reviewCard.id}
+            todo={reviewCard}
+            onClose={() => setReviewCard(null)}
+            onConfirm={(source) => { startReview(reviewCard, source); setReviewCard(null) }}
+          />
+        )}
+      </AnimatePresence>
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Review-changes dialog — pick the diff source for a send-to-review task
+// ---------------------------------------------------------------------------
+
+/** Small modal for the Backlog "Review changes…" action: choose between
+ *  reviewing the uncommitted working tree (default) or a committed base...target
+ *  range, then start the task at the Review stage against that diff. */
+function ReviewChangesDialog({
+  todo, onClose, onConfirm,
+}: {
+  todo: { id: string; title: string; tags: string[] }
+  onClose: () => void
+  onConfirm: (source: DiffSource) => void
+}): JSX.Element {
+  const [mode, setMode] = useState<'working-tree' | 'range'>('working-tree')
+  const [base, setBase] = useState('main')
+  const [target, setTarget] = useState('HEAD')
+
+  const confirm = (): void => {
+    if (mode === 'working-tree') { onConfirm({ kind: 'working-tree' }); return }
+    const b = base.trim() || 'main'
+    const t = target.trim() || 'HEAD'
+    onConfirm({ kind: 'range', base: b, target: t })
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="absolute inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <motion.div
+        initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.96, opacity: 0 }}
+        className="w-[380px] rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-medium text-zinc-100">Review changes</h3>
+        <p className="mt-1 line-clamp-2 text-[11px] text-zinc-500">{todo.title}</p>
+        <p className="mt-2 text-[11px] leading-relaxed text-zinc-400">
+          Send existing work straight into the review⇄fix loop, skipping plan/implement.
+          The todo body is the rubric reviewers check the diff against.
+        </p>
+
+        <div className="mt-3 space-y-2">
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-zinc-800 p-2 hover:border-zinc-700">
+            <input
+              type="radio" name="diff-source" className="mt-0.5"
+              checked={mode === 'working-tree'} onChange={() => setMode('working-tree')}
+            />
+            <span>
+              <span className="block text-[12px] text-zinc-200">Working tree</span>
+              <span className="block text-[10px] text-zinc-500">Uncommitted changes in the project dir (reviewed in place).</span>
+            </span>
+          </label>
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-zinc-800 p-2 hover:border-zinc-700">
+            <input
+              type="radio" name="diff-source" className="mt-0.5"
+              checked={mode === 'range'} onChange={() => setMode('range')}
+            />
+            <span className="flex-1">
+              <span className="block text-[12px] text-zinc-200">Branch range</span>
+              <span className="block text-[10px] text-zinc-500">Committed work between two refs (base…target).</span>
+              {mode === 'range' && (
+                <div className="mt-2 flex items-center gap-1.5">
+                  <input
+                    value={base} onChange={(e) => setBase(e.target.value)} placeholder="main"
+                    className="w-24 rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-100 outline-none focus:border-sky-500"
+                  />
+                  <span className="text-[11px] text-zinc-500">…</span>
+                  <input
+                    value={target} onChange={(e) => setTarget(e.target.value)} placeholder="HEAD"
+                    className="w-24 rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-100 outline-none focus:border-sky-500"
+                  />
+                </div>
+              )}
+            </span>
+          </label>
+        </div>
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded px-3 py-1 text-[11px] text-zinc-400 hover:text-zinc-200"
+          >Cancel</button>
+          <button
+            onClick={confirm}
+            className="rounded bg-sky-500/20 px-3 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/30"
+          >Start review</button>
+        </div>
+      </motion.div>
+    </motion.div>
   )
 }
 
@@ -359,7 +484,7 @@ export function PipelineView({ visible, onClose }: Props): JSX.Element | null {
 // ---------------------------------------------------------------------------
 
 function CardTile({
-  card, defaultAutonomy, expanded, onToggleExpand, onOpen, onStart, onDragStart, onDragEnd,
+  card, defaultAutonomy, expanded, onToggleExpand, onOpen, onStart, onReview, onDragStart, onDragEnd,
 }: {
   card: BoardCard
   defaultAutonomy: AutonomyLevel
@@ -367,6 +492,7 @@ function CardTile({
   onToggleExpand: () => void
   onOpen: (sessionId: string | null) => void
   onStart: () => void
+  onReview: () => void
   onDragStart: () => void
   onDragEnd: () => void
 }): JSX.Element {
@@ -438,10 +564,17 @@ function CardTile({
           )}
           {card.stage === 'done' && <span className="text-[10px] text-green-400/80">✓ complete</span>}
           {card.stage === 'backlog' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onStart() }}
-              className="ml-auto rounded bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-300 opacity-0 transition-opacity hover:bg-rose-500/25 group-hover:opacity-100"
-            >▶ Start</button>
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={(e) => { e.stopPropagation(); onReview() }}
+                title="Review existing work (uncommitted edits or a committed branch) against this todo — skips plan/implement"
+                className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-300 opacity-0 transition-opacity hover:bg-sky-500/25 group-hover:opacity-100"
+              >⊙ Review changes…</button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onStart() }}
+                className="rounded bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-300 opacity-0 transition-opacity hover:bg-rose-500/25 group-hover:opacity-100"
+              >▶ Start</button>
+            </div>
           )}
         </div>
 

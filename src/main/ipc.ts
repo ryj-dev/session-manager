@@ -45,7 +45,7 @@ import { validateNote, slugify, generateNote, touchModified, appendToSection, re
 import * as notesManager from './notes-manager'
 import type { TodoFilter } from './notes-manager'
 import * as pipelineStore from './pipeline-store'
-import type { PipelineStage, AutonomyLevel } from './pipeline-store'
+import type { PipelineStage, AutonomyLevel, DiffSource } from './pipeline-store'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -496,6 +496,27 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     // startPipelineTaskFlow so the IPC and pipeline-start MCP tool can't diverge.
     return startPipelineTaskFlow({ todoId: todo.id, defaultAutonomy, projectPath }).tasks
   })
+  ipcMain.handle(
+    'pipeline:startReview',
+    (
+      _e,
+      todo: { id: string; title: string; tags: string[] },
+      defaultAutonomy: AutonomyLevel,
+      diffSource: DiffSource,
+      projectPath?: string,
+    ) => {
+      // Send-to-review: begin at the review stage against an existing diff
+      // (working tree or a committed range), skipping plan/implement. Shares the
+      // same flow as pipeline:start, threading startStage + diffSource through.
+      return startPipelineTaskFlow({
+        todoId: todo.id,
+        defaultAutonomy,
+        projectPath,
+        startStage: 'review',
+        diffSource,
+      }).tasks
+    },
+  )
   ipcMain.handle('pipeline:setStage', async (_e, id: string, stage: PipelineStage) => {
     // Detect a BACKWARD move (target earlier than the current stage) on an
     // already-running task. Done is excluded — it routes to the finalize/integrate

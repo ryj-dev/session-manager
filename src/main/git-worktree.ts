@@ -255,3 +255,121 @@ export function removeWorktree(opts: RemoveWorktreeOpts): void {
   // Clean up any dangling worktree administrative entries.
   git(['-C', repoRoot, 'worktree', 'prune'])
 }
+
+// ── Diff resolution (send-to-review) ─────────────────────────────────────────
+// The send-to-review flow reviews work done OUTSIDE the pipeline. The diff is
+// resolved from git — either the uncommitted working tree, or a committed
+// base...target range — and handed to the orchestrator as the review subject.
+
+/** Where a diff is sourced from. Mirrors the `DiffSource` type in
+ *  pipeline-store.ts (kept duplicated here so this module stays electron-free
+ *  and independently unit-testable). */
+export type DiffSource =
+  | { kind: 'working-tree' }
+  | { kind: 'range'; base: string; target: string }
+
+export interface DiffResult {
+  ok: boolean
+  diff: string        // unified diff text (possibly truncated)
+  files: string[]     // changed file paths
+  status?: string     // `git status --porcelain` (working-tree only)
+  empty: boolean      // resolved cleanly but no changes
+  truncated?: boolean // diff exceeded the size cap
+  error?: string      // not-a-repo / bad ref / etc.
+}
+
+/** Cap the diff size. Past this the returned `diff` is truncated and
+ *  `truncated` is set; the caller stores this (capped) string as the `diff`
+ *  artifact and emits a truncation milestone + a note in the review prompt, so
+ *  the cut is surfaced rather than silent. */
+const DIFF_CAP_BYTES = 200_000
+
+/** Apply the size cap to a diff string, flagging truncation. */
+function capDiff(diff: string): { diff: string; truncated: boolean } {
+  if (diff.length <= DIFF_CAP_BYTES) return { diff, truncated: false }
+  return { diff: diff.slice(0, DIFF_CAP_BYTES), truncated: true }
+}
+
+/** Diff the uncommitted working tree (staged + unstaged + untracked) against
+ *  HEAD. Runs in `dir` directly — used by review-in-place, so it must see the
+ *  real edits, not a clean worktree checkout. */
+export function workingTreeDiff(dir: string): DiffResult {
+  const top = git(['-C', dir, 'rev-parse', '--show-toplevel'])
+  if (top.status !== 0) {
+    return { ok: false, diff: '', files: [], empty: true, error: 'not a git repository' }
+  }
+
+  // Tracked changes (staged + unstaged) vs HEAD.
+  const tracked = git(['-C', dir, 'diff', 'HEAD'])
+  const names = git(['-C', dir, 'diff', '--name-only', 'HEAD'])
+  const trackedFiles = names.stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+
+  // Untracked files: surface them as "new file" diffs so reviewers can see
+  // brand-new code without mutating the index. `--no-index` exits 1 but emits a
+  // valid diff; the null device differs per platform.
+  //
+  // `-z --untracked-files=all` is essential: `-z` gives NUL-separated, UNQUOTED
+  // paths (default porcelain C-quotes non-ASCII/special names, which would then
+  // not be a real path and get silently skipped), and `--untracked-files=all`
+  // expands a new directory into its individual files (default collapses it to a
+  // single `?? newdir/` entry whose `--no-index` diff errors, hiding every file
+  // inside). Tokens must NOT be trimmed — filenames can have leading/trailing
+  // spaces. Each NUL-delimited porcelain entry is `XY <path>`; for `??` strip the
+  // 3-char `?? ` prefix.
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null'
+  const status = git(['-C', dir, 'status', '--porcelain', '-z', '--untracked-files=all'])
+  const untracked: string[] = []
+  let untrackedDiff = ''
+  if (status.status === 0) {
+    for (const entry of status.stdout.split('\0')) {
+      if (!entry) continue
+      if (entry.startsWith('?? ')) {
+        const file = entry.slice(3)
+        if (!file) continue
+        untracked.push(file)
+        const nd = git(['-C', dir, 'diff', '--no-index', '--', nullDevice, file])
+        if (nd.stdout) untrackedDiff += nd.stdout
+      }
+    }
+  }
+
+  const combined = tracked.stdout + untrackedDiff
+  const files = [...trackedFiles, ...untracked]
+  const empty = !tracked.stdout.trim() && untracked.length === 0
+  const { diff, truncated } = capDiff(combined)
+  return {
+    ok: true,
+    diff,
+    files,
+    status: status.status === 0 ? status.stdout : undefined,
+    empty,
+    truncated,
+  }
+}
+
+/** Diff a committed range `base...target` (three-dot = changes on target since
+ *  the merge-base — the "what this branch added" semantics). Read-only: needs
+ *  no checkout, so it runs against the main repo root. */
+export function rangeDiff(repoRoot: string, base: string, target: string): DiffResult {
+  for (const ref of [base, target]) {
+    if (git(['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).status !== 0) {
+      return { ok: false, diff: '', files: [], empty: true, error: `unknown ref ${ref}` }
+    }
+  }
+  const spec = `${base}...${target}`
+  const d = git(['-C', repoRoot, 'diff', spec])
+  const names = git(['-C', repoRoot, 'diff', '--name-only', spec])
+  const files = names.stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+  const empty = !d.stdout.trim()
+  const { diff, truncated } = capDiff(d.stdout)
+  return { ok: true, diff, files, empty, truncated }
+}
+
+/** Resolve a diff per its source descriptor. Working-tree reads `ctx.workdir`
+ *  (the real project dir, where uncommitted edits live); range reads
+ *  `ctx.repoRoot` read-only. */
+export function resolveDiff(source: DiffSource, ctx: { workdir: string; repoRoot: string }): DiffResult {
+  return source.kind === 'working-tree'
+    ? workingTreeDiff(ctx.workdir)
+    : rangeDiff(ctx.repoRoot, source.base, source.target)
+}

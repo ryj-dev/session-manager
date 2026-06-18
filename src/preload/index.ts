@@ -254,6 +254,13 @@ const api = {
   pipelineList: (): Promise<unknown[]> => ipcRenderer.invoke('pipeline:list'),
   pipelineStart: (todo: { id: string; title: string; tags: string[] }, defaultAutonomy: string, projectPath?: string): Promise<unknown[]> =>
     ipcRenderer.invoke('pipeline:start', todo, defaultAutonomy, projectPath),
+  pipelineStartReview: (
+    todo: { id: string; title: string; tags: string[] },
+    defaultAutonomy: string,
+    diffSource: { kind: 'working-tree' } | { kind: 'range'; base: string; target: string },
+    projectPath?: string,
+  ): Promise<unknown[]> =>
+    ipcRenderer.invoke('pipeline:startReview', todo, defaultAutonomy, diffSource, projectPath),
   pipelineSetStage: (id: string, stage: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:setStage', id, stage),
   pipelineSetAutonomy: (id: string, level: string): Promise<unknown[]> => ipcRenderer.invoke('pipeline:setAutonomy', id, level),
   pipelineResolveGate: (id: string, approve: boolean): Promise<unknown[]> => ipcRenderer.invoke('pipeline:resolveGate', id, approve),

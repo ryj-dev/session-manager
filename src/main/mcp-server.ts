@@ -132,6 +132,7 @@ Not all sections are required. Each note type has recommended sections.
 | pipeline-put-artifact | Store the full plan/diff/review for a task so downstream stages read it cleanly instead of relaying big content via chat; overwrites same kind (pipeline) |
 | pipeline-get-artifact | Read a stored hand-off artifact ('plan'/'diff'/'review'); found:false just means nothing stored yet, not an error (pipeline) |
 | pipeline-start | Launch a backlog todo into the pipeline (same as the UI's "start task"): creates the task with per-task worktree isolation and spawns the orchestrator; no-op-safe if already running (pipeline) |
+| pipeline-start-review | Send EXISTING work (uncommitted edits or a committed branch) straight into the review⇄fix loop, skipping plan/implement: diff comes from git (working tree or base...target range), todo body is the rubric (pipeline) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -1152,6 +1153,35 @@ server.tool(
       return { content: [{ type: 'text', text: `Started pipeline task ${r.taskId}. Orchestrator session: ${r.orchestratorSessionId ?? '(spawn failed — check logs)'}.` }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error starting pipeline task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-start-review',
+  'Send EXISTING work (written outside the pipeline — uncommitted edits, or a committed branch) straight into the review⇄fix loop, skipping plan/implement. The diff comes from git (working tree, or a base...target range); the todo body is the rubric reviewers check it against. No-op-safe: if the todo is already running it reports that instead of starting a duplicate.',
+  {
+    todoId: z.string().describe('Backlog todo id whose body is the review rubric.'),
+    defaultAutonomy: z.enum(['manual', 'gated', 'auto']).optional()
+      .describe('Autonomy for the new task. Defaults to the configured default (gated).'),
+    projectPath: z.string().optional()
+      .describe('Absolute project dir (the repo holding the changes). For working-tree mode this is where the uncommitted edits live.'),
+    diffSource: z.union([
+      z.object({ kind: z.literal('working-tree') }),
+      z.object({ kind: z.literal('range'), base: z.string(), target: z.string() }),
+    ]).optional().default({ kind: 'working-tree' })
+      .describe("Where the diff comes from. 'working-tree' (default) = uncommitted changes in the project dir (reviewed in place, no worktree). 'range' = base...target committed work (e.g. base:'main', target:'HEAD')."),
+  },
+  async ({ todoId, defaultAutonomy, projectPath, diffSource }) => {
+    try {
+      const r = await callHookServer('/pipeline/start', { todoId, defaultAutonomy, projectPath, startStage: 'review', diffSource }) as
+        { ok: boolean; alreadyRunning: boolean; taskId: string; orchestratorSessionId: string | null }
+      if (r.alreadyRunning) {
+        return { content: [{ type: 'text', text: `Todo ${todoId} is already in the pipeline (task ${r.taskId}, orchestrator ${r.orchestratorSessionId ?? 'none'}). Not started again.` }] }
+      }
+      return { content: [{ type: 'text', text: `Started send-to-review task ${r.taskId}. Orchestrator session: ${r.orchestratorSessionId ?? '(spawn failed — check logs)'}.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error starting review task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )

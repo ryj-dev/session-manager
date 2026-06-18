@@ -16,6 +16,9 @@ import {
   mergeWorktree,
   removeWorktree,
   runExclusive,
+  workingTreeDiff,
+  rangeDiff,
+  resolveDiff,
 } from './git-worktree.ts'
 
 /** Run a git command in `cwd`, throwing on failure (test setup helper). */
@@ -209,4 +212,136 @@ test('runExclusive survives a rejecting link without breaking the chain', async 
   const b = runExclusive('repoY', async () => { order.push('b') })
   await Promise.all([a, b])
   assert.deepEqual(order, ['a', 'b'])
+})
+
+// ── Diff helpers: workingTreeDiff / rangeDiff / resolveDiff ──────────────────
+
+test('workingTreeDiff on a non-git dir → ok:false, not a git repository', () => {
+  const nonGit = mkdtempSync(join(tmpdir(), 'sm-nogit-'))
+  try {
+    const r = workingTreeDiff(nonGit)
+    assert.equal(r.ok, false)
+    assert.equal(r.error, 'not a git repository')
+    assert.equal(r.empty, true)
+  } finally {
+    rmSync(nonGit, { recursive: true, force: true })
+  }
+})
+
+test('workingTreeDiff on a clean repo → ok:true, empty:true, no files', () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    const r = workingTreeDiff(repoRoot)
+    assert.equal(r.ok, true)
+    assert.equal(r.empty, true)
+    assert.deepEqual(r.files, [])
+    assert.equal(r.diff, '')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('workingTreeDiff surfaces a modified tracked file', () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    writeFileSync(join(repoRoot, 'file.txt'), 'base\nmodified line\n')
+    const r = workingTreeDiff(repoRoot)
+    assert.equal(r.ok, true)
+    assert.equal(r.empty, false)
+    assert.ok(r.files.includes('file.txt'), 'changed tracked file listed')
+    assert.match(r.diff, /modified line/, 'diff contains the new hunk')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('workingTreeDiff surfaces untracked files — top-level, in a NEW dir, and special/non-ASCII names (B2)', () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    // (a) plain new top-level file
+    writeFileSync(join(repoRoot, 'new.txt'), 'brand new\n')
+    // (b) a file inside a BRAND-NEW directory — default porcelain collapses this
+    // to `?? newdir/`; --untracked-files=all must expand it to the file path.
+    mkdirSync(join(repoRoot, 'newdir'))
+    writeFileSync(join(repoRoot, 'newdir', 'inside.txt'), 'nested new\n')
+    // (c) a name with a space AND a non-ASCII char — default porcelain C-quotes
+    // this; `-z` must deliver it verbatim so --no-index produces a real diff.
+    const special = 'spécial file.txt'
+    writeFileSync(join(repoRoot, special), 'accented new\n')
+
+    const r = workingTreeDiff(repoRoot)
+    assert.equal(r.ok, true)
+    assert.equal(r.empty, false)
+    assert.ok(r.files.includes('new.txt'), 'top-level untracked file listed')
+    assert.ok(r.files.includes('newdir/inside.txt'), 'file inside a new dir listed (not the collapsed dir)')
+    assert.ok(!r.files.includes('newdir/'), 'the collapsed directory entry must NOT appear')
+    assert.ok(r.files.includes(special), 'special/non-ASCII name listed verbatim')
+    assert.match(r.diff, /brand new/, 'top-level new file content in diff')
+    assert.match(r.diff, /nested new/, 'new-dir file content in diff')
+    assert.match(r.diff, /accented new/, 'special-name file content in diff')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('rangeDiff with a bad ref → ok:false, unknown ref', () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    const r = rangeDiff(repoRoot, 'no-such-ref', 'HEAD')
+    assert.equal(r.ok, false)
+    assert.equal(r.error, 'unknown ref no-such-ref')
+    assert.equal(r.empty, true)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('rangeDiff over base...target reports target-only changes; identical refs → empty', () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    const baseSha = g(repoRoot, 'rev-parse', 'HEAD')
+    writeFileSync(join(repoRoot, 'feature.txt'), 'feature work\n')
+    g(repoRoot, 'add', '-A')
+    g(repoRoot, 'commit', '-q', '-m', 'add feature')
+    const targetSha = g(repoRoot, 'rev-parse', 'HEAD')
+
+    const r = rangeDiff(repoRoot, baseSha, targetSha)
+    assert.equal(r.ok, true)
+    assert.equal(r.empty, false)
+    assert.ok(r.files.includes('feature.txt'), 'the target-only file is listed')
+    assert.match(r.diff, /feature work/, 'diff contains the added content')
+
+    const identical = rangeDiff(repoRoot, targetSha, targetSha)
+    assert.equal(identical.ok, true)
+    assert.equal(identical.empty, true, 'identical refs produce an empty diff')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})
+
+test('resolveDiff dispatches for both working-tree and range sources', () => {
+  const { base, repoRoot } = makeRepo()
+  try {
+    // working-tree dispatch → workingTreeDiff
+    writeFileSync(join(repoRoot, 'file.txt'), 'base\nwt change\n')
+    const wt = resolveDiff({ kind: 'working-tree' }, { workdir: repoRoot, repoRoot })
+    assert.equal(wt.ok, true)
+    assert.equal(wt.empty, false)
+    assert.match(wt.diff, /wt change/)
+
+    // range dispatch → rangeDiff
+    const baseSha = g(repoRoot, 'rev-parse', 'HEAD')
+    g(repoRoot, 'add', '-A')
+    g(repoRoot, 'commit', '-q', '-m', 'commit wt change')
+    const targetSha = g(repoRoot, 'rev-parse', 'HEAD')
+    const range = resolveDiff(
+      { kind: 'range', base: baseSha, target: targetSha },
+      { workdir: repoRoot, repoRoot },
+    )
+    assert.equal(range.ok, true)
+    assert.ok(range.files.includes('file.txt'))
+    assert.match(range.diff, /wt change/)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
 })
