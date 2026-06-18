@@ -40,6 +40,8 @@ export interface PipelineSession {
   log: FeedEntry[]
   children?: PipelineSession[]
   fanoutKind?: string
+  /** Resolved model id this session was spawned with (audit / cost tracking). */
+  modelId?: string
   /** Stable Claude conversation id for best-effort live resume (`claude --resume`). */
   claudeSessionId?: string | null
   /** Working directory the session ran in (for resume). */
@@ -434,6 +436,7 @@ export interface SessionUpsert {
   badge?: string
   tone?: PipelineTone
   fanoutKind?: string
+  modelId?: string
   claudeSessionId?: string | null
   cwd?: string
   worktreeBranch?: string

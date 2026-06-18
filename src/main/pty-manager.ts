@@ -74,7 +74,8 @@ export function spawnSession(
   id: string,
   cwd: string,
   command: string = 'claude',
-  args: string[] = []
+  args: string[] = [],
+  extraEnv: Record<string, string> = {}
 ): PtySession {
   // Resolve 'shell' sentinel to the user's actual shell
   if (command === 'shell') {
@@ -112,7 +113,7 @@ export function spawnSession(
     cols: 120,
     rows: 30,
     cwd: resolvedCwd,
-    env: { ...process.env, PATH: shellPath, APP_SESSION_ID: id, SESSION_MANAGER_INBOX: inboxPath }
+    env: { ...process.env, PATH: shellPath, APP_SESSION_ID: id, SESSION_MANAGER_INBOX: inboxPath, ...extraEnv }
   })
 
   const session: PtySession = {
