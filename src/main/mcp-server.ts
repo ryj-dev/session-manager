@@ -131,6 +131,7 @@ Not all sections are required. Each note type has recommended sections.
 | pipeline-rename-session | Rename a node in your task tree to a descriptive board label (pipeline) |
 | pipeline-put-artifact | Store the full plan/diff/review for a task so downstream stages read it cleanly instead of relaying big content via chat; overwrites same kind (pipeline) |
 | pipeline-get-artifact | Read a stored hand-off artifact ('plan'/'diff'/'review'); found:false just means nothing stored yet, not an error (pipeline) |
+| pipeline-start | Launch a backlog todo into the pipeline (same as the UI's "start task"): creates the task with per-task worktree isolation and spawns the orchestrator; no-op-safe if already running (pipeline) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -1127,6 +1128,30 @@ server.tool(
       return { content: [{ type: 'text', text: r.found ? (r.content ?? '') : `No ${kind} artifact stored yet.` }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error reading artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'pipeline-start',
+  'Launch a backlog todo into the agentic pipeline (the same action as the UI\'s "start task"). Looks up the todo, creates the pipeline task with per-task git-worktree isolation, spawns the orchestrator session, and updates the board live. Use this to kick off work on a backlog todo from an agent/session instead of the UI. No-op-safe: if the todo is already running it reports that instead of starting a duplicate.',
+  {
+    todoId: z.string().describe('The backlog todo id to launch into the pipeline.'),
+    defaultAutonomy: z.enum(['manual', 'gated', 'auto']).optional()
+      .describe('Autonomy for the new task: manual = pause at every hand-off, gated = pause at gates, auto = run unattended. Defaults to the configured default (gated).'),
+    projectPath: z.string().optional()
+      .describe('Absolute path to the project the task should run in. If omitted, derived from the todo\'s project: tag and the configured base projects dir.'),
+  },
+  async ({ todoId, defaultAutonomy, projectPath }) => {
+    try {
+      const r = await callHookServer('/pipeline/start', { todoId, defaultAutonomy, projectPath }) as
+        { ok: boolean; alreadyRunning: boolean; taskId: string; orchestratorSessionId: string | null }
+      if (r.alreadyRunning) {
+        return { content: [{ type: 'text', text: `Todo ${todoId} is already in the pipeline (task ${r.taskId}, orchestrator ${r.orchestratorSessionId ?? 'none'}). Not started again.` }] }
+      }
+      return { content: [{ type: 'text', text: `Started pipeline task ${r.taskId}. Orchestrator session: ${r.orchestratorSessionId ?? '(spawn failed — check logs)'}.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error starting pipeline task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )

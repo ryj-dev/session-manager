@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, spawnPipelineOrchestrator, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -491,19 +491,10 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   ipcMain.handle('pipeline:list', () => pipelineStore.getPipelineTasks())
   ipcMain.handle('pipeline:autoResume', () => autoResumeInflightOrchestrators())
   ipcMain.handle('pipeline:start', (_e, todo: { id: string; title: string; tags: string[] }, defaultAutonomy: AutonomyLevel, projectPath?: string) => {
-    // Pull the full todo body so the orchestrator gets the user's detailed
-    // intent, not just the title.
-    let body: string | undefined
-    try { body = notesManager.readTodo(todo.id)?.body } catch { /* body optional */ }
-    pipelineStore.startPipelineTask({ ...todo, body }, defaultAutonomy, projectPath)
-    // Spawn the real orchestrator session for newly-started tasks.
-    const task = pipelineStore.getPipelineTask(todo.id)
-    if (task && !task.orchestrator) {
-      try { spawnPipelineOrchestrator(task) } catch (err) { console.error('[pipeline] orchestrator spawn failed:', err) }
-    }
-    const tasks = pipelineStore.getPipelineTasks()
-    sendToRenderer('pipeline:changed', tasks)
-    return tasks
+    // The full start flow (todo lookup, double-start guard, projectPath
+    // derivation, orchestrator spawn, broadcast) lives in the shared
+    // startPipelineTaskFlow so the IPC and pipeline-start MCP tool can't diverge.
+    return startPipelineTaskFlow({ todoId: todo.id, defaultAutonomy, projectPath }).tasks
   })
   ipcMain.handle('pipeline:setStage', async (_e, id: string, stage: PipelineStage) => {
     // Detect a BACKWARD move (target earlier than the current stage) on an
