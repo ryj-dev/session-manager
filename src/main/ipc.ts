@@ -1144,9 +1144,26 @@ When in doubt, default to \`"true"\` — an unnecessary report is low-cost; a mi
 - \`list-sessions\` — all active sessions (IDs, project paths, status, terminal titles). Use before messaging.
 - \`send-message\` — message another session. Delivered immediately if the target is idle, queued if busy. Child sessions can message their parent — the parent ID is available automatically.
 
-### Pipeline orchestration (Cmd+L)
+## Agentic pipeline
 
-Tools for an orchestrator/worker session to drive a task through the agentic pipeline (Backlog→Plan→Implement→Review→Done). The orchestrator is told its \`taskId\` in its spawn prompt; workers emit milestones against the same \`taskId\`.
+The agentic pipeline turns a backlog todo into autonomous, multi-session work. Press **Cmd+L** to open the pipeline board (a kanban of \`Backlog → Plan → Implement → Review → Done\`); opened from the graph it shows all projects, opened from inside a session it filters to that session's project. Starting a backlog todo spawns an **orchestrator** session that reads the todo as the task brief and drives it through the stages — planning, implementing, then fanning out **reviewer** workers across the relevant dimensions (correctness, bugs, security if touched, architecture, tests, performance) and looping review⇄fix until the work passes. Each task runs in its own git **worktree** so parallel tasks never collide; isolated workers are merged back when they finish. Landing in \`Done\` marks the backing todo done. Pipeline sessions are real, resumable Claude sessions but are kept out of the graph view — manage them from the board and the per-task drawer (milestone feed + terminal).
+
+**Autonomy** governs how far the orchestrator runs before pausing for you. Set the global default in Settings (⌘O → "Agentic pipeline"); override per-task with an \`autonomy:<level>\` tag on the todo. Levels:
+
+- \`auto\` — runs end-to-end without stopping; gates auto-approve.
+- \`gated\` (default) — pauses at stage gates for your approval, then continues.
+- \`manual\` — you advance every stage yourself.
+
+### Starting work into the pipeline
+
+| Tool | Purpose |
+|------|---------|
+| \`pipeline-start\` | Launch a backlog todo into the pipeline — same as the board's "Start": creates the task with per-task worktree isolation and spawns the orchestrator. No-op-safe if the todo is already running |
+| \`pipeline-start-review\` | Send EXISTING work (uncommitted edits or a committed branch) straight into the review⇄fix loop, skipping plan/implement. The diff comes from git (working tree or \`base...target\` range); the todo body is the review rubric |
+
+### Orchestrator / worker tools
+
+Tools an orchestrator or worker session uses to drive a task. The orchestrator is told its \`taskId\` in its spawn prompt; workers emit milestones against the same \`taskId\`. Children join the task tree via \`spawn-session\`'s pipeline params (\`pipelineTaskId\`, \`pipelineRole\`, \`pipelineLabel\`, \`fanoutKind\`, \`isolate\`/\`worktreeBranch\`, \`modelId\`).
 
 | Tool | Purpose |
 |------|---------|
@@ -1155,6 +1172,7 @@ Tools for an orchestrator/worker session to drive a task through the agentic pip
 | \`pipeline-request-approval\` | Pause at a gate for user approval. Auto-approves under \`auto\` autonomy; sets a pending gate under \`gated\`/\`manual\` (stop and wait) |
 | \`emit-milestone\` | Post a one-line milestone to your session's feed (plan ready, fanned out, verdict, blocked, done); drives the card line, badge, and status |
 | \`pipeline-rename-session\` | Rename a node in your task tree (a child or yourself) to a descriptive board label, e.g. "Implement · CSV serializer" |
+| \`pipeline-put-artifact\` / \`pipeline-get-artifact\` | Store/read a full stage hand-off (\`plan\`/\`diff\`/\`review\`) off the board, so downstream stages read large content cleanly instead of relaying it through chat or milestones |
 | \`merge-worktree\` | Merge a finished isolated-worktree worker's branch into the integration branch, remove its worktree, and mark the node read-only; conflicts keep the worktree for a fix worker |
 <!-- /session-manager-instructions -->
 `
