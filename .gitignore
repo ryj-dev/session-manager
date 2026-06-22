@@ -6,3 +6,18 @@ dist/
 
 # electron-builder output
 release/
+
+# Custom local skills — keep only the two example skills committed
+# (brainstorming + frontend-slides) as demos; everything else is local-only.
+resources/skills/*.md
+!resources/skills/brainstorming.md
+!resources/skills/frontend-slides.md
+
+# Custom local agents — keep only the four example agents committed
+# (architect-reviewer, code-reviewer, debugger, researcher); everything else
+# is local-only.
+resources/agents/*.md
+!resources/agents/architect-reviewer.md
+!resources/agents/code-reviewer.md
+!resources/agents/debugger.md
+!resources/agents/researcher.md
