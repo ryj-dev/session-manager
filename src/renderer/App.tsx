@@ -23,6 +23,7 @@ import { SkillsGallery } from './components/SkillsGallery'
 import MemoryPanel from './components/memory/MemoryPanel'
 import { NotesPanel } from './components/notes/NotesPanel'
 import { PipelineView } from './components/pipeline/PipelineView'
+import { ScheduledTasksView } from './components/scheduled/ScheduledTasksView'
 import { MessagePopup } from './components/MessagePopup'
 import { AttachedTerminalOverlay, PINNED_WIDTH_PCT } from './components/AttachedTerminalOverlay'
 import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
@@ -922,6 +923,12 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.toggleScheduled) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'scheduled' ? null : 'scheduled')
+        return
+      }
+
       if (key === hotkeys.openSettings) {
         e.preventDefault()
         setShowSettings((prev) => !prev)
@@ -1376,6 +1383,12 @@ export function App(): JSX.Element {
       {/* Agentic pipeline (Cmd+L) — mockup */}
       <PipelineView
         visible={activePanel === 'pipeline'}
+        onClose={() => setActivePanel(null)}
+      />
+
+      {/* Scheduled tasks (Cmd+J) */}
+      <ScheduledTasksView
+        visible={activePanel === 'scheduled'}
         onClose={() => setActivePanel(null)}
       />
 
