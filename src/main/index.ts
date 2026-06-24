@@ -8,6 +8,7 @@ import { saveSessions } from './session-store'
 import { getPipelineClaudeSessionIds } from './pipeline-store'
 import { getScheduleClaudeSessionIds } from './schedule-store'
 import { startHookServer, stopHookServer } from './hook-server'
+import { startScheduler, stopScheduler } from './scheduler'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
 import { initMemoryEmbeddings, reindexAll } from './memory/embeddings-runtime'
@@ -60,6 +61,7 @@ function saveAndCleanup(): void {
   )
   killAllSessions()
   cleanupAllSkillCommands()
+  stopScheduler()
   stopHookServer()
   stopMemoryWatcher()
   stopEmbedServer()
@@ -254,6 +256,7 @@ app.whenReady().then(async () => {
   if (!disabled.mcp) doRegisterMcp()
   registerIpcHandlers({ reinstallMcp: doRegisterMcp })
   createWindow()
+  startScheduler()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
