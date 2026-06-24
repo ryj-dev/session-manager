@@ -6,6 +6,7 @@ import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions } from './pty-manager'
 import { saveSessions } from './session-store'
 import { getPipelineClaudeSessionIds } from './pipeline-store'
+import { getScheduleClaudeSessionIds } from './schedule-store'
 import { startHookServer, stopHookServer } from './hook-server'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
@@ -39,11 +40,15 @@ function saveAndCleanup(): void {
   if (didSave) return
   didSave = true
 
-  // Exclude agentic-pipeline sessions — they shouldn't be offered in the generic
-  // restore prompt (which would re-add them as ordinary graph nodes). Pipeline
-  // resume is on-demand via the board, keyed off pipeline.json.
+  // Exclude agentic-pipeline and scheduled-task sessions — they shouldn't be offered
+  // in the generic restore prompt (which would re-add them as ordinary graph nodes).
+  // Pipeline resume is on-demand via the board (pipeline.json); scheduled runs resume
+  // on-demand via the Scheduled Tasks panel (schedules.json).
   const pipelineIds = getPipelineClaudeSessionIds()
-  const resumable = getResumableSessions().filter((s) => !s.claudeSessionId || !pipelineIds.has(s.claudeSessionId))
+  const scheduleIds = getScheduleClaudeSessionIds()
+  const resumable = getResumableSessions().filter(
+    (s) => !s.claudeSessionId || (!pipelineIds.has(s.claudeSessionId) && !scheduleIds.has(s.claudeSessionId))
+  )
   console.log('[main] saving resumable sessions:', resumable.length, resumable.map(s => s.claudeSessionId))
   saveSessions(
     resumable.map((s) => ({

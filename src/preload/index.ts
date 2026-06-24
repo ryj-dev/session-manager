@@ -175,8 +175,8 @@ const api = {
     ipcRenderer.invoke('claude:setStatuslineConfig', elements, customComponents),
 
   // Session spawned externally (via MCP)
-  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean }) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean }) => callback(data)
+  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean; isScheduled?: boolean }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean; isScheduled?: boolean }) => callback(data)
     ipcRenderer.on('session:spawned', handler)
     return (): void => { ipcRenderer.removeListener('session:spawned', handler) }
   },
