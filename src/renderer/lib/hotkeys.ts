@@ -14,7 +14,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   toggleNotesGlobal: 'Notes (global todos)',
   openSettings: 'Open settings',
   copyFilePath: 'Copy file path (in file explorer)',
-  togglePipeline: 'Toggle agentic pipeline'
+  togglePipeline: 'Toggle agentic pipeline',
+  toggleScheduled: 'Toggle scheduled tasks'
 }
 
 /** All recognized modifier tokens in canonical order */
