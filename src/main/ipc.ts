@@ -46,6 +46,9 @@ import * as notesManager from './notes-manager'
 import type { TodoFilter } from './notes-manager'
 import * as pipelineStore from './pipeline-store'
 import type { PipelineStage, AutonomyLevel, DiffSource } from './pipeline-store'
+import * as scheduleStore from './schedule-store'
+import type { ScheduledTask } from './schedule-store'
+import { triggerScheduleNow } from './scheduler'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -604,6 +607,52 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     try { result = resumePipelineTask(id) } catch (err) { console.error('[pipeline] resume failed:', err) }
     sendToRenderer('pipeline:changed', pipelineStore.getPipelineTasks())
     return { result, tasks: pipelineStore.getPipelineTasks() }
+  })
+
+  // Scheduled tasks. Main owns the state (schedule-store); the renderer mirrors it
+  // via the 'schedules:changed' broadcast. The scheduler tick + the run-completion
+  // handler in hook-server mutate the same store and broadcast through the same
+  // channel. Mirrors the pipeline:* handlers above.
+  ipcMain.handle('schedules:list', () => scheduleStore.getSchedules())
+
+  ipcMain.handle(
+    'schedules:create',
+    (_e, data: Omit<ScheduledTask, 'id' | 'createdAt' | 'runs' | 'lastRunAt'>) => {
+      const task = scheduleStore.createSchedule(data)
+      sendToRenderer('schedules:changed', scheduleStore.getSchedules())
+      return task
+    },
+  )
+
+  ipcMain.handle(
+    'schedules:update',
+    (_e, id: string, patch: Partial<Omit<ScheduledTask, 'id' | 'createdAt' | 'runs'>>) => {
+      const tasks = scheduleStore.updateSchedule(id, patch)
+      sendToRenderer('schedules:changed', tasks)
+      return tasks
+    },
+  )
+
+  ipcMain.handle('schedules:delete', (_e, id: string) => {
+    const tasks = scheduleStore.deleteSchedule(id)
+    sendToRenderer('schedules:changed', tasks)
+    return tasks
+  })
+
+  ipcMain.handle('schedules:setEnabled', (_e, id: string, enabled: boolean) => {
+    const tasks = scheduleStore.setScheduleEnabled(id, enabled)
+    sendToRenderer('schedules:changed', tasks)
+    return tasks
+  })
+
+  ipcMain.handle('schedules:runNow', (_e, id: string) => {
+    // Fire immediately. runScheduledTask (inside triggerScheduleNow) already records
+    // the run + broadcasts schedules:changed; the extra push below is an idempotent
+    // safety net covering the skipped-in-flight (null) path. Returns the new app
+    // session id (or null if skipped).
+    const sessionId = triggerScheduleNow(id)
+    sendToRenderer('schedules:changed', scheduleStore.getSchedules())
+    return sessionId
   })
 
   // Send an inter-session message (used by notes dispatch + future hooks)

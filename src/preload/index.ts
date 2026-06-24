@@ -276,6 +276,26 @@ const api = {
     return (): void => { ipcRenderer.removeListener('pipeline:changed', handler) }
   },
 
+  // Scheduled tasks (Cmd+J). State lives in main (schedule-store); the renderer
+  // mirrors it via the 'schedules:changed' broadcast. Returns are cast to the
+  // renderer's own ScheduledTask type. Mirrors the pipeline* API above.
+  schedulesList: (): Promise<unknown[]> => ipcRenderer.invoke('schedules:list'),
+  schedulesCreate: (data: unknown): Promise<unknown> =>
+    ipcRenderer.invoke('schedules:create', data),
+  schedulesUpdate: (id: string, patch: unknown): Promise<unknown[]> =>
+    ipcRenderer.invoke('schedules:update', id, patch),
+  schedulesDelete: (id: string): Promise<unknown[]> =>
+    ipcRenderer.invoke('schedules:delete', id),
+  schedulesSetEnabled: (id: string, enabled: boolean): Promise<unknown[]> =>
+    ipcRenderer.invoke('schedules:setEnabled', id, enabled),
+  schedulesRunNow: (id: string): Promise<string | null> =>
+    ipcRenderer.invoke('schedules:runNow', id),
+  onSchedulesChanged: (callback: (tasks: unknown[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, tasks: unknown[]) => callback(tasks)
+    ipcRenderer.on('schedules:changed', handler)
+    return (): void => { ipcRenderer.removeListener('schedules:changed', handler) }
+  },
+
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('session:sendMessage', targetSessionId, message, fromSessionId),
