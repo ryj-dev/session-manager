@@ -176,19 +176,31 @@ export function recordRunStarted(taskId: string, run: ScheduleRun): ScheduledTas
   )
 }
 
-/** Update one run's status + finishedAt in place (no pruning). */
+/** Update one run's status + finishedAt in place (no pruning). When
+ *  claudeSessionId is provided it is refreshed too (e.g. the Stop hook persists
+ *  the possibly /resume-updated id so the run stays resumable). */
 export function recordRunFinished(
   taskId: string,
   runId: string,
   status: ScheduleRunStatus,
   finishedAt: string,
+  claudeSessionId?: string | null,
 ): ScheduledTask[] {
   return updateSchedules((all) =>
     all.map((s) => {
       if (s.id !== taskId) return s
       return {
         ...s,
-        runs: s.runs.map((r) => (r.id === runId ? { ...r, status, finishedAt } : r)),
+        runs: s.runs.map((r) =>
+          r.id === runId
+            ? {
+                ...r,
+                status,
+                finishedAt,
+                ...(claudeSessionId !== undefined ? { claudeSessionId } : {}),
+              }
+            : r,
+        ),
       }
     }),
   )
