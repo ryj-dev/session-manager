@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, type HotkeyMap, type PipelineTask } from './store'
+import { useStore, defaultHotkeys, type HotkeyMap, type PipelineTask, type ScheduledTask } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -216,6 +216,14 @@ export function App(): JSX.Element {
   useEffect(() => {
     window.api.pipelineList().then((tasks) => useStore.getState().setPipelineTasks(tasks as PipelineTask[]))
     const unsub = window.api.onPipelineChanged((tasks) => useStore.getState().setPipelineTasks(tasks as PipelineTask[]))
+    return unsub
+  }, [])
+
+  // Load scheduled tasks from the main-process store, then mirror every change
+  // broadcast ('schedules:changed' — renderer mutations + scheduler/hook writes).
+  useEffect(() => {
+    window.api.schedulesList().then((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
+    const unsub = window.api.onSchedulesChanged((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
     return unsub
   }, [])
 

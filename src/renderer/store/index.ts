@@ -32,6 +32,7 @@ export interface HotkeyMap {
   toggleNotesGlobal: string
   copyFilePath: string
   togglePipeline: string
+  toggleScheduled: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -50,9 +51,10 @@ export const defaultHotkeys: HotkeyMap = {
   // so 'alt' isn't expressible as an extra; use shift instead).
   copyFilePath: typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac') ? 'alt+c' : 'shift+c',
   togglePipeline: 'l',
+  toggleScheduled: 'j',
 }
 
-export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | null
+export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | null
 
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
@@ -167,6 +169,52 @@ export function completedCutoffMs(filter: CompletedFilter, now: number = Date.no
     case 'month': return now - 30 * DAY
     default: return null
   }
+}
+
+// ---- Scheduled tasks (Cmd+J) ----
+// Types mirror the main-process source of truth in src/main/schedule-store.ts.
+// The main process owns the authoritative state; the renderer keeps this mirror,
+// refreshed by the 'schedules:changed' broadcast (wired in App.tsx).
+
+export type ScheduleRecurrence =
+  | { kind: 'none' }
+  | { kind: 'interval'; minutes: number } // 60 = hourly
+  | { kind: 'daily'; hour: number; minute: number }
+
+export type ScheduleRunStatus = 'working' | 'done' | 'error'
+
+export interface ScheduleRun {
+  id: string
+  /** App/PTY session id (APP_SESSION_ID). */
+  sessionId: string
+  /** Claude conversation id for `claude --resume`; null until known. */
+  claudeSessionId: string | null
+  /** ISO 8601 timestamp. */
+  startedAt: string
+  /** ISO 8601; absent while the run is in-flight. */
+  finishedAt?: string
+  status: ScheduleRunStatus
+}
+
+export interface ScheduledTask {
+  id: string
+  name: string
+  prompt: string
+  projectPath: string
+  /** Optional --allowedTools restriction; undefined = unrestricted. */
+  allowedTools?: string[]
+  /** Default true → run spawned with --permission-mode auto. */
+  autoApprove: boolean
+  /** Fire once at app launch. */
+  onLaunch: boolean
+  recurrence: ScheduleRecurrence
+  enabled: boolean
+  /** ISO 8601. */
+  createdAt: string
+  /** ISO 8601; last time any run started. */
+  lastRunAt?: string
+  /** Run history, capped to the most-recent runs in the main store. */
+  runs: ScheduleRun[]
 }
 
 export interface Session {
@@ -348,6 +396,23 @@ export interface AppState {
   pausePipelineTask: (id: string) => void
   /** Resume a paused task: re-wake the orchestrator from its saved conversation. */
   resumePipelineTask: (id: string) => void
+
+  // Scheduled tasks (Cmd+J). The main process owns the authoritative state
+  // (schedule-store.ts); these actions write through via IPC and the mirror is
+  // refreshed by the 'schedules:changed' broadcast (wired in App.tsx).
+  scheduledTasks: ScheduledTask[]
+  /** Replace the mirror from the main-process store (initial load + broadcast). */
+  setScheduledTasks: (tasks: ScheduledTask[]) => void
+  /** Create a schedule. Resolves once the main process applies it. */
+  createScheduledTask: (data: Omit<ScheduledTask, 'id' | 'createdAt' | 'runs' | 'lastRunAt'>) => Promise<ScheduledTask>
+  /** Partial update (server-managed fields not patchable). */
+  updateScheduledTask: (id: string, patch: Partial<Omit<ScheduledTask, 'id' | 'createdAt' | 'runs'>>) => void
+  /** Remove a schedule. */
+  deleteScheduledTask: (id: string) => void
+  /** Enable/disable a schedule. */
+  setScheduledTaskEnabled: (id: string, enabled: boolean) => void
+  /** Fire a schedule immediately; resolves to the spawned session id (or null). */
+  runScheduledTaskNow: (id: string) => Promise<string | null>
 
   // Message notifications
   pendingMessages: MessageNotification[]
@@ -624,6 +689,17 @@ export const useStore = create<AppState>((set, get) => ({
   removePipelineTask: (id) => { void window.api.pipelineRemove(id) },
   pausePipelineTask: (id) => { void window.api.pipelinePause(id) },
   resumePipelineTask: (id) => { void window.api.pipelineResume(id) },
+
+  // Scheduled tasks. Main process owns authoritative state (schedule-store.ts);
+  // these write through via IPC and the mirror is refreshed by the
+  // 'schedules:changed' broadcast (wired in App.tsx). Mirrors the pipeline block.
+  scheduledTasks: [],
+  setScheduledTasks: (tasks) => set({ scheduledTasks: tasks }),
+  createScheduledTask: (data) => window.api.schedulesCreate(data) as Promise<ScheduledTask>,
+  updateScheduledTask: (id, patch) => { void window.api.schedulesUpdate(id, patch) },
+  deleteScheduledTask: (id) => { void window.api.schedulesDelete(id) },
+  setScheduledTaskEnabled: (id, enabled) => { void window.api.schedulesSetEnabled(id, enabled) },
+  runScheduledTaskNow: (id) => window.api.schedulesRunNow(id),
 
   // Message notifications
   pendingMessages: [],
