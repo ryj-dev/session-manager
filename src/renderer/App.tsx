@@ -1011,8 +1011,8 @@ export function App(): JSX.Element {
 
   // Listen for sessions spawned externally (via MCP)
   useEffect(() => {
-    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline }) => {
-      addSession(id, projectPath, claudeSessionId ?? null, { isPipeline: !!isPipeline })
+    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline, isScheduled }) => {
+      addSession(id, projectPath, claudeSessionId ?? null, { isPipeline: !!isPipeline, isScheduled: !!isScheduled })
     })
     return unsubscribe
   }, [addSession])
@@ -1162,6 +1162,10 @@ export function App(): JSX.Element {
             // context each, exhausting the GPU's context limit and blacking out
             // the visible terminal. They mount on demand when viewed in the board.
             if (s.isPipeline) return false
+            // Scheduled-run sessions, like pipeline sessions, have no graph node and
+            // mount on demand in the Scheduled Tasks panel — skip the hidden snapshot
+            // terminal so they don't each burn a WebGL context.
+            if (s.isScheduled) return false
             if (viewMode === 'focused' && s.id === focusedSessionId) return false
             // Attached overlay terminal of the currently focused Claude session is
             // mounted by AttachedTerminalOverlay itself — exclude it from the

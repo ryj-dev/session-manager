@@ -190,6 +190,11 @@ export interface Session {
    *  Excluded from the graph view and graph nav — they live in the pipeline
    *  board (Cmd+L) — but still mount as real PTYs. */
   isPipeline: boolean
+  /** True for scheduled-task sessions (one-shot runs spawned by the scheduler, and
+   *  resumed historical runs). Excluded from the graph view, graph nav, the hidden
+   *  snapshot layer, and the restore prompt — they live in the Scheduled Tasks panel
+   *  — but still mount as real PTYs. */
+  isScheduled: boolean
   /** For Claude sessions with `terminalPairingMode === 'overlay'`: the id of the hidden
    *  terminal session attached to this one. Null on attached sessions and on
    *  Claude sessions without an attachment. */
@@ -199,7 +204,7 @@ export interface Session {
 export interface AppState {
   // Sessions
   sessions: Session[]
-  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean }) => void
+  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean; isScheduled?: boolean }) => void
   removeSession: (id: string) => void
   updateSessionStatus: (id: string, status: SessionStatus) => void
   markSessionSeen: (id: string) => void
@@ -387,6 +392,7 @@ export const useStore = create<AppState>((set, get) => ({
             claudeSessionId,
             isAttached: !!opts?.isAttached,
             isPipeline: !!opts?.isPipeline,
+            isScheduled: !!opts?.isScheduled,
             attachedTerminalId: null,
           }
         ]
