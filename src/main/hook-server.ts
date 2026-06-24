@@ -12,6 +12,7 @@ import * as notesManager from './notes-manager'
 import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
+import * as scheduleStore from './schedule-store'
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
@@ -27,6 +28,14 @@ function broadcastPipeline(): void {
   const win = BrowserWindow.getAllWindows()[0]
   if (win && !win.isDestroyed()) {
     win.webContents.send('pipeline:changed', pipelineStore.getPipelineTasks())
+  }
+}
+
+/** Broadcast the latest schedule list to the renderer's Scheduled Tasks mirror. */
+function broadcastSchedules(): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('schedules:changed', scheduleStore.getSchedules())
   }
 }
 
@@ -487,6 +496,66 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
   }
+}
+
+// ── Scheduled task spawn ────────────────────────────────────────────────────
+// Spawns a scheduled task as a normal PTY `claude` session (flagged isScheduled
+// so the renderer can route it to the Scheduled Tasks panel, not the graph).
+// Records a 'working' run on the schedule; the Stop hook later marks it done and
+// tears the PTY down (keeping claudeSessionId so the run is resumable).
+// Returns the new app/PTY session id.
+export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string {
+  const id = randomUUID()
+  const cwd = schedule.projectPath || process.cwd()
+
+  // Build args. Auto-allow send-message so the run can report back, matching the
+  // generic spawn path; if allowedTools is set, restrict to it (+ send-message).
+  const SEND_MESSAGE_TOOL = 'mcp__session-manager__send-message'
+  let args: string[] = []
+  if (schedule.allowedTools && schedule.allowedTools.length > 0) {
+    const tools = schedule.allowedTools.includes(SEND_MESSAGE_TOOL)
+      ? schedule.allowedTools
+      : [...schedule.allowedTools, SEND_MESSAGE_TOOL]
+    args = ['--allowedTools', ...tools]
+  }
+  // autoApprove → run unattended with auto permission mode (prepended).
+  if (schedule.autoApprove) {
+    args = ['--permission-mode', 'auto', ...args]
+  }
+
+  // Prompt passed as positional after `--` (same rationale as handleSpawnRequest:
+  // bypasses PTY paste/timing, and `--` stops --allowedTools consuming it).
+  const session = spawnSession(id, cwd, 'claude', [...args, '--', schedule.prompt])
+
+  // Attach PTY listeners so the renderer can see this session.
+  if (attachListenersFn) attachListenersFn(id, session)
+
+  // Notify the renderer; isScheduled routes it to the Scheduled Tasks panel and
+  // (like isPipeline) keeps it out of the graph view.
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('session:spawned', {
+      id,
+      projectPath: cwd,
+      claudeSessionId: session.claudeSessionId ?? null,
+      isScheduled: true,
+    })
+  }
+
+  // Record the started run. spawnSession assigns claudeSessionId upfront for
+  // `claude` spawns (pty-manager:88-90), so it is available synchronously here.
+  const run: scheduleStore.ScheduleRun = {
+    id: randomUUID(),
+    sessionId: id,
+    claudeSessionId: session.claudeSessionId ?? null,
+    startedAt: new Date().toISOString(),
+    status: 'working',
+  }
+  scheduleStore.recordRunStarted(schedule.id, run)
+  broadcastSchedules()
+
+  console.log(`[hook-server] ran scheduled task ${schedule.id} as session ${id} in ${cwd}`)
+  return id
 }
 
 // ── Pipeline orchestrator spawn ─────────────────────────────────────────────
@@ -1847,6 +1916,24 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'idle')
     win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
+
+    // Scheduled-task completion: if this session is an in-flight scheduled run,
+    // mark it done, persist the (possibly /resume-updated) claudeSessionId, then
+    // tear the PTY down — keeping claudeSessionId on disk so the run is resumable.
+    const scheduled = scheduleStore.getScheduleRunBySessionId(appSessionId)
+    if (scheduled && scheduled.run.status === 'working') {
+      const live = getSession(appSessionId)
+      const claudeSessionId = live?.claudeSessionId ?? scheduled.run.claudeSessionId
+      scheduleStore.recordRunFinished(
+        scheduled.scheduleId,
+        scheduled.run.id,
+        'done',
+        new Date().toISOString(),
+        claudeSessionId,
+      )
+      broadcastSchedules()
+      scheduleSessionTeardown(appSessionId)
+    }
   } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'UserPromptSubmit') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'working')
