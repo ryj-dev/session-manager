@@ -176,6 +176,7 @@ const GUARDED = new Set([
   '/pipeline/start', '/pipeline/set-stage', '/pipeline/emit-milestone',
   '/pipeline/request-approval', '/pipeline/rename-session',
   '/pipeline/merge-worktree', '/pipeline/put-artifact',
+  '/schedules/create', '/schedules/update', '/schedules/set-enabled', '/schedules/delete',
 ])
 
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
@@ -229,6 +230,14 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/pipeline/merge-worktree') { handlePipelineMergeWorktree(body, res); return }
         if (url.pathname === '/pipeline/put-artifact') { handlePipelinePutArtifact(body, res); return }
         if (url.pathname === '/pipeline/get-artifact') { handlePipelineGetArtifact(body, res); return }
+
+        // ── Scheduled-task endpoints (called by the scheduled-task MCP tools) ──
+        if (url.pathname === '/schedules/list')        { handleSchedulesList(res); return }
+        if (url.pathname === '/schedules/get')         { handleScheduleGet(body, res); return }
+        if (url.pathname === '/schedules/create')      { handleScheduleCreate(body, res); return }
+        if (url.pathname === '/schedules/update')      { handleScheduleUpdate(body, res); return }
+        if (url.pathname === '/schedules/set-enabled') { handleScheduleSetEnabled(body, res); return }
+        if (url.pathname === '/schedules/delete')      { handleScheduleDelete(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -1313,6 +1322,105 @@ function handlePipelineGetArtifact(body: string, res: import('http').ServerRespo
     const a = pipelineStore.getArtifact(taskId, kind)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ taskId, kind, found: !!a, content: a?.content ?? null, updatedAt: a?.updatedAt ?? null }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+// ── Scheduled-task endpoint handlers ────────────────────────────────────────
+// Thin wrappers over scheduleStore (the source of truth), mirroring the IPC
+// handlers in ipc.ts: every mutation re-broadcasts so the renderer's Scheduled
+// Tasks panel updates live. The MCP scheduled-task tools call these over HTTP
+// because the MCP server runs out-of-process and can't touch scheduleStore.
+
+function handleSchedulesList(res: import('http').ServerResponse): void {
+  try {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ schedules: scheduleStore.getSchedules() }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handleScheduleGet(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { id } = readJson<{ id: string }>(body)
+    const s = scheduleStore.getSchedule(id)
+    res.writeHead(s ? 200 : 404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(s ?? { error: `Scheduled task ${id} not found` }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handleScheduleCreate(body: string, res: import('http').ServerResponse): void {
+  try {
+    const data = readJson<Omit<scheduleStore.ScheduledTask, 'id' | 'createdAt' | 'runs' | 'lastRunAt'>>(body)
+    if (!data?.name || !data?.prompt || !data?.projectPath) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'name, prompt, projectPath required' }))
+      return
+    }
+    const task = scheduleStore.createSchedule(data)
+    broadcastSchedules()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(task))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handleScheduleUpdate(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { id, patch } = readJson<{
+      id: string
+      patch: Partial<Omit<scheduleStore.ScheduledTask, 'id' | 'createdAt' | 'runs'>>
+    }>(body)
+    if (!scheduleStore.getSchedule(id)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Scheduled task ${id} not found` }))
+      return
+    }
+    scheduleStore.updateSchedule(id, patch ?? {})
+    broadcastSchedules()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(scheduleStore.getSchedule(id)))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handleScheduleSetEnabled(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { id, enabled } = readJson<{ id: string; enabled: boolean }>(body)
+    if (!scheduleStore.getSchedule(id)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Scheduled task ${id} not found` }))
+      return
+    }
+    scheduleStore.setScheduleEnabled(id, enabled)
+    broadcastSchedules()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(scheduleStore.getSchedule(id)))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handleScheduleDelete(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { id } = readJson<{ id: string }>(body)
+    const existed = !!scheduleStore.getSchedule(id)
+    scheduleStore.deleteSchedule(id)
+    if (existed) broadcastSchedules()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, deleted: existed }))
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))

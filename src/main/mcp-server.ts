@@ -133,6 +133,11 @@ Not all sections are required. Each note type has recommended sections.
 | pipeline-get-artifact | Read a stored hand-off artifact ('plan'/'diff'/'review'); found:false just means nothing stored yet, not an error (pipeline) |
 | pipeline-start | Launch a backlog todo into the pipeline (same as the UI's "start task"): creates the task with per-task worktree isolation and spawns the orchestrator; no-op-safe if already running (pipeline) |
 | pipeline-start-review | Send EXISTING work (uncommitted edits or a committed branch) straight into the review⇄fix loop, skipping plan/implement: diff comes from git (working tree or base...target range), todo body is the rubric (pipeline) |
+| list-scheduled-tasks / get-scheduled-task | Read scheduled tasks: summary list, or one task's full definition + run history (scheduled tasks) |
+| create-scheduled-task / update-scheduled-task | Define or modify a scheduled task — a prompt run as an unattended session on a schedule (none / interval / daily, NOT cron) (scheduled tasks) |
+| enable-scheduled-task / disable-scheduled-task | Toggle whether a scheduled task fires, without deleting its history (scheduled tasks) |
+| delete-scheduled-task | Permanently remove a scheduled task and its run history (scheduled tasks) |
+| list-scheduled-task-runs | List the run history (active + recent, capped at 25) for one scheduled task (scheduled tasks) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -1342,6 +1347,175 @@ server.tool(
     if (tags.length === 0) return { content: [{ type: 'text', text: 'No tags' }] }
     const lines = tags.map((t) => `- ${t.tag} (${t.count})`)
     return { content: [{ type: 'text', text: lines.join('\n') }] }
+  },
+)
+
+// ─── Scheduled tasks ──────────────────────────────────────────────────────────
+// Thin wrappers over the hook-server /schedules/* endpoints (the MCP server runs
+// out-of-process and can't touch scheduleStore directly). Recurrence mirrors the
+// UI's discriminated union — NOT cron.
+
+const scheduleRecurrenceSchema = z
+  .discriminatedUnion('kind', [
+    z.object({ kind: z.literal('none') }),
+    z.object({
+      kind: z.literal('interval'),
+      minutes: z.number().int().positive().describe('Minutes between runs (60 = hourly).'),
+    }),
+    z.object({
+      kind: z.literal('daily'),
+      hour: z.number().int().min(0).max(23).describe('Hour, 24h local time.'),
+      minute: z.number().int().min(0).max(59),
+    }),
+  ])
+  .describe('When the task recurs. Mirrors the UI: none | interval(minutes) | daily(hour,minute). NOT cron.')
+
+server.tool(
+  'list-scheduled-tasks',
+  'List all scheduled tasks (name, schedule, enabled state, last run). Read-only.',
+  {},
+  async () => {
+    try {
+      const r = (await callHookServer('/schedules/list', {})) as { schedules: Array<Record<string, any>> }
+      if (!r.schedules.length) return { content: [{ type: 'text', text: 'No scheduled tasks' }] }
+      const lines = r.schedules.map((s) => {
+        const rec =
+          s.recurrence.kind === 'interval'
+            ? `every ${s.recurrence.minutes}m`
+            : s.recurrence.kind === 'daily'
+              ? `daily ${s.recurrence.hour}:${String(s.recurrence.minute).padStart(2, '0')}`
+              : 'no recurrence'
+        const flags = [s.onLaunch ? 'onLaunch' : null, s.enabled ? 'enabled' : 'disabled'].filter(Boolean).join(', ')
+        return `- ${s.name} (${rec}; ${flags})  lastRun: ${s.lastRunAt ?? 'never'}  (id: ${s.id})`
+      })
+      return { content: [{ type: 'text', text: `${r.schedules.length} scheduled task(s):\n${lines.join('\n')}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error listing scheduled tasks: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'get-scheduled-task',
+  'Read the full definition of one scheduled task by id (prompt, projectPath, recurrence, allowedTools, run history). Read-only.',
+  { id: z.string() },
+  async ({ id }) => {
+    try {
+      const s = await callHookServer('/schedules/get', { id })
+      return { content: [{ type: 'text', text: JSON.stringify(s, null, 2) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error reading scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'create-scheduled-task',
+  'Define a new scheduled task: a prompt run as an unattended `claude` session in projectPath on a schedule. Recurrence mirrors the UI (none | interval | daily), NOT cron.',
+  {
+    name: z.string().describe('Display name.'),
+    prompt: z.string().describe('The prompt the scheduled session runs.'),
+    projectPath: z.string().describe('Absolute project dir the session runs in.'),
+    recurrence: scheduleRecurrenceSchema.optional().default({ kind: 'none' }),
+    onLaunch: z.boolean().optional().default(false).describe('Also fire once at app launch.'),
+    autoApprove: z.boolean().optional().default(true).describe('Run with --permission-mode auto (unattended).'),
+    enabled: z.boolean().optional().default(true),
+    allowedTools: z.array(z.string()).optional().describe('Restrict to these tools (send-message auto-added).'),
+  },
+  async (args) => {
+    try {
+      const task = (await callHookServer('/schedules/create', args)) as { id: string; name: string }
+      return { content: [{ type: 'text', text: `Created scheduled task ${task.id}: ${task.name}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error creating scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'update-scheduled-task',
+  'Modify an existing scheduled task. Pass only the fields to change. Replacing allowedTools replaces the whole set.',
+  {
+    id: z.string(),
+    name: z.string().optional(),
+    prompt: z.string().optional(),
+    projectPath: z.string().optional(),
+    recurrence: scheduleRecurrenceSchema.optional(),
+    onLaunch: z.boolean().optional(),
+    autoApprove: z.boolean().optional(),
+    enabled: z.boolean().optional(),
+    allowedTools: z.array(z.string()).optional(),
+  },
+  async ({ id, ...rest }) => {
+    try {
+      const patch = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined))
+      const s = (await callHookServer('/schedules/update', { id, patch })) as { id: string }
+      return { content: [{ type: 'text', text: `Updated scheduled task ${s.id}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error updating scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'enable-scheduled-task',
+  'Enable a scheduled task (it will fire on its schedule).',
+  { id: z.string() },
+  async ({ id }) => {
+    try {
+      await callHookServer('/schedules/set-enabled', { id, enabled: true })
+      return { content: [{ type: 'text', text: `Enabled ${id}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error enabling scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'disable-scheduled-task',
+  'Disable a scheduled task without deleting it (stops firing; history kept).',
+  { id: z.string() },
+  async ({ id }) => {
+    try {
+      await callHookServer('/schedules/set-enabled', { id, enabled: false })
+      return { content: [{ type: 'text', text: `Disabled ${id}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error disabling scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'delete-scheduled-task',
+  'Permanently remove a scheduled task and its run history.',
+  { id: z.string() },
+  async ({ id }) => {
+    try {
+      await callHookServer('/schedules/delete', { id })
+      return { content: [{ type: 'text', text: `Deleted ${id}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error deleting scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  },
+)
+
+server.tool(
+  'list-scheduled-task-runs',
+  'List the run history (current/active + recent, capped at 25) for one scheduled task. Read-only.',
+  { id: z.string() },
+  async ({ id }) => {
+    try {
+      const s = (await callHookServer('/schedules/get', { id })) as { name?: string; runs?: Array<Record<string, any>> }
+      const runs = s.runs ?? []
+      if (!runs.length) return { content: [{ type: 'text', text: `No runs for ${id}` }] }
+      const lines = runs.map((r) => {
+        const active = !r.finishedAt ? ' [ACTIVE]' : ''
+        return `- ${r.startedAt} → ${r.finishedAt ?? '(running)'}  ${r.status}${active}  session: ${r.sessionId}`
+      })
+      return { content: [{ type: 'text', text: `${runs.length} run(s) for "${s.name ?? id}":\n${lines.join('\n')}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error listing runs: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
   },
 )
 
