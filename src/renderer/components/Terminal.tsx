@@ -502,6 +502,17 @@ export function Terminal({ sessionId, visible, onTitleChange, autoFocus = true }
         window.api.resizeSession(sessionId, instance.term.cols, instance.term.rows)
       }
 
+      // Force a full WebGL repaint after the resize/reflow. Without this the
+      // canvas can keep a stale (mostly blank) frame until something else
+      // triggers a render — e.g. opening the canvas dock (⌘K) shrinks the
+      // terminal and "most content disappears until you scroll". The repaint
+      // was previously an accidental side effect of the scroll guard's snap,
+      // which only runs when the viewport was exactly at the bottom and the
+      // async reflow lands inside its window — hence intermittent. Two passes:
+      // next frame, plus one after xterm's async reflow has settled.
+      requestAnimationFrame(() => instance.term.refresh(0, instance.term.rows - 1))
+      setTimeout(() => instance.term.refresh(0, instance.term.rows - 1), 120)
+
       if (wasInitial || wasAtBottom) {
         // Reset sticky-scroll state — we're intentionally at the bottom
         const scrollInfo = stickyScrollState.get(sessionId)
