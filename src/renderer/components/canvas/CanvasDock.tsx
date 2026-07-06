@@ -18,6 +18,10 @@ interface Props {
   rightOffsetPct?: number
   /** Optional expand affordance (renders a ⤢ button when provided). */
   onExpand?: () => void
+  /** Overlay variant: minimize back to the in-pane view. When provided, the
+   *  header shows ONLY a minimize control — no dismiss ✕ — so expanding is
+   *  always reversible and never silently closes the canvas. */
+  onMinimize?: () => void
 }
 
 /**
@@ -25,7 +29,7 @@ interface Props {
  * close) + the selected artifact. The dock never mounts unless its session has
  * artifacts AND is in openCanvasSessionIds — "invisible unless used".
  */
-export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand }: Props): JSX.Element | null {
+export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand, onMinimize }: Props): JSX.Element | null {
   const canvasArtifacts = useStore((s) => s.canvasArtifacts)
   const canvasSelection = useStore((s) => s.canvasSelection)
   const selectCanvasArtifact = useStore((s) => s.selectCanvasArtifact)
@@ -97,7 +101,7 @@ export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand }: P
               </button>
             </>
           )}
-          {onExpand && (
+          {onExpand && !onMinimize && (
             <button
               onClick={onExpand}
               className="px-1 text-zinc-500 hover:text-zinc-200"
@@ -106,13 +110,23 @@ export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand }: P
               ⤢
             </button>
           )}
-          <button
-            onClick={() => dismissCanvas(session.id)}
-            className="px-1 text-zinc-500 hover:text-zinc-200"
-            title="Close canvas (a new artifact re-opens it)"
-          >
-            ✕
-          </button>
+          {onMinimize ? (
+            <button
+              onClick={onMinimize}
+              className="px-1 text-zinc-500 hover:text-zinc-200"
+              title="Minimize (back to the session pane — Esc)"
+            >
+              ⤡
+            </button>
+          ) : (
+            <button
+              onClick={() => dismissCanvas(session.id)}
+              className="px-1 text-zinc-500 hover:text-zinc-200"
+              title="Close canvas (reopen with ⌘K or the ▣ badge)"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-auto bg-[#0d0d0f]">

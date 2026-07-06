@@ -5,8 +5,9 @@ import { CanvasDock } from './CanvasDock'
 
 /**
  * Full-viewport canvas view — used from narrow split panes (via
- * CompactArtifactCard) and the dock's expand button. Escape or backdrop-click
- * closes; the dock's own ✕ dismisses the canvas entirely.
+ * CompactArtifactCard) and the dock's expand button. Minimize (⤡), Escape,
+ * and backdrop-click all do the same thing: shrink back to the in-pane view.
+ * Dismissing the canvas is only possible from the non-expanded dock.
  */
 export function ArtifactOverlay({ session, onClose }: { session: Session; onClose: () => void }): JSX.Element {
   useEffect(() => {
@@ -29,7 +30,7 @@ export function ArtifactOverlay({ session, onClose }: { session: Session; onClos
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className="w-full h-full max-w-6xl rounded-lg border border-zinc-800 overflow-hidden shadow-2xl">
-        <CanvasDock session={session} variant="overlay" />
+        <CanvasDock session={session} variant="overlay" onMinimize={onClose} />
       </div>
     </motion.div>
   )

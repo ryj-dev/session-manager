@@ -313,11 +313,13 @@ function SplitPanel({ session, slotIndex, isFocused, onFocus, onTitleChange }: S
 
   const openCanvasSessionIds = useStore((s) => s.openCanvasSessionIds)
   const canvasArtifacts = useStore((s) => s.canvasArtifacts)
-  const canvasOpen =
-    openCanvasSessionIds.includes(session.id) &&
-    artifactsForSession(canvasArtifacts, session).length > 0
+  const hasArtifacts = artifactsForSession(canvasArtifacts, session).length > 0
+  const canvasOpen = hasArtifacts && openCanvasSessionIds.includes(session.id)
   const canvasDocked = canvasOpen && paneWidth >= CANVAS_MIN_PANE_PX
   const canvasCompact = canvasOpen && paneWidth > 0 && paneWidth < CANVAS_MIN_PANE_PX
+  // Closed-but-has-artifacts → the same compact pill acts as a one-click
+  // reopen (no need to ask the agent or reach for ⌘K).
+  const canvasClosed = hasArtifacts && !canvasOpen
 
   // Track the pane's own width — drives the docked-vs-compact canvas guard.
   useEffect(() => {
@@ -384,8 +386,15 @@ function SplitPanel({ session, slotIndex, isFocused, onFocus, onTitleChange }: S
         )}
       </div>
 
-      {canvasCompact && (
-        <CompactArtifactCard session={session} onOpen={() => setOverlayOpen(true)} />
+      {(canvasCompact || canvasClosed) && (
+        <CompactArtifactCard
+          session={session}
+          onOpen={() => {
+            if (canvasClosed) useStore.getState().openCanvas(session.id)
+            // Narrow panes can't fit the dock — go straight to the overlay.
+            if (paneWidth > 0 && paneWidth < CANVAS_MIN_PANE_PX) setOverlayOpen(true)
+          }}
+        />
       )}
       {overlayOpen && (
         <ArtifactOverlay session={session} onClose={() => setOverlayOpen(false)} />

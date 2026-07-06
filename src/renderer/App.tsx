@@ -1267,6 +1267,23 @@ export function App(): JSX.Element {
               </span>
             </div>
             <div className="ml-auto titlebar-no-drag flex items-center gap-3">
+              {(() => {
+                // One-click canvas reopen when the session has artifacts but the
+                // dock is closed — same action as ⌘K, but discoverable.
+                if (openCanvasSessionIds.includes(focusedSession.id)) return null
+                const count = artifactsForSession(canvasArtifacts, focusedSession).length
+                if (count === 0) return null
+                return (
+                  <button
+                    onClick={() => useStore.getState().openCanvas(focusedSession.id)}
+                    className="flex items-center gap-1 px-1.5 py-px rounded text-[10px] font-medium border bg-violet-950/60 border-violet-700/60 text-violet-300 hover:border-violet-400 transition-colors"
+                    title={`Open canvas — ${count} artifact${count === 1 ? '' : 's'} (${formatHotkey(hotkeys.toggleCanvas)})`}
+                  >
+                    <span>▣</span>
+                    <span className="tabular-nums">{count}</span>
+                  </button>
+                )
+              })()}
               <span className="text-[10px] text-zinc-600">{formatHotkey(hotkeys.returnToGraph)} to return</span>
               <button
                 onClick={() => forceCloseSession(focusedSessionId!)}

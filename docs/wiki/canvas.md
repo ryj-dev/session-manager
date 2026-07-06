@@ -37,9 +37,10 @@ Call `canvas-show` with a `title` and **exactly one** of:
 ## How it behaves (users)
 
 - **Focused view**: dock opens at 36% beside the terminal (coexists with a pinned attached terminal: terminal | canvas | attached). Close it with ✕ or `Cmd+K`; the next artifact re-opens it.
-- **Split view**: the dock opens inside the emitting session's pane. Panes narrower than ~480px get a compact pill ("table · 40 rows") that expands to a full-screen overlay on click (Esc closes).
+- **Split view**: the dock opens inside the emitting session's pane. Panes narrower than ~480px get a compact pill ("table · 40 rows") that expands to a full-screen overlay on click.
 - **Graph view**: nothing auto-opens; the session's node gets a ▣ badge (violet while unseen). Enter the session to see the canvas.
-- Header chevrons (`‹ 2/5 ›`) flip through the session's artifact history; ⤢ expands to full screen.
+- Header chevrons (`‹ 2/5 ›`) flip through the session's artifact history; ⤢ expands to a full-screen overlay, whose ⤡ / Esc / backdrop-click **minimize back to the pane** (the overlay never dismisses the canvas).
+- **Reopening a closed canvas** (no agent needed): `Cmd+K` on the focused session, the violet **▣ n** button in the focused-view titlebar, or the ▣ pill on a split pane. The graph badge shows which sessions have artifacts waiting.
 - **User-sent images**: drag-drop / typed image paths in a prompt, and clipboard pastes (`Ctrl+V` or `Cmd+V`), display when the message is **sent**. A pasted image whose `[Image #N]` placeholder you delete before sending never displays. Toggle in Settings → Canvas ("Auto-display images you send in chat").
 
 ## Use cases
