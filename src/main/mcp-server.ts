@@ -1105,8 +1105,11 @@ server.tool(
         : markdown != null
           ? { component: 'markdown', title, markdown }
           : { component: 'image', title, image: { path: image!.path, alt: image!.alt }, annotations: image!.annotations, coordSpace: image!.coordSpace }
-      const result = await callHookServer('/canvas/emit', { sessionId: sid, artifact }) as { artifactId: string; imageWidth?: number; imageHeight?: number }
+      const result = await callHookServer('/canvas/emit', { sessionId: sid, artifact }) as { artifactId: string; duplicate?: boolean; imageWidth?: number; imageHeight?: number }
       const dims = result.imageWidth ? ` Image is ${result.imageWidth}×${result.imageHeight} px.` : ''
+      if (result.duplicate) {
+        return { content: [{ type: 'text', text: `An identical artifact was already on the canvas — brought it back into view instead of duplicating (id ${result.artifactId}). Do NOT call canvas-show again for this result.${dims}` }] }
+      }
       return { content: [{ type: 'text', text: `Artifact displayed on the canvas (id ${result.artifactId}).${dims}` }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error showing canvas artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }

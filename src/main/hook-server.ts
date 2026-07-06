@@ -1,6 +1,6 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { app, BrowserWindow, clipboard, nativeImage } from 'electron'
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync, copyFileSync } from 'fs'
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync, copyFileSync, realpathSync } from 'fs'
 import { join, dirname, extname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
@@ -1563,6 +1563,39 @@ function handleScheduleDelete(body: string, res: import('http').ServerResponse):
  *  1,000-char cells can't get near it, so anything bigger is malformed. */
 const CANVAS_MAX_BODY_BYTES = 1_048_576
 
+/** Re-emits of identical content within this window are collapsed into a
+ *  canvas-focus of the existing artifact instead of storing a twin. Agents
+ *  sometimes repeat an already-successful canvas-show (observed: identical
+ *  table emitted twice, 11s apart) — and "show identical content again" IS
+ *  focus semantics, so this is correct even for deliberate re-emits. */
+const CANVAS_DEDUPE_WINDOW_MS = 120_000
+
+/** Content-identity key for an artifact payload or stored artifact. Images
+ *  compare by their ORIGINAL path — at storage time the path is rewritten to
+ *  the app-owned copy, so the incoming payload's path must be matched against
+ *  the stored artifact's originalPath. */
+function canvasEmitKey(p: {
+  component: string
+  title?: string
+  table?: unknown
+  markdown?: string
+  image?: { path: string; originalPath?: string; alt?: string }
+  annotations?: unknown
+}): string {
+  switch (p.component) {
+    case 'result-table': return JSON.stringify(['t', p.title ?? null, p.table])
+    case 'markdown': return JSON.stringify(['m', p.title ?? null, p.markdown])
+    default:
+      return JSON.stringify([
+        'i',
+        p.title ?? null,
+        p.image ? (p.image.originalPath ?? p.image.path) : null,
+        p.image?.alt ?? null,
+        p.annotations ?? null,
+      ])
+  }
+}
+
 function handleCanvasEmit(body: string, res: import('http').ServerResponse): void {
   try {
     if (Buffer.byteLength(body) > CANVAS_MAX_BODY_BYTES) {
@@ -1613,6 +1646,28 @@ function handleCanvasEmit(body: string, res: import('http').ServerResponse): voi
         value = { ...value, annotations }
       }
     }
+    // Dedupe: identical content emitted for this session moments ago →
+    // focus the existing artifact instead of storing a twin.
+    const key = canvasEmitKey(value)
+    const now = Date.now()
+    const dup = canvasStore
+      .getArtifactsForSession(sessionId, session.claudeSessionId ?? null)
+      .find((a) => now - a.createdAt < CANVAS_DEDUPE_WINDOW_MS && canvasEmitKey(a) === key)
+    if (dup) {
+      const win = BrowserWindow.getAllWindows()[0]
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('canvas:focus', { sessionId, artifactId: dup.id })
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        ok: true,
+        artifactId: dup.id,
+        duplicate: true,
+        ...(dims ? { imageWidth: dims.width, imageHeight: dims.height } : {}),
+      }))
+      return
+    }
+
     const stored = emitCanvasArtifact(value, {
       sessionId,
       claudeSessionId: session.claudeSessionId ?? null,
@@ -1860,8 +1915,12 @@ function scanPromptForUserImages(appSessionId: string, prompt: string): void {
       if (seen.size >= USER_IMAGES_PER_MESSAGE) break
       const raw = m[2] ?? m[3]
       if (!raw) continue
-      const path = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw
-      if (seen.has(path) || !existsSync(path)) continue
+      let path = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw
+      if (!existsSync(path)) continue
+      // Canonicalize so aliased forms of one file dedupe (macOS /tmp is a
+      // symlink to /private/tmp — a prompt citing both produced two artifacts).
+      try { path = realpathSync(path) } catch { /* keep as-is */ }
+      if (seen.has(path)) continue
       seen.add(path)
       const basename = path.split('/').pop() ?? path
       emitCanvasArtifact(
