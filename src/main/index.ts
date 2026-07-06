@@ -1,7 +1,9 @@
 import { app, BrowserWindow, shell, protocol, net, Menu } from 'electron'
-import { join, resolve, relative, isAbsolute } from 'path'
+import { join, resolve, relative, isAbsolute, extname } from 'path'
 import { rmSync } from 'fs'
 import { pathToFileURL } from 'url'
+import { getArtifactById } from './canvas-store'
+import { ALLOWED_IMAGE_EXTS } from './canvas-types'
 import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions } from './pty-manager'
 import { saveSessions } from './session-store'
@@ -19,7 +21,7 @@ import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from '
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 import { loadSettings } from './settings-store'
 
-// Register design:// as a privileged scheme (must be done before app ready)
+// Register design:// + canvas:// as privileged schemes (must be done before app ready)
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'design',
@@ -28,6 +30,16 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       supportFetchAPI: true,
       corsEnabled: true
+    }
+  },
+  {
+    scheme: 'canvas',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true
     }
   }
 ])
@@ -155,6 +167,24 @@ app.whenReady().then(async () => {
       return new Response('Forbidden', { status: 403 })
     }
     return net.fetch(pathToFileURL(filePath).toString())
+  })
+
+  // canvas://image/<artifactId> — serve canvas artifact images. Lookup is BY
+  // ARTIFACT ID in the canvas store (registered via the secret-authenticated
+  // /canvas/emit), so the renderer can never request an arbitrary path. The
+  // extension allowlist is re-checked at serve time in case canvas.json was
+  // hand-edited.
+  protocol.handle('canvas', (request) => {
+    const url = new URL(request.url)
+    if (url.host !== 'image') return new Response('Not found', { status: 404 })
+    const id = decodeURIComponent(url.pathname).replace(/^\//, '')
+    const artifact = getArtifactById(id)
+    const imagePath = artifact && 'image' in artifact ? artifact.image.path : null
+    if (!imagePath) return new Response('Not found', { status: 404 })
+    if (!ALLOWED_IMAGE_EXTS.has(extname(imagePath).toLowerCase())) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    return net.fetch(pathToFileURL(imagePath).toString())
   })
 
   // Remove Chromium's default menu so it doesn't intercept our hotkeys

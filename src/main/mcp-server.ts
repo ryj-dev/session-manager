@@ -138,6 +138,9 @@ Not all sections are required. Each note type has recommended sections.
 | enable-scheduled-task / disable-scheduled-task | Toggle whether a scheduled task fires, without deleting its history (scheduled tasks) |
 | delete-scheduled-task | Permanently remove a scheduled task and its run history (scheduled tasks) |
 | list-scheduled-task-runs | List the run history (active + recent, capped at 25) for one scheduled task (scheduled tasks) |
+| canvas-show | Display a rich visual artifact (sortable table, markdown report, image, annotated image) on your session's canvas panel instead of dumping it as terminal text (canvas) |
+| canvas-list-artifacts | List your session's existing canvas artifacts (ids + summaries) (canvas) |
+| canvas-focus | Bring an existing canvas artifact back into view without re-emitting it (canvas) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -1050,6 +1053,101 @@ server.tool(
       return { content: [{ type: 'text', text: `Milestone emitted.` }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error emitting milestone: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'canvas-show',
+  'Display a rich visual artifact to the user on your session\'s canvas — a panel that opens beside your terminal automatically. Use this INSTEAD of dumping large structured output as terminal text whenever the result is inherently visual or tabular: query results, comparisons, file listings, analyzed images, or a polished report. Each call adds a new artifact and brings it into view (the user can flip back through earlier ones), so emit one artifact per logical result — do not re-emit unchanged content (use canvas-focus for that). Provide EXACTLY ONE of: table, markdown, or image. This is display-only: the user cannot send input back through the canvas, so do not use it for questions or approvals.',
+  {
+    title: z.string().max(120).optional().describe('Short label shown in the canvas header and history selector, e.g. "Slow queries — last 24h".'),
+    table: z.object({
+      columns: z.array(z.object({
+        key: z.string().describe('Row-object key for this column.'),
+        label: z.string().optional().describe('Header text; defaults to key.'),
+        align: z.enum(['left', 'right', 'center']).optional(),
+      })).max(24).describe('Max 24 columns.'),
+      rows: z.array(z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])))
+        .max(2000)
+        .describe('Rows as objects keyed by column key. Max 2,000 rows / 20,000 total cells; cell values are primitives.'),
+    }).optional().describe('A sortable/filterable result table. Best for query results and comparisons — prefer this over a markdown table for anything the user might want to sort.'),
+    markdown: z.string().max(100_000).optional().describe('GitHub-flavored markdown to render (headings, lists, tables, code). Max 100,000 chars.'),
+    image: z.object({
+      path: z.string().describe('ABSOLUTE path to an existing local image file (.png/.jpg/.jpeg/.gif/.webp).'),
+      alt: z.string().optional(),
+      annotations: z.array(z.object({
+        kind: z.enum(['circle', 'box', 'arrow', 'label']).describe('circle needs cx/cy/r; box needs x/y/w/h; arrow needs x1/y1/x2/y2 (tail → head); label needs x/y/text.'),
+        cx: z.number().optional(), cy: z.number().optional(), r: z.number().optional(),
+        x: z.number().optional(), y: z.number().optional(),
+        w: z.number().optional(), h: z.number().optional(),
+        x1: z.number().optional(), y1: z.number().optional(),
+        x2: z.number().optional(), y2: z.number().optional(),
+        text: z.string().max(200).optional().describe('Label text (required for kind "label"; optional callout for other kinds).'),
+        color: z.string().optional().describe('CSS color, e.g. "#f43f5e" or "red". Defaults to the theme accent.'),
+      })).max(100).optional().describe('Overlay annotations to point out regions. Coordinates are PIXELS in the image\'s NATURAL size (as read from the file, not as displayed).'),
+    }).optional().describe('A local image, optionally annotated — e.g. answer "where is the button?" by re-showing the screenshot with a circle around it.'),
+  },
+  async ({ title, table, markdown, image }) => {
+    try {
+      const sid = process.env.APP_SESSION_ID
+      if (!sid) {
+        return { content: [{ type: 'text', text: 'No session id available (APP_SESSION_ID unset) — canvas-show only works inside a session-manager session.' }], isError: true }
+      }
+      const provided = [table && 'table', markdown != null && 'markdown', image && 'image'].filter(Boolean)
+      if (provided.length !== 1) {
+        return { content: [{ type: 'text', text: `Provide exactly one of table, markdown, or image (got ${provided.length ? provided.join(', ') : 'none'}).` }], isError: true }
+      }
+      const artifact = table
+        ? { component: 'result-table', title, table }
+        : markdown != null
+          ? { component: 'markdown', title, markdown }
+          : { component: 'image', title, image: { path: image!.path, alt: image!.alt }, annotations: image!.annotations }
+      const result = await callHookServer('/canvas/emit', { sessionId: sid, artifact }) as { artifactId: string }
+      return { content: [{ type: 'text', text: `Artifact displayed on the canvas (id ${result.artifactId}).` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error showing canvas artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'canvas-list-artifacts',
+  'List your session\'s existing canvas artifacts (id, component, title, one-line summary, source, createdAt). Use this to find an artifact\'s id so you can bring it back into view with canvas-focus — e.g. when the user says "show me that table again". Artifacts with source "user" are images the user sent in chat, auto-displayed.',
+  {},
+  async () => {
+    try {
+      const sid = process.env.APP_SESSION_ID
+      if (!sid) {
+        return { content: [{ type: 'text', text: 'No session id available (APP_SESSION_ID unset).' }], isError: true }
+      }
+      const result = await callHookServer('/canvas/list', { sessionId: sid }) as { artifacts: unknown[] }
+      if (!result.artifacts.length) {
+        return { content: [{ type: 'text', text: 'No canvas artifacts for this session yet.' }] }
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(result.artifacts, null, 2) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error listing canvas artifacts: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'canvas-focus',
+  'Bring an EXISTING canvas artifact back into view (re-opens the canvas panel and selects it). Use when the user asks to see something already shown — "show me that table again" — instead of re-emitting unchanged content with canvas-show. Get the artifact id from canvas-list-artifacts or from the id canvas-show returned.',
+  {
+    artifactId: z.string().describe('The canvas artifact id to focus.'),
+  },
+  async ({ artifactId }) => {
+    try {
+      const sid = process.env.APP_SESSION_ID
+      if (!sid) {
+        return { content: [{ type: 'text', text: 'No session id available (APP_SESSION_ID unset).' }], isError: true }
+      }
+      await callHookServer('/canvas/focus', { sessionId: sid, artifactId })
+      return { content: [{ type: 'text', text: `Artifact ${artifactId} brought into view.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error focusing canvas artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )

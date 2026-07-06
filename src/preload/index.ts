@@ -296,6 +296,27 @@ const api = {
     return (): void => { ipcRenderer.removeListener('schedules:changed', handler) }
   },
 
+  // Canvas artifacts. State lives in main (canvas-store); the renderer mirrors
+  // it via 'canvas:changed'. 'canvas:emitted' carries each NEW artifact (drives
+  // auto-open); 'canvas:focus' re-selects an existing one. Mutations flow only
+  // through the hook-server, so there are no create/update invokes here.
+  canvasList: (): Promise<unknown[]> => ipcRenderer.invoke('canvas:list'),
+  onCanvasChanged: (callback: (artifacts: unknown[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, artifacts: unknown[]) => callback(artifacts)
+    ipcRenderer.on('canvas:changed', handler)
+    return (): void => { ipcRenderer.removeListener('canvas:changed', handler) }
+  },
+  onCanvasEmitted: (callback: (artifact: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, artifact: unknown) => callback(artifact)
+    ipcRenderer.on('canvas:emitted', handler)
+    return (): void => { ipcRenderer.removeListener('canvas:emitted', handler) }
+  },
+  onCanvasFocus: (callback: (data: { sessionId: string; artifactId: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { sessionId: string; artifactId: string }) => callback(data)
+    ipcRenderer.on('canvas:focus', handler)
+    return (): void => { ipcRenderer.removeListener('canvas:focus', handler) }
+  },
+
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('session:sendMessage', targetSessionId, message, fromSessionId),

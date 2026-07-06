@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, type HotkeyMap, type PipelineTask, type ScheduledTask } from './store'
+import { useStore, defaultHotkeys, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -26,6 +26,7 @@ import { PipelineView } from './components/pipeline/PipelineView'
 import { ScheduledTasksView } from './components/scheduled/ScheduledTasksView'
 import { MessagePopup } from './components/MessagePopup'
 import { AttachedTerminalOverlay, PINNED_WIDTH_PCT } from './components/AttachedTerminalOverlay'
+import { CanvasDock, CANVAS_WIDTH_PCT } from './components/canvas/CanvasDock'
 import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
 import { Terminal } from './components/Terminal'
 import { useDesigns } from './hooks/useDesigns'
@@ -128,6 +129,7 @@ export function App(): JSX.Element {
   const setAutoModeForRestoredSessions = useStore((s) => s.setAutoModeForRestoredSessions)
   const ambientTodoNudge = useStore((s) => s.ambientTodoNudge)
   const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
+  const canvasAutoShowUserImages = useStore((s) => s.canvasAutoShowUserImages)
   const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
   const terminalPairingMode = useStore((s) => s.terminalPairingMode)
@@ -144,6 +146,8 @@ export function App(): JSX.Element {
   const splitGroups = useStore((s) => s.splitGroups)
   const activeSplitGroupId = useStore((s) => s.activeSplitGroupId)
   const pinnedAttachedTerminalIds = useStore((s) => s.pinnedAttachedTerminalIds)
+  const openCanvasSessionIds = useStore((s) => s.openCanvasSessionIds)
+  const canvasArtifacts = useStore((s) => s.canvasArtifacts)
 
   // Panel data
   const { items: designItems } = useDesigns()
@@ -195,6 +199,7 @@ export function App(): JSX.Element {
       if (typeof settings.autoModeForManualSessions === 'boolean') setAutoModeForManualSessions(settings.autoModeForManualSessions)
       if (typeof settings.autoModeForRestoredSessions === 'boolean') setAutoModeForRestoredSessions(settings.autoModeForRestoredSessions)
       if (typeof settings.ambientTodoNudge === 'boolean') setAmbientTodoNudge(settings.ambientTodoNudge)
+      if (typeof settings.canvasAutoShowUserImages === 'boolean') useStore.getState().setCanvasAutoShowUserImages(settings.canvasAutoShowUserImages)
       if (typeof settings.spawnIntoCurrentSplit === 'boolean') setSpawnIntoCurrentSplit(settings.spawnIntoCurrentSplit)
       if (settings.terminalPairingMode === 'off' || settings.terminalPairingMode === 'split' || settings.terminalPairingMode === 'overlay') {
         setTerminalPairingMode(settings.terminalPairingMode)
@@ -228,11 +233,22 @@ export function App(): JSX.Element {
     return unsub
   }, [])
 
+  // Canvas artifacts: load the mirror, then track the three broadcasts —
+  // 'canvas:changed' (full list), 'canvas:emitted' (new artifact → auto-open
+  // the emitter's dock), 'canvas:focus' (agent re-focuses an existing one).
+  useEffect(() => {
+    window.api.canvasList().then((a) => useStore.getState().setCanvasArtifacts(a as CanvasArtifact[]))
+    const un1 = window.api.onCanvasChanged((a) => useStore.getState().setCanvasArtifacts(a as CanvasArtifact[]))
+    const un2 = window.api.onCanvasEmitted((a) => useStore.getState().handleCanvasEmitted(a as CanvasArtifact))
+    const un3 = window.api.onCanvasFocus(({ sessionId, artifactId }) => useStore.getState().handleCanvasFocus(sessionId, artifactId))
+    return () => { un1(); un2(); un3() }
+  }, [])
+
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -929,6 +945,25 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.toggleCanvas) {
+        e.preventDefault()
+        // Toggles the FOCUSED session's canvas dock (focused/split views only).
+        // Opening is a no-op when the session has no artifacts — the dock never
+        // shows empty.
+        const store = useStore.getState()
+        const sid = store.focusedSessionId
+        if (!sid || store.viewMode === 'graph') return
+        if (store.openCanvasSessionIds.includes(sid)) {
+          store.dismissCanvas(sid)
+        } else {
+          const session = store.sessions.find((s) => s.id === sid)
+          if (session && artifactsForSession(store.canvasArtifacts, session).length > 0) {
+            store.openCanvas(sid)
+          }
+        }
+        return
+      }
+
       if (key === hotkeys.openSettings) {
         e.preventDefault()
         setShowSettings((prev) => !prev)
@@ -1247,17 +1282,24 @@ export function App(): JSX.Element {
           <div className="flex-1 min-h-0 relative">
             {/* When an attached terminal is pinned, the main Terminal shrinks to leave room
                 for the side-by-side overlay panel. When unpinned (or no attachment), the
-                main Terminal fills the body and the overlay (if any) floats over it. */}
+                main Terminal fills the body and the overlay (if any) floats over it.
+                The canvas dock (when open) docks between the terminal and a pinned
+                attached terminal: [Terminal | Canvas | Pinned attached]. */}
             {(() => {
               const attachedId = focusedSession?.attachedTerminalId ?? null
               const isPinned = attachedId
                 ? pinnedAttachedTerminalIds.includes(focusedSessionId!)
                 : false
+              const canvasOpen =
+                !!focusedSession &&
+                openCanvasSessionIds.includes(focusedSessionId!) &&
+                artifactsForSession(canvasArtifacts, focusedSession).length > 0
+              const termWidth = 100 - (isPinned ? PINNED_WIDTH_PCT : 0) - (canvasOpen ? CANVAS_WIDTH_PCT : 0)
               return (
                 <>
                   <div
                     className="absolute top-0 left-0 h-full"
-                    style={{ width: isPinned ? `${100 - PINNED_WIDTH_PCT}%` : '100%' }}
+                    style={{ width: `${termWidth}%` }}
                   >
                     <Terminal
                       key={`focused-${focusedSessionId}`}
@@ -1266,6 +1308,13 @@ export function App(): JSX.Element {
                       onTitleChange={(title) => handleTitleChange(focusedSessionId!, title)}
                     />
                   </div>
+                  {canvasOpen && focusedSession && (
+                    <CanvasDock
+                      session={focusedSession}
+                      variant="docked"
+                      rightOffsetPct={isPinned ? PINNED_WIDTH_PCT : 0}
+                    />
+                  )}
                   {attachedId && (
                     <AttachedTerminalOverlay
                       parentSessionId={focusedSessionId!}

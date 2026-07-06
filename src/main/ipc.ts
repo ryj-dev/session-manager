@@ -48,6 +48,7 @@ import * as pipelineStore from './pipeline-store'
 import type { PipelineStage, AutonomyLevel, DiffSource } from './pipeline-store'
 import * as scheduleStore from './schedule-store'
 import type { ScheduledTask } from './schedule-store'
+import * as canvasStore from './canvas-store'
 import { triggerScheduleNow } from './scheduler'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
@@ -654,6 +655,12 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     sendToRenderer('schedules:changed', scheduleStore.getSchedules())
     return sessionId
   })
+
+  // Canvas artifacts. Main owns the state (canvas-store); the renderer mirrors
+  // it via 'canvas:changed' / 'canvas:emitted' broadcasts from hook-server.
+  // Mutations come exclusively through the hook-server path (/canvas/emit +
+  // the user-image scan) — dismissal/selection are renderer-local UI state.
+  ipcMain.handle('canvas:list', () => canvasStore.getArtifacts())
 
   // Send an inter-session message (used by notes dispatch + future hooks)
   ipcMain.handle(

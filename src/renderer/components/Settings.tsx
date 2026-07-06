@@ -36,6 +36,8 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const autoModeForRestoredSessions = useStore((s) => s.autoModeForRestoredSessions)
   const setAutoModeForRestoredSessions = useStore((s) => s.setAutoModeForRestoredSessions)
   const ambientTodoNudge = useStore((s) => s.ambientTodoNudge)
+  const canvasAutoShowUserImages = useStore((s) => s.canvasAutoShowUserImages)
+  const setCanvasAutoShowUserImages = useStore((s) => s.setCanvasAutoShowUserImages)
   const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
   const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
@@ -298,6 +300,23 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 Periodically reminds Claude to surface open todos at natural stopping points (throttled to ~once every 8 turns)
+              </p>
+            </div>
+
+            {/* Canvas */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Canvas</div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={canvasAutoShowUserImages}
+                  onChange={(e) => setCanvasAutoShowUserImages(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Auto-display images you send in chat</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                When a prompt contains image file paths (drag-dropped or typed), the canvas opens beside the terminal showing them — so you can verify you sent the right image
               </p>
             </div>
 

@@ -57,6 +57,9 @@ export interface AppSettings {
   autoModeForManualSessions: boolean
   autoModeForRestoredSessions: boolean
   ambientTodoNudge: boolean
+  /** Auto-display image paths from the user's submitted prompts on the
+   *  session's canvas (drag-dropped / typed paths). Default true. */
+  canvasAutoShowUserImages: boolean
   spawnIntoCurrentSplit: boolean
   /**
    * How a freshly-spawned Claude session is paired with a shell:
@@ -89,6 +92,7 @@ const defaults: AppSettings = {
   autoModeForManualSessions: false,
   autoModeForRestoredSessions: false,
   ambientTodoNudge: false,
+  canvasAutoShowUserImages: true,
   spawnIntoCurrentSplit: false,
   terminalPairingMode: 'off',
   pipelineTasks: [],

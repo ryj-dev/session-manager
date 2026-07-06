@@ -1,8 +1,11 @@
-import { useEffect, useRef } from 'react'
-import { useStore, type Session, type SessionStatus } from '../store'
+import { useEffect, useRef, useState } from 'react'
+import { useStore, artifactsForSession, type Session, type SessionStatus } from '../store'
 import { Terminal, focusTerminal, setTerminalFontSize } from './Terminal'
 import type { Layout } from '../lib/splitLayouts'
 import { projectColor, projectColorDim } from '../lib/simulation'
+import { CanvasDock } from './canvas/CanvasDock'
+import { CompactArtifactCard } from './canvas/CompactArtifactCard'
+import { ArtifactOverlay } from './canvas/ArtifactOverlay'
 
 interface SplitViewProps {
   onTitleChange: (id: string, title: string) => void
@@ -298,13 +301,40 @@ interface SplitPanelProps {
   onTitleChange: (id: string, title: string) => void
 }
 
+/** Panes narrower than this show the compact artifact card instead of an
+ *  in-pane canvas dock — a docked table in a sliver pane is unusable. */
+const CANVAS_MIN_PANE_PX = 480
+
 function SplitPanel({ session, slotIndex, isFocused, onFocus, onTitleChange }: SplitPanelProps): JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
+  const termRef = useRef<HTMLDivElement>(null)
+  const [paneWidth, setPaneWidth] = useState(0)
+  const [overlayOpen, setOverlayOpen] = useState(false)
 
-  // Drive xterm font size off our own width with ResizeObserver.
-  // Restore default on unmount so focused/graph view aren't left with tiny text.
+  const openCanvasSessionIds = useStore((s) => s.openCanvasSessionIds)
+  const canvasArtifacts = useStore((s) => s.canvasArtifacts)
+  const canvasOpen =
+    openCanvasSessionIds.includes(session.id) &&
+    artifactsForSession(canvasArtifacts, session).length > 0
+  const canvasDocked = canvasOpen && paneWidth >= CANVAS_MIN_PANE_PX
+  const canvasCompact = canvasOpen && paneWidth > 0 && paneWidth < CANVAS_MIN_PANE_PX
+
+  // Track the pane's own width — drives the docked-vs-compact canvas guard.
   useEffect(() => {
     const el = ref.current
+    if (!el) return
+    const apply = (): void => setPaneWidth(el.offsetWidth)
+    apply()
+    const ro = new ResizeObserver(() => apply())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Drive xterm font size off the TERMINAL WRAPPER's width (not the pane's) so
+  // the tier drops when the in-pane canvas dock shrinks the terminal.
+  // Restore default on unmount so focused/graph view aren't left with tiny text.
+  useEffect(() => {
+    const el = termRef.current
     if (!el) return
     const apply = (): void => {
       const w = el.offsetWidth
@@ -340,12 +370,26 @@ function SplitPanel({ session, slotIndex, isFocused, onFocus, onTitleChange }: S
         focusTerminal(session.id)
       }}
     >
-      <Terminal
-        key={`split-${session.id}`}
-        sessionId={session.id}
-        visible={true}
-        onTitleChange={(title) => onTitleChange(session.id, title)}
-      />
+      <div className="w-full h-full flex">
+        <div ref={termRef} className="flex-1 min-w-0 h-full">
+          <Terminal
+            key={`split-${session.id}`}
+            sessionId={session.id}
+            visible={true}
+            onTitleChange={(title) => onTitleChange(session.id, title)}
+          />
+        </div>
+        {canvasDocked && (
+          <CanvasDock session={session} variant="pane" onExpand={() => setOverlayOpen(true)} />
+        )}
+      </div>
+
+      {canvasCompact && (
+        <CompactArtifactCard session={session} onOpen={() => setOverlayOpen(true)} />
+      )}
+      {overlayOpen && (
+        <ArtifactOverlay session={session} onClose={() => setOverlayOpen(false)} />
+      )}
 
       {isFocused && (
         <div

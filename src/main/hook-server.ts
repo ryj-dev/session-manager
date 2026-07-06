@@ -13,6 +13,9 @@ import { loadSettings } from './settings-store'
 import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
 import * as scheduleStore from './schedule-store'
+import * as canvasStore from './canvas-store'
+import { validateCanvasArtifact } from './canvas-validate'
+import type { CanvasArtifact, CanvasArtifactPayload, CanvasArtifactSource } from './canvas-types'
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
@@ -37,6 +40,28 @@ function broadcastSchedules(): void {
   if (win && !win.isDestroyed()) {
     win.webContents.send('schedules:changed', scheduleStore.getSchedules())
   }
+}
+
+/** Broadcast the latest canvas artifact list to the renderer mirror. */
+function broadcastCanvas(): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('canvas:changed', canvasStore.getArtifacts())
+  }
+}
+
+/** Store a validated canvas artifact + notify the renderer: full-list mirror
+ *  refresh AND a targeted 'canvas:emitted' (drives the auto-open behaviour).
+ *  Single emit path shared by /canvas/emit and the user-image auto-display. */
+function emitCanvasArtifact(
+  payload: CanvasArtifactPayload,
+  meta: { sessionId: string; claudeSessionId: string | null; source: CanvasArtifactSource },
+): CanvasArtifact {
+  const stored = canvasStore.addArtifact(payload, meta)
+  broadcastCanvas()
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) win.webContents.send('canvas:emitted', stored)
+  return stored
 }
 
 /** Close the backing todo (taskId === todo id) when a task reaches Done, and
@@ -93,6 +118,9 @@ interface HookPayload {
   session_id?: string
   hook_event_name?: string
   notification_type?: string
+  /** UserPromptSubmit only: the submitted prompt text (used to auto-display
+   *  user-sent image paths on the canvas). */
+  prompt?: string
 }
 
 export function getHookServerPort(): number {
@@ -177,6 +205,7 @@ const GUARDED = new Set([
   '/pipeline/request-approval', '/pipeline/rename-session',
   '/pipeline/merge-worktree', '/pipeline/put-artifact',
   '/schedules/create', '/schedules/update', '/schedules/set-enabled', '/schedules/delete',
+  '/canvas/emit', '/canvas/focus',
 ])
 
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
@@ -239,11 +268,22 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/schedules/set-enabled') { handleScheduleSetEnabled(body, res); return }
         if (url.pathname === '/schedules/delete')      { handleScheduleDelete(body, res); return }
 
+        // ── Canvas endpoints (called by the canvas MCP tools) ──
+        if (url.pathname === '/canvas/emit')  { handleCanvasEmit(body, res); return }
+        if (url.pathname === '/canvas/focus') { handleCanvasFocus(body, res); return }
+        if (url.pathname === '/canvas/list')  { handleCanvasList(body, res); return }
+
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
           try {
             const appSessionId = url.searchParams.get('sid')
             const payload: HookPayload = JSON.parse(body)
+            // User-sent image auto-display: scan the prompt off the sync path so
+            // the hook reply (which Claude blocks on) is never delayed.
+            if (appSessionId && payload.hook_event_name === 'UserPromptSubmit' && payload.prompt) {
+              const prompt = payload.prompt
+              setImmediate(() => scanPromptForUserImages(appSessionId, prompt))
+            }
             const reply = buildSyncHookResponse(appSessionId, payload)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify(reply))
@@ -1482,6 +1522,147 @@ function handleScheduleDelete(body: string, res: import('http').ServerResponse):
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+// ── Canvas handlers ──────────────────────────────────────────────────────────
+
+/** Bodies past this are rejected before JSON.parse — a 2,000-row table of
+ *  1,000-char cells can't get near it, so anything bigger is malformed. */
+const CANVAS_MAX_BODY_BYTES = 1_048_576
+
+function handleCanvasEmit(body: string, res: import('http').ServerResponse): void {
+  try {
+    if (Buffer.byteLength(body) > CANVAS_MAX_BODY_BYTES) {
+      res.writeHead(413, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'artifact payload exceeds 1 MiB' }))
+      return
+    }
+    const { sessionId, artifact } = readJson<{ sessionId: string; artifact: unknown }>(body)
+    const session = getSession(sessionId)
+    if (!session) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Session ${sessionId} not found`, unknownSession: true }))
+      return
+    }
+    const result = validateCanvasArtifact(artifact)
+    if (!result.ok) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: result.error }))
+      return
+    }
+    if ('image' in result.value && !existsSync(result.value.image.path)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `image path does not exist or is unreadable: ${result.value.image.path}` }))
+      return
+    }
+    const stored = emitCanvasArtifact(result.value, {
+      sessionId,
+      claudeSessionId: session.claudeSessionId ?? null,
+      source: 'agent',
+    })
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, artifactId: stored.id }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Re-open the dock on an EXISTING artifact (no store mutation) — lets an agent
+ *  bring back "that table from earlier" without re-emitting it. */
+function handleCanvasFocus(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { sessionId, artifactId } = readJson<{ sessionId: string; artifactId: string }>(body)
+    const artifact = canvasStore.getArtifactById(artifactId)
+    if (!artifact) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Canvas artifact ${artifactId} not found — use canvas-list-artifacts to see what exists`, unknownArtifact: true }))
+      return
+    }
+    const win = BrowserWindow.getAllWindows()[0]
+    if (win && !win.isDestroyed()) {
+      // Focus in the CALLING session's dock — persisted artifacts from a prior
+      // app run carry a dead sessionId, so the live caller wins.
+      win.webContents.send('canvas:focus', { sessionId, artifactId })
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** One-line summary per artifact for canvas-list-artifacts (keeps huge table
+ *  payloads out of the agent's context). */
+function summarizeCanvasArtifact(a: CanvasArtifact): string {
+  switch (a.component) {
+    case 'result-table': return `table · ${a.table.rows.length} rows × ${a.table.columns.length} cols`
+    case 'markdown': return `markdown · ${(a.markdown.length / 1000).toFixed(1)}k chars`
+    case 'image': return `image · ${a.image.path}`
+    case 'annotated-image': return `annotated image · ${a.annotations.length} annotations · ${a.image.path}`
+  }
+}
+
+function handleCanvasList(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { sessionId } = readJson<{ sessionId: string }>(body)
+    const session = getSession(sessionId)
+    const artifacts = canvasStore
+      .getArtifactsForSession(sessionId, session?.claudeSessionId ?? null)
+      .map((a) => ({
+        id: a.id,
+        component: a.component,
+        title: a.title,
+        source: a.source,
+        createdAt: new Date(a.createdAt).toISOString(),
+        summary: summarizeCanvasArtifact(a),
+      }))
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ artifacts }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Cap on auto-displayed images per submitted message. */
+const USER_IMAGES_PER_MESSAGE = 6
+
+/** Image file paths in a prompt: quoted ('…' or "…", may contain spaces) or
+ *  bare absolute/~ paths ending in an allowed image extension. Deliberately
+ *  does NOT match Claude Code's clipboard-paste placeholder ([Image #1] — no
+ *  path, no extension); clipboard capture is a future renderer-side feature. */
+const USER_IMAGE_PATH_RE =
+  /(['"])((?:\/|~\/)[^'"\n]+?\.(?:png|jpe?g|gif|webp))\1|((?:\/|~\/)[^\s'"()]+?\.(?:png|jpe?g|gif|webp))\b/gi
+
+/** Auto-display images the user sent in their prompt (drag-drop / typed paths).
+ *  Runs off the sync-hook path; silently skips misses — a false-positive path
+ *  match must never surface an error to the user. Gated by the
+ *  canvasAutoShowUserImages setting (read per event so toggling applies live). */
+function scanPromptForUserImages(appSessionId: string, prompt: string): void {
+  try {
+    if (loadSettings().canvasAutoShowUserImages === false) return
+    const session = getSession(appSessionId)
+    if (!session) return
+
+    const seen = new Set<string>()
+    for (const m of prompt.matchAll(USER_IMAGE_PATH_RE)) {
+      if (seen.size >= USER_IMAGES_PER_MESSAGE) break
+      const raw = m[2] ?? m[3]
+      if (!raw) continue
+      const path = raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw
+      if (seen.has(path) || !existsSync(path)) continue
+      seen.add(path)
+      const basename = path.split('/').pop() ?? path
+      emitCanvasArtifact(
+        { component: 'image', title: basename.slice(0, 120), image: { path } },
+        { sessionId: appSessionId, claudeSessionId: session.claudeSessionId ?? null, source: 'user' },
+      )
+    }
+  } catch (err) {
+    console.error('[canvas] user-image scan failed:', err)
   }
 }
 

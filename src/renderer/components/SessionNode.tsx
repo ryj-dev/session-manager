@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import { useStore, type Session, type SessionStatus } from '../store'
+import { useStore, artifactsForSession, type Session, type SessionStatus } from '../store'
 import { projectColor, projectColorGlow } from '../lib/simulation'
 
 interface SessionNodeProps {
@@ -38,6 +38,11 @@ export function SessionNode({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const hasNudgedRef = useRef(false)
   const lastMousePosRef = useRef<{ x: number; y: number } | null>(null)
+
+  const artifactCount = useStore(
+    (s) => artifactsForSession(s.canvasArtifacts, session).length,
+  )
+  const hasUnseenArtifacts = useStore((s) => s.unseenCanvasSessionIds.includes(session.id))
 
   // Draw snapshot onto the thumbnail canvas
   // Uses the same 3x multiplier as the snapshot capture so this is a 1:1 copy — no downscale.
@@ -131,6 +136,22 @@ export function SessionNode({
         {STATUS_STYLES[session.status] && (
           <div className="absolute top-1.5 right-1.5">
             <div className={`w-2 h-2 rounded-full ${STATUS_STYLES[session.status]!.dot} ${session.status === 'working' ? 'animate-pulse' : ''}`} />
+          </div>
+        )}
+
+        {/* Canvas artifact badge — violet while unseen, zinc once viewed.
+            Graph view never auto-opens the canvas; entering the session does. */}
+        {artifactCount > 0 && (
+          <div
+            className={`absolute top-1.5 left-1.5 flex items-center gap-1 px-1.5 py-px rounded text-[9px] font-medium border ${
+              hasUnseenArtifacts
+                ? 'bg-violet-950/80 border-violet-500/70 text-violet-300'
+                : 'bg-zinc-900/80 border-zinc-700/70 text-zinc-400'
+            }`}
+            title={`${artifactCount} canvas artifact${artifactCount === 1 ? '' : 's'} — open the session to view`}
+          >
+            <span>▣</span>
+            <span className="tabular-nums">{artifactCount}</span>
           </div>
         )}
 

@@ -33,6 +33,7 @@ export interface HotkeyMap {
   copyFilePath: string
   togglePipeline: string
   toggleScheduled: string
+  toggleCanvas: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -52,6 +53,7 @@ export const defaultHotkeys: HotkeyMap = {
   copyFilePath: typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac') ? 'alt+c' : 'shift+c',
   togglePipeline: 'l',
   toggleScheduled: 'j',
+  toggleCanvas: 'k',
 }
 
 export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | null
@@ -229,6 +231,73 @@ export interface ScheduledTask {
   runs: ScheduleRun[]
 }
 
+// ---- Canvas (per-session UI artifacts) ----
+// Types mirror the main-process source of truth in src/main/canvas-types.ts.
+// The main process owns the authoritative state (canvas-store.ts); the renderer
+// keeps this mirror, refreshed by the 'canvas:changed' broadcast (wired in
+// App.tsx). Open/selection/unseen state is renderer-local UI state.
+
+export type CanvasArtifactSource = 'agent' | 'user'
+
+export interface CanvasTableColumn {
+  key: string
+  label?: string
+  align?: 'left' | 'right' | 'center'
+}
+
+export type CanvasTableCell = string | number | boolean | null
+
+export interface CanvasTableSpec {
+  columns: CanvasTableColumn[]
+  rows: Array<Record<string, CanvasTableCell>>
+}
+
+export interface CanvasImageSpec {
+  path: string
+  alt?: string
+}
+
+/** Coordinates are pixels in the image's NATURAL size (SVG viewBox scaling). */
+export type CanvasAnnotation =
+  | { kind: 'circle'; cx: number; cy: number; r: number; label?: string; color?: string }
+  | { kind: 'box'; x: number; y: number; w: number; h: number; label?: string; color?: string }
+  | { kind: 'arrow'; x1: number; y1: number; x2: number; y2: number; label?: string; color?: string }
+  | { kind: 'label'; x: number; y: number; text: string; color?: string }
+
+export interface CanvasArtifactBase {
+  id: string
+  /** App/PTY session id of the emitter (dead after an app restart). */
+  sessionId: string
+  /** Claude conversation id — re-binds persisted artifacts to restored sessions. */
+  claudeSessionId: string | null
+  source: CanvasArtifactSource
+  title?: string
+  /** ms epoch. */
+  createdAt: number
+}
+
+export type CanvasArtifact =
+  | (CanvasArtifactBase & { component: 'result-table'; table: CanvasTableSpec })
+  | (CanvasArtifactBase & { component: 'markdown'; markdown: string })
+  | (CanvasArtifactBase & { component: 'image'; image: CanvasImageSpec })
+  | (CanvasArtifactBase & { component: 'annotated-image'; image: CanvasImageSpec; annotations: CanvasAnnotation[] })
+
+/** All artifacts belonging to a session, oldest → newest. Matches on the live
+ *  app session id OR the stable claudeSessionId (how persisted artifacts from a
+ *  previous app run re-attach to a restored session). */
+export function artifactsForSession(
+  artifacts: CanvasArtifact[],
+  session: Pick<Session, 'id' | 'claudeSessionId'>,
+): CanvasArtifact[] {
+  return artifacts
+    .filter(
+      (a) =>
+        a.sessionId === session.id ||
+        (a.claudeSessionId != null && a.claudeSessionId === session.claudeSessionId),
+    )
+    .sort((a, b) => a.createdAt - b.createdAt)
+}
+
 export interface Session {
   id: string
   projectPath: string
@@ -348,6 +417,9 @@ export interface AppState {
   setAutoModeForRestoredSessions: (value: boolean) => void
   ambientTodoNudge: boolean
   setAmbientTodoNudge: (value: boolean) => void
+  /** Auto-display image paths from user prompts on the session's canvas. */
+  canvasAutoShowUserImages: boolean
+  setCanvasAutoShowUserImages: (value: boolean) => void
   spawnIntoCurrentSplit: boolean
   setSpawnIntoCurrentSplit: (value: boolean) => void
   /** How spawned Claude sessions are paired with a shell. Mutually exclusive. */
@@ -426,6 +498,29 @@ export interface AppState {
   /** Fire a schedule immediately; resolves to the spawned session id (or null). */
   runScheduledTaskNow: (id: string) => Promise<string | null>
 
+  // Canvas. Main process owns the artifact list (canvas-store.ts); the mirror is
+  // refreshed by 'canvas:changed'. Everything else here is renderer-local UI
+  // state: which sessions' docks are open, which artifact is selected per
+  // session, and which sessions have unseen artifacts (graph-node badge).
+  canvasArtifacts: CanvasArtifact[]
+  /** Replace the mirror from the main-process store (initial load + broadcast). */
+  setCanvasArtifacts: (artifacts: CanvasArtifact[]) => void
+  /** Sessions whose canvas dock is open. A new emit re-adds a dismissed session. */
+  openCanvasSessionIds: string[]
+  openCanvas: (sessionId: string) => void
+  dismissCanvas: (sessionId: string) => void
+  /** Selected artifact id per session; absent = latest. */
+  canvasSelection: Record<string, string>
+  selectCanvasArtifact: (sessionId: string, artifactId: string) => void
+  /** Sessions with artifacts the user hasn't viewed yet (drives the graph badge). */
+  unseenCanvasSessionIds: string[]
+  markCanvasSeen: (sessionId: string) => void
+  /** A NEW artifact arrived ('canvas:emitted'): upsert it, open the session's
+   *  dock, select it, and mark unseen unless the session is currently visible. */
+  handleCanvasEmitted: (artifact: CanvasArtifact) => void
+  /** 'canvas:focus' from an agent: open the dock + select an existing artifact. */
+  handleCanvasFocus: (sessionId: string, artifactId: string) => void
+
   // Message notifications
   pendingMessages: MessageNotification[]
   addMessageNotification: (msg: { targetSessionId: string; fromSessionId: string | null; message: string }) => void
@@ -484,7 +579,10 @@ export const useStore = create<AppState>((set, get) => ({
   removeSession: (id) =>
     set((state) => ({
       sessions: state.sessions.filter((s) => s.id !== id),
-      focusedSessionId: state.focusedSessionId === id ? null : state.focusedSessionId
+      focusedSessionId: state.focusedSessionId === id ? null : state.focusedSessionId,
+      // Canvas UI state is per-live-session; artifacts themselves persist in main.
+      openCanvasSessionIds: state.openCanvasSessionIds.filter((sid) => sid !== id),
+      unseenCanvasSessionIds: state.unseenCanvasSessionIds.filter((sid) => sid !== id),
     })),
   updateSessionStatus: (id, status) =>
     set((state) => ({
@@ -623,6 +721,8 @@ export const useStore = create<AppState>((set, get) => ({
   setAutoModeForRestoredSessions: (value) => set({ autoModeForRestoredSessions: value }),
   ambientTodoNudge: false,
   setAmbientTodoNudge: (value) => set({ ambientTodoNudge: value }),
+  canvasAutoShowUserImages: true,
+  setCanvasAutoShowUserImages: (value) => set({ canvasAutoShowUserImages: value }),
   spawnIntoCurrentSplit: false,
   setSpawnIntoCurrentSplit: (value) => set({ spawnIntoCurrentSplit: value }),
   terminalPairingMode: 'off',
@@ -712,6 +812,62 @@ export const useStore = create<AppState>((set, get) => ({
   deleteScheduledTask: (id) => { void window.api.schedulesDelete(id) },
   setScheduledTaskEnabled: (id, enabled) => { void window.api.schedulesSetEnabled(id, enabled) },
   runScheduledTaskNow: (id) => window.api.schedulesRunNow(id),
+
+  // Canvas
+  canvasArtifacts: [],
+  setCanvasArtifacts: (artifacts) => set({ canvasArtifacts: artifacts }),
+  openCanvasSessionIds: [],
+  openCanvas: (sessionId) =>
+    set((state) => ({
+      openCanvasSessionIds: state.openCanvasSessionIds.includes(sessionId)
+        ? state.openCanvasSessionIds
+        : [...state.openCanvasSessionIds, sessionId],
+    })),
+  dismissCanvas: (sessionId) =>
+    set((state) => ({
+      openCanvasSessionIds: state.openCanvasSessionIds.filter((id) => id !== sessionId),
+    })),
+  canvasSelection: {},
+  selectCanvasArtifact: (sessionId, artifactId) =>
+    set((state) => ({
+      canvasSelection: { ...state.canvasSelection, [sessionId]: artifactId },
+    })),
+  unseenCanvasSessionIds: [],
+  markCanvasSeen: (sessionId) =>
+    set((state) => ({
+      unseenCanvasSessionIds: state.unseenCanvasSessionIds.filter((id) => id !== sessionId),
+    })),
+  handleCanvasEmitted: (artifact) =>
+    set((state) => {
+      // Visible right now → no unseen badge. Focused view shows one session;
+      // split view shows every member pane of the active group.
+      const visible =
+        (state.viewMode === 'focused' && state.focusedSessionId === artifact.sessionId) ||
+        (state.viewMode === 'split' &&
+          !!state.activeSplitGroupId &&
+          (state.splitGroups
+            .find((g) => g.id === state.activeSplitGroupId)
+            ?.orderedSessionIds.includes(artifact.sessionId) ?? false))
+      return {
+        // Upsert — the 'canvas:changed' full-list broadcast races this event.
+        canvasArtifacts: [...state.canvasArtifacts.filter((a) => a.id !== artifact.id), artifact],
+        openCanvasSessionIds: state.openCanvasSessionIds.includes(artifact.sessionId)
+          ? state.openCanvasSessionIds
+          : [...state.openCanvasSessionIds, artifact.sessionId],
+        canvasSelection: { ...state.canvasSelection, [artifact.sessionId]: artifact.id },
+        unseenCanvasSessionIds:
+          visible || state.unseenCanvasSessionIds.includes(artifact.sessionId)
+            ? state.unseenCanvasSessionIds
+            : [...state.unseenCanvasSessionIds, artifact.sessionId],
+      }
+    }),
+  handleCanvasFocus: (sessionId, artifactId) =>
+    set((state) => ({
+      openCanvasSessionIds: state.openCanvasSessionIds.includes(sessionId)
+        ? state.openCanvasSessionIds
+        : [...state.openCanvasSessionIds, sessionId],
+      canvasSelection: { ...state.canvasSelection, [sessionId]: artifactId },
+    })),
 
   // Message notifications
   pendingMessages: [],

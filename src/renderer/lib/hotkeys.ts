@@ -15,7 +15,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   openSettings: 'Open settings',
   copyFilePath: 'Copy file path (in file explorer)',
   togglePipeline: 'Toggle agentic pipeline',
-  toggleScheduled: 'Toggle scheduled tasks'
+  toggleScheduled: 'Toggle scheduled tasks',
+  toggleCanvas: 'Toggle canvas (focused session)'
 }
 
 /** All recognized modifier tokens in canonical order */
