@@ -130,7 +130,11 @@ export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand, onM
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-auto bg-[#0d0d0f]">
-        <ArtifactRenderer artifact={selected} />
+        {/* Keyed by artifact id: renderers hold per-artifact local state
+            (image failed/natural-size flags, table sort/filter) that must
+            reset when flipping through history — without the key, one
+            artifact's failed-image flag bleeds into the next. */}
+        <ArtifactRenderer key={selected.id} artifact={selected} />
       </div>
     </>
   )

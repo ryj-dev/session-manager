@@ -53,8 +53,14 @@ export interface TableSpec {
 
 export interface ImageSpec {
   /** Absolute local path. Served to the renderer via canvas://image/<artifactId>
-   *  (looked up by artifact id in the store — never by caller-supplied path). */
+   *  (looked up by artifact id in the store — never by caller-supplied path).
+   *  At emit time the source file is COPIED into the app-owned canvas-images
+   *  dir and this points at the copy — artifacts own their pixels, so a
+   *  source living in an ephemeral location (~/.claude/image-cache, /tmp)
+   *  can't take the artifact down with it when cleaned up. */
   path: string
+  /** The caller-supplied source path the copy was made from (display only). */
+  originalPath?: string
   alt?: string
 }
 

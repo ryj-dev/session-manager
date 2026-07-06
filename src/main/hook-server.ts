@@ -1,7 +1,7 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { app, BrowserWindow, clipboard, nativeImage } from 'electron'
-import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync } from 'fs'
-import { join, dirname } from 'path'
+import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync, copyFileSync } from 'fs'
+import { join, dirname, extname } from 'path'
 import { homedir } from 'os'
 import { URL } from 'url'
 import { randomUUID, randomBytes, timingSafeEqual } from 'crypto'
@@ -52,12 +52,34 @@ function broadcastCanvas(): void {
 
 /** Store a validated canvas artifact + notify the renderer: full-list mirror
  *  refresh AND a targeted 'canvas:emitted' (drives the auto-open behaviour).
- *  Single emit path shared by /canvas/emit and the user-image auto-display. */
+ *  Single emit path shared by /canvas/emit and the user-image auto-display.
+ *
+ *  Image artifacts get their source file COPIED into canvas-images/ and the
+ *  artifact points at the copy — sources often live in ephemeral locations
+ *  (Claude Code's ~/.claude/image-cache, /tmp screenshots) that are cleaned
+ *  up later, which would otherwise leave a persisted artifact with no pixels.
+ *  Copies are app-owned, so the existing GC (prune-unlink + startup sweep)
+ *  bounds disk use to the 50-artifact cap. Copy failure falls back to the
+ *  original path — no worse than before. */
 function emitCanvasArtifact(
   payload: CanvasArtifactPayload,
   meta: { sessionId: string; claudeSessionId: string | null; source: CanvasArtifactSource },
 ): CanvasArtifact {
-  const stored = canvasStore.addArtifact(payload, meta)
+  let toStore = payload
+  if ('image' in toStore) {
+    const src = toStore.image.path
+    const ownedDir = canvasStore.canvasImagesDir()
+    if (dirname(src) !== ownedDir) {
+      try {
+        const copyPath = join(ownedDir, `emit-${randomUUID()}${extname(src).toLowerCase()}`)
+        copyFileSync(src, copyPath)
+        toStore = { ...toStore, image: { ...toStore.image, path: copyPath, originalPath: src } }
+      } catch (err) {
+        console.error('[canvas] image copy failed, storing original path:', err)
+      }
+    }
+  }
+  const stored = canvasStore.addArtifact(toStore, meta)
   broadcastCanvas()
   const win = BrowserWindow.getAllWindows()[0]
   if (win && !win.isDestroyed()) win.webContents.send('canvas:emitted', stored)
@@ -1700,8 +1722,8 @@ function summarizeCanvasArtifact(a: CanvasArtifact): string {
   switch (a.component) {
     case 'result-table': return `table · ${a.table.rows.length} rows × ${a.table.columns.length} cols`
     case 'markdown': return `markdown · ${(a.markdown.length / 1000).toFixed(1)}k chars`
-    case 'image': return `image · ${a.image.path}`
-    case 'annotated-image': return `annotated image · ${a.annotations.length} annotations · ${a.image.path}`
+    case 'image': return `image · ${a.image.originalPath ?? a.image.path}`
+    case 'annotated-image': return `annotated image · ${a.annotations.length} annotations · ${a.image.originalPath ?? a.image.path}`
   }
 }
 

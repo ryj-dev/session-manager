@@ -254,6 +254,8 @@ export interface CanvasTableSpec {
 
 export interface CanvasImageSpec {
   path: string
+  /** Caller-supplied source path the app-owned copy was made from (display only). */
+  originalPath?: string
   alt?: string
 }
 

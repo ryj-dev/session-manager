@@ -30,7 +30,7 @@ export function AnnotatedImage({ artifact }: Props): JSX.Element {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6 py-10">
         <span className="text-[13px] text-zinc-400">image unavailable</span>
-        <span className="text-[10px] text-zinc-600 font-mono break-all">{artifact.image.path}</span>
+        <span className="text-[10px] text-zinc-600 font-mono break-all">{artifact.image.originalPath ?? artifact.image.path}</span>
         <span className="text-[10px] text-zinc-600">The file may have been moved or deleted since it was shown.</span>
       </div>
     )
