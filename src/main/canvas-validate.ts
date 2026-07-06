@@ -24,8 +24,14 @@ import {
   type TableSpec,
 } from './canvas-types.ts'
 
+/** Coordinate space for incoming annotations. 'natural' = pixels in the
+ *  image's natural size (storage format). 'relative' = fractions 0–1 of
+ *  width/height — converted to natural pixels at the emit boundary so the
+ *  agent never needs to know the image's pixel dimensions. */
+export type CoordSpace = 'natural' | 'relative'
+
 export type ValidationResult =
-  | { ok: true; value: CanvasArtifactPayload }
+  | { ok: true; value: CanvasArtifactPayload; coordSpace: CoordSpace }
   | { ok: false; error: string }
 
 const KNOWN_COMPONENTS = new Set(['result-table', 'markdown', 'image', 'annotated-image'])
@@ -179,11 +185,17 @@ export function validateCanvasArtifact(input: unknown): ValidationResult {
   const title = validTitle(input.title)
   if (title === null) return err(`title must be a string of at most ${MAX_TITLE_CHARS} chars`)
 
+  const coordSpaceRaw = input.coordSpace
+  if (coordSpaceRaw !== undefined && coordSpaceRaw !== 'natural' && coordSpaceRaw !== 'relative') {
+    return err('coordSpace must be "natural" (pixels) or "relative" (0–1 fractions)')
+  }
+  const coordSpace: CoordSpace = (coordSpaceRaw as CoordSpace | undefined) ?? 'natural'
+
   switch (component) {
     case 'result-table': {
       const { value, error } = validateTable(input.table)
       if (!value) return err(error!)
-      return { ok: true, value: { component: 'result-table', ...(title ? { title } : {}), table: value } }
+      return { ok: true, coordSpace, value: { component: 'result-table', ...(title ? { title } : {}), table: value } }
     }
     case 'markdown': {
       if (typeof input.markdown !== 'string' || input.markdown.length === 0) {
@@ -192,7 +204,7 @@ export function validateCanvasArtifact(input: unknown): ValidationResult {
       if (input.markdown.length > MAX_MARKDOWN_CHARS) {
         return err(`markdown exceeds the cap of ${MAX_MARKDOWN_CHARS} chars`)
       }
-      return { ok: true, value: { component: 'markdown', ...(title ? { title } : {}), markdown: input.markdown } }
+      return { ok: true, coordSpace, value: { component: 'markdown', ...(title ? { title } : {}), markdown: input.markdown } }
     }
     case 'image':
     case 'annotated-image': {
@@ -216,7 +228,7 @@ export function validateCanvasArtifact(input: unknown): ValidationResult {
         return err(`annotations exceed the cap of ${MAX_ANNOTATIONS}`)
       }
       if (list.length === 0) {
-        return { ok: true, value: { component: 'image', ...(title ? { title } : {}), image } }
+        return { ok: true, coordSpace, value: { component: 'image', ...(title ? { title } : {}), image } }
       }
       const annotations: Annotation[] = []
       for (let i = 0; i < list.length; i++) {
@@ -224,11 +236,74 @@ export function validateCanvasArtifact(input: unknown): ValidationResult {
         if (!value) return err(error!)
         annotations.push(value)
       }
+      if (coordSpace === 'relative') {
+        const rangeError = relativeRangeError(annotations)
+        if (rangeError) return err(rangeError)
+      }
       return {
         ok: true,
+        coordSpace,
         value: { component: 'annotated-image', ...(title ? { title } : {}), image, annotations },
       }
     }
   }
   return err('unreachable') // switch is exhaustive over KNOWN_COMPONENTS
+}
+
+// ── Coordinate-space helpers (used by hook-server at the emit boundary) ──────
+
+/** Numeric fields per annotation kind, split by which image axis scales them. */
+const X_FIELDS = ['x', 'cx', 'x1', 'x2', 'w'] as const
+const Y_FIELDS = ['y', 'cy', 'y1', 'y2', 'h'] as const
+
+/** In 'relative' mode every coordinate must be a 0–1 fraction. A value > 1 is
+ *  almost always pixel coords sent with the wrong coordSpace — say so. */
+function relativeRangeError(annotations: Annotation[]): string | null {
+  for (let i = 0; i < annotations.length; i++) {
+    const a = annotations[i] as unknown as Record<string, unknown>
+    for (const f of [...X_FIELDS, ...Y_FIELDS, 'r']) {
+      const v = a[f]
+      if (typeof v === 'number' && v > 1) {
+        return `annotation ${i} (${a.kind}): ${f}=${v} but coordSpace is "relative" — pass 0–1 fractions of the image size, or use coordSpace "natural" for pixel values`
+      }
+    }
+  }
+  return null
+}
+
+/** Convert relative (0–1) annotations to natural-pixel coordinates: x-axis
+ *  fields scale by width, y-axis by height, circle radius by min(w,h). */
+export function scaleAnnotationsToNatural(annotations: Annotation[], width: number, height: number): Annotation[] {
+  return annotations.map((a) => {
+    const out = { ...a } as unknown as Record<string, unknown>
+    for (const f of X_FIELDS) if (typeof out[f] === 'number') out[f] = Math.round((out[f] as number) * width)
+    for (const f of Y_FIELDS) if (typeof out[f] === 'number') out[f] = Math.round((out[f] as number) * height)
+    if (typeof out.r === 'number') out.r = Math.round(out.r * Math.min(width, height))
+    return out as unknown as Annotation
+  })
+}
+
+/** Reject natural-pixel annotations whose anchors land clearly outside the
+ *  image (5% tolerance — labels may intentionally hug an edge). Vision models
+ *  mis-estimating scale is the common failure; the error carries the real
+ *  dimensions so the agent can correct without measuring the file itself. */
+export function annotationBoundsError(annotations: Annotation[], width: number, height: number): string | null {
+  const maxX = width * 1.05
+  const maxY = height * 1.05
+  for (let i = 0; i < annotations.length; i++) {
+    const a = annotations[i] as unknown as Record<string, unknown>
+    for (const f of X_FIELDS) {
+      const v = a[f]
+      if (typeof v === 'number' && v > maxX) {
+        return `annotation ${i} (${a.kind}): ${f}=${v} is outside the image — it is ${width}×${height} pixels. Use coordinates within those bounds, or coordSpace "relative" with 0–1 fractions.`
+      }
+    }
+    for (const f of Y_FIELDS) {
+      const v = a[f]
+      if (typeof v === 'number' && v > maxY) {
+        return `annotation ${i} (${a.kind}): ${f}=${v} is outside the image — it is ${width}×${height} pixels. Use coordinates within those bounds, or coordSpace "relative" with 0–1 fractions.`
+      }
+    }
+  }
+  return null
 }

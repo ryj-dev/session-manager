@@ -3,7 +3,12 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { validateCanvasArtifact } from './canvas-validate.ts'
+import {
+  validateCanvasArtifact,
+  scaleAnnotationsToNatural,
+  annotationBoundsError,
+} from './canvas-validate.ts'
+import type { Annotation } from './canvas-types.ts'
 import {
   MAX_ANNOTATIONS,
   MAX_MARKDOWN_CHARS,
@@ -215,4 +220,74 @@ test('enforces title cap', () => {
     title: 'x'.repeat(121),
   })
   assert.equal(r.ok, false)
+})
+
+test('coordSpace defaults to natural and rejects unknown values', () => {
+  const r = validateCanvasArtifact({ component: 'markdown', markdown: 'hi' })
+  assert.equal(r.ok && r.coordSpace, 'natural')
+
+  const rel = validateCanvasArtifact({
+    component: 'annotated-image',
+    coordSpace: 'relative',
+    image: { path: '/tmp/s.png' },
+    annotations: [{ kind: 'circle', cx: 0.5, cy: 0.5, r: 0.1 }],
+  })
+  assert.equal(rel.ok && rel.coordSpace, 'relative')
+
+  assert.equal(
+    validateCanvasArtifact({ component: 'markdown', markdown: 'hi', coordSpace: 'pixels' }).ok,
+    false,
+  )
+})
+
+test('relative coordSpace rejects values > 1 with a corrective message', () => {
+  const r = validateCanvasArtifact({
+    component: 'annotated-image',
+    coordSpace: 'relative',
+    image: { path: '/tmp/s.png' },
+    annotations: [{ kind: 'box', x: 103, y: 0.5, w: 0.1, h: 0.2 }],
+  })
+  assert.equal(r.ok, false)
+  if (!r.ok) assert.match(r.error, /coordSpace is "relative"/)
+})
+
+test('scaleAnnotationsToNatural maps fractions to pixels (r by shorter side)', () => {
+  const scaled = scaleAnnotationsToNatural(
+    [
+      { kind: 'circle', cx: 0.5, cy: 0.5, r: 0.1 },
+      { kind: 'box', x: 0.25, y: 0.5, w: 0.5, h: 0.25 },
+      { kind: 'arrow', x1: 0, y1: 0, x2: 1, y2: 1 },
+      { kind: 'label', x: 0.1, y: 0.9, text: 'here' },
+    ] as Annotation[],
+    200,
+    100,
+  )
+  assert.deepEqual(scaled[0], { kind: 'circle', cx: 100, cy: 50, r: 10 })
+  assert.deepEqual(scaled[1], { kind: 'box', x: 50, y: 50, w: 100, h: 25 })
+  assert.deepEqual(scaled[2], { kind: 'arrow', x1: 0, y1: 0, x2: 200, y2: 100 })
+  assert.deepEqual(scaled[3], { kind: 'label', x: 20, y: 90, text: 'here' })
+})
+
+test('annotationBoundsError flags coordinates outside the image with its dimensions', () => {
+  const inBounds = annotationBoundsError(
+    [{ kind: 'box', x: 103, y: 54, w: 14, h: 20 }] as Annotation[],
+    135,
+    102,
+  )
+  assert.equal(inBounds, null)
+
+  const outX = annotationBoundsError(
+    [{ kind: 'circle', cx: 500, cy: 50, r: 10 }] as Annotation[],
+    135,
+    102,
+  )
+  assert.ok(outX && /135×102/.test(outX))
+
+  // 5% tolerance: a label hugging the bottom edge is fine
+  const edge = annotationBoundsError(
+    [{ kind: 'label', x: 100, y: 106, text: 'edge' }] as Annotation[],
+    135,
+    102,
+  )
+  assert.equal(edge, null)
 })

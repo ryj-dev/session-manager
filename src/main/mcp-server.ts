@@ -139,6 +139,7 @@ Not all sections are required. Each note type has recommended sections.
 | delete-scheduled-task | Permanently remove a scheduled task and its run history (scheduled tasks) |
 | list-scheduled-task-runs | List the run history (active + recent, capped at 25) for one scheduled task (scheduled tasks) |
 | canvas-show | Display a rich visual artifact (sortable table, markdown report, image, annotated image) on your session's canvas panel instead of dumping it as terminal text (canvas) |
+| canvas-inspect-image | Get an image's pixel dimensions + an upscaled copy for precise annotation, in one call — never use sips/ImageMagick for this (canvas) |
 | canvas-list-artifacts | List your session's existing canvas artifacts (ids + summaries) (canvas) |
 | canvas-focus | Bring an existing canvas artifact back into view without re-emitting it (canvas) |
 
@@ -1076,6 +1077,7 @@ server.tool(
     image: z.object({
       path: z.string().describe('ABSOLUTE path to an existing local image file (.png/.jpg/.jpeg/.gif/.webp).'),
       alt: z.string().optional(),
+      coordSpace: z.enum(['relative', 'natural']).optional().describe('Coordinate space for annotations. PREFER "relative": all coordinates are 0–1 fractions of the image\'s width/height (circle r = fraction of the shorter side) — you do NOT need to know the pixel dimensions. "natural" (default) = pixels in the image\'s natural size.'),
       annotations: z.array(z.object({
         kind: z.enum(['circle', 'box', 'arrow', 'label']).describe('circle needs cx/cy/r; box needs x/y/w/h; arrow needs x1/y1/x2/y2 (tail → head); label needs x/y/text.'),
         cx: z.number().optional(), cy: z.number().optional(), r: z.number().optional(),
@@ -1085,7 +1087,7 @@ server.tool(
         x2: z.number().optional(), y2: z.number().optional(),
         text: z.string().max(200).optional().describe('Label text (required for kind "label"; optional callout for other kinds).'),
         color: z.string().optional().describe('CSS color, e.g. "#f43f5e" or "red". Defaults to the theme accent.'),
-      })).max(100).optional().describe('Overlay annotations to point out regions. Coordinates are PIXELS in the image\'s NATURAL size (as read from the file, not as displayed).'),
+      })).max(100).optional().describe('Overlay annotations to point out regions. Do NOT measure the image with shell tools first — pass coordSpace "relative" and estimate 0–1 fractions from what you see; the host converts to pixels and rejects out-of-bounds coordinates with the real dimensions. For precise placement on small/dense images, call canvas-inspect-image once instead of resizing manually.'),
     }).optional().describe('A local image, optionally annotated — e.g. answer "where is the button?" by re-showing the screenshot with a circle around it.'),
   },
   async ({ title, table, markdown, image }) => {
@@ -1102,11 +1104,33 @@ server.tool(
         ? { component: 'result-table', title, table }
         : markdown != null
           ? { component: 'markdown', title, markdown }
-          : { component: 'image', title, image: { path: image!.path, alt: image!.alt }, annotations: image!.annotations }
-      const result = await callHookServer('/canvas/emit', { sessionId: sid, artifact }) as { artifactId: string }
-      return { content: [{ type: 'text', text: `Artifact displayed on the canvas (id ${result.artifactId}).` }] }
+          : { component: 'image', title, image: { path: image!.path, alt: image!.alt }, annotations: image!.annotations, coordSpace: image!.coordSpace }
+      const result = await callHookServer('/canvas/emit', { sessionId: sid, artifact }) as { artifactId: string; imageWidth?: number; imageHeight?: number }
+      const dims = result.imageWidth ? ` Image is ${result.imageWidth}×${result.imageHeight} px.` : ''
+      return { content: [{ type: 'text', text: `Artifact displayed on the canvas (id ${result.artifactId}).${dims}` }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error showing canvas artifact: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'canvas-inspect-image',
+  'Inspect a local image in ONE call before annotating it: returns its natural pixel dimensions and, for small images (<600px), the path of a pre-upscaled copy you can Read to locate features precisely. Use this INSTEAD of shell tools (sips/ImageMagick) for measuring or zooming. Often you don\'t need it at all — canvas-show with coordSpace "relative" (0–1 fractions) requires no dimension knowledge.',
+  {
+    path: z.string().describe('ABSOLUTE path to the image file.'),
+  },
+  async ({ path }) => {
+    try {
+      const result = await callHookServer('/canvas/inspect', { path }) as {
+        width: number; height: number; upscaledPath?: string; upscaleFactor?: number
+      }
+      const upscale = result.upscaledPath
+        ? ` A ${result.upscaleFactor}× upscaled copy is at ${result.upscaledPath} — Read it to locate features, then divide your pixel estimates by ${result.upscaleFactor} (or just use coordSpace "relative").`
+        : ''
+      return { content: [{ type: 'text', text: `${result.width}×${result.height} px.${upscale}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error inspecting image: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )

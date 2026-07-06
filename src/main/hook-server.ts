@@ -1,5 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
-import { app, BrowserWindow, clipboard } from 'electron'
+import { app, BrowserWindow, clipboard, nativeImage } from 'electron'
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
@@ -14,7 +14,7 @@ import * as pipelineStore from './pipeline-store'
 import * as gitWorktree from './git-worktree'
 import * as scheduleStore from './schedule-store'
 import * as canvasStore from './canvas-store'
-import { validateCanvasArtifact } from './canvas-validate'
+import { validateCanvasArtifact, scaleAnnotationsToNatural, annotationBoundsError } from './canvas-validate'
 import type { CanvasArtifact, CanvasArtifactPayload, CanvasArtifactSource } from './canvas-types'
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
@@ -210,7 +210,7 @@ const GUARDED = new Set([
   '/pipeline/request-approval', '/pipeline/rename-session',
   '/pipeline/merge-worktree', '/pipeline/put-artifact',
   '/schedules/create', '/schedules/update', '/schedules/set-enabled', '/schedules/delete',
-  '/canvas/emit', '/canvas/focus',
+  '/canvas/emit', '/canvas/focus', '/canvas/inspect',
 ])
 
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
@@ -274,9 +274,10 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/schedules/delete')      { handleScheduleDelete(body, res); return }
 
         // ── Canvas endpoints (called by the canvas MCP tools) ──
-        if (url.pathname === '/canvas/emit')  { handleCanvasEmit(body, res); return }
-        if (url.pathname === '/canvas/focus') { handleCanvasFocus(body, res); return }
-        if (url.pathname === '/canvas/list')  { handleCanvasList(body, res); return }
+        if (url.pathname === '/canvas/emit')    { handleCanvasEmit(body, res); return }
+        if (url.pathname === '/canvas/focus')   { handleCanvasFocus(body, res); return }
+        if (url.pathname === '/canvas/list')    { handleCanvasList(body, res); return }
+        if (url.pathname === '/canvas/inspect') { handleCanvasInspect(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -1560,18 +1561,108 @@ function handleCanvasEmit(body: string, res: import('http').ServerResponse): voi
       res.end(JSON.stringify({ error: result.error }))
       return
     }
-    if ('image' in result.value && !existsSync(result.value.image.path)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: `image path does not exist or is unreadable: ${result.value.image.path}` }))
-      return
+    let value = result.value
+    let dims: { width: number; height: number } | null = null
+    if ('image' in value) {
+      if (!existsSync(value.image.path)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `image path does not exist or is unreadable: ${value.image.path}` }))
+        return
+      }
+      // Dimensions read HERE, deterministically — the agent never needs to
+      // measure the file. Drives relative→natural conversion, bounds checks,
+      // and the dims echoed back in the success payload.
+      dims = readImageDims(value.image.path)
+      if (!dims) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: `could not decode image (corrupt or unsupported): ${value.image.path}` }))
+        return
+      }
+      if (value.component === 'annotated-image') {
+        const annotations = result.coordSpace === 'relative'
+          ? scaleAnnotationsToNatural(value.annotations, dims.width, dims.height)
+          : value.annotations
+        const boundsError = annotationBoundsError(annotations, dims.width, dims.height)
+        if (boundsError) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: boundsError }))
+          return
+        }
+        value = { ...value, annotations }
+      }
     }
-    const stored = emitCanvasArtifact(result.value, {
+    const stored = emitCanvasArtifact(value, {
       sessionId,
       claudeSessionId: session.claudeSessionId ?? null,
       source: 'agent',
     })
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, artifactId: stored.id }))
+    res.end(JSON.stringify({
+      ok: true,
+      artifactId: stored.id,
+      ...(dims ? { imageWidth: dims.width, imageHeight: dims.height } : {}),
+    }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Decode an image's natural pixel size. Returns null when unreadable. */
+function readImageDims(path: string): { width: number; height: number } | null {
+  try {
+    const size = nativeImage.createFromPath(path).getSize()
+    return size.width > 0 && size.height > 0 ? size : null
+  } catch {
+    return null
+  }
+}
+
+/** Longest side below this gets an upscaled inspection copy — small images are
+ *  hard to localize on; a single pre-made zoom replaces the sips-resize dance. */
+const INSPECT_UPSCALE_THRESHOLD = 600
+const INSPECT_MAX_SIDE = 2048
+
+/** canvas-inspect-image: one call returns the pixel dimensions and, for small
+ *  images, a pre-upscaled copy the agent can Read for precise localization —
+ *  replacing the measure → Read → resize → Read tool-call chain. */
+function handleCanvasInspect(body: string, res: import('http').ServerResponse): void {
+  try {
+    const { path } = readJson<{ path: string }>(body)
+    if (typeof path !== 'string' || !path.startsWith('/')) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'path must be an absolute path to an image file' }))
+      return
+    }
+    if (!existsSync(path)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `image path does not exist: ${path}` }))
+      return
+    }
+    const img = nativeImage.createFromPath(path)
+    const size = img.getSize()
+    if (size.width <= 0 || size.height <= 0) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `could not decode image (corrupt or unsupported): ${path}` }))
+      return
+    }
+
+    let upscaledPath: string | undefined
+    let upscaleFactor: number | undefined
+    const longest = Math.max(size.width, size.height)
+    if (longest < INSPECT_UPSCALE_THRESHOLD) {
+      upscaleFactor = Math.min(4, Math.floor(INSPECT_MAX_SIDE / longest))
+      if (upscaleFactor >= 2) {
+        const resized = img.resize({ width: size.width * upscaleFactor, quality: 'best' })
+        upscaledPath = join(canvasStore.canvasImagesDir(), `inspect-${randomUUID()}.png`)
+        writeFileSync(upscaledPath, resized.toPNG())
+      } else {
+        upscaleFactor = undefined
+      }
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ width: size.width, height: size.height, upscaledPath, upscaleFactor }))
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
