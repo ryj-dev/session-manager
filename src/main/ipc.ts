@@ -1237,6 +1237,36 @@ Tools an orchestrator or worker session uses to drive a task. The orchestrator i
 | \`pipeline-rename-session\` | Rename a node in your task tree (a child or yourself) to a descriptive board label, e.g. "Implement · CSV serializer" |
 | \`pipeline-put-artifact\` / \`pipeline-get-artifact\` | Store/read a full stage hand-off (\`plan\`/\`diff\`/\`review\`) off the board, so downstream stages read large content cleanly instead of relaying it through chat or milestones |
 | \`merge-worktree\` | Merge a finished isolated-worktree worker's branch into the integration branch, remove its worktree, and mark the node read-only; conflicts keep the worktree for a fix worker |
+
+## Canvas — answer visually, not with text dumps
+
+Your session has a canvas: a dock beside your terminal where you can show the user rich artifacts via \`canvas-show\`. It opens automatically on your first artifact.
+
+### When to use it — proactively, without being asked
+
+- **Annotating an image for the user.** "Where is the button?", "which field is wrong?", "point out the difference" → re-show their screenshot with a \`circle\`/\`box\`/\`arrow\`/\`label\` on it. This is the canonical answer shape for any "where/which part of this image" question — a text description of a location is strictly worse.
+- **Tabular results.** Query output, file listings, comparisons, anything ≥ ~5 rows × 2 columns → a \`table\` artifact (the user can sort and filter it), NOT a markdown table in chat.
+- **Reports and structured summaries.** Investigation write-ups, comparisons, runbooks → a \`markdown\` artifact instead of a long chat message; keep the chat reply to the key takeaways.
+- **Showing an image** you generated, found, or analyzed.
+
+Rule of thumb: if the answer is data-shaped or image-shaped, the canvas is the answer and your chat text is the one-line summary of it.
+
+### When NOT to use it
+
+Never for questions, disambiguation, or approvals — the canvas is display-only; the user cannot click anything back to you. Ask those in chat. Don't re-emit unchanged content (use \`canvas-focus\`), and don't split one logical result across several artifacts.
+
+### Annotating images — no measuring
+
+Pass \`coordSpace: "relative"\` and give coordinates as 0–1 fractions of width/height (circle \`r\` = fraction of the shorter side). The host reads the image's pixel dimensions itself, converts, and rejects out-of-bounds coordinates with the real dimensions so you can correct in one retry. **Never use \`sips\`/ImageMagick to measure or zoom** — if you need a closer look at a small image, \`canvas-inspect-image\` returns the dimensions plus a pre-upscaled copy to Read, in one call.
+
+### Tools
+
+| Tool | Purpose |
+|------|---------|
+| \`canvas-show\` | Display ONE of: \`table\` (sortable/filterable), \`markdown\` (GFM report), \`image\` (optionally with \`annotations\` + \`coordSpace\`) |
+| \`canvas-inspect-image\` | An image's pixel dimensions + an upscaled copy for precise annotation, in one call |
+| \`canvas-list-artifacts\` | Your session's existing artifacts (ids + summaries) |
+| \`canvas-focus\` | Bring an already-shown artifact back into view — instead of re-emitting it |
 <!-- /session-manager-instructions -->
 `
 }

@@ -19,5 +19,6 @@ Curated, app-versioned feature documentation. One article per feature; each has 
 - `file-explorer` — Keyboard-driven directory browser (Cmd+E) with path persistence and spawn-into-directory.
 - `agentic-pipeline` — Cmd+L: todo → orchestrator → plan/implement/review loop, worktree fan-out, autonomy levels, milestones, pipeline MCP tools.
 - `scheduled-tasks` — Cmd+J: launch/first-of-day/interval/daily triggers, per-day caps, resumable run history, login-failure retry, model picker.
+- `canvas` — Per-session visual surface: agents answer with sortable tables, markdown reports, and annotated screenshots (canvas-show); user-sent images auto-display at send time.
 - `hotkeys-settings` — All 14 configurable Cmd-hotkeys with defaults, plus every Settings panel option including cleanup/uninstall.
 - `mcp-server-overview` — How the stdio MCP server registers, its architecture, and the full 39-tool surface grouped by area.
