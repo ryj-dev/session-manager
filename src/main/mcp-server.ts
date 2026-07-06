@@ -133,7 +133,7 @@ Not all sections are required. Each note type has recommended sections.
 | pipeline-get-artifact | Read a stored hand-off artifact ('plan'/'diff'/'review'); found:false just means nothing stored yet, not an error (pipeline) |
 | pipeline-start | Launch a backlog todo into the pipeline (same as the UI's "start task"): creates the task with per-task worktree isolation and spawns the orchestrator; no-op-safe if already running (pipeline) |
 | pipeline-start-review | Send EXISTING work (uncommitted edits or a committed branch) straight into the review⇄fix loop, skipping plan/implement: diff comes from git (working tree or base...target range), todo body is the rubric (pipeline) |
-| list-scheduled-tasks / get-scheduled-task | Read scheduled tasks: summary list, or one task's full definition + run history (scheduled tasks) |
+| list-scheduled-tasks / get-scheduled-task | Read scheduled tasks: summary list, or one task's definition (run history omitted by default — use list-scheduled-task-runs) (scheduled tasks) |
 | create-scheduled-task / update-scheduled-task | Define or modify a scheduled task — a prompt run as an unattended session on a schedule (none / interval / daily, NOT cron) (scheduled tasks) |
 | enable-scheduled-task / disable-scheduled-task | Toggle whether a scheduled task fires, without deleting its history (scheduled tasks) |
 | delete-scheduled-task | Permanently remove a scheduled task and its run history (scheduled tasks) |
@@ -825,7 +825,7 @@ server.tool(
     pipelineRole: z.enum(['orchestrator', 'plan', 'implement', 'review']).optional().describe('Agentic pipeline: this session\'s role in the task tree. Required with pipelineTaskId.'),
     pipelineLabel: z.string().optional().describe('Agentic pipeline: short label for the tree node (e.g. "Research · auth flow", "worktree: feat/export-ui").'),
     fanoutKind: z.string().optional().describe('Agentic pipeline: when this spawn is a parallel child, the kind of fan-out (e.g. "research", "worktrees", "topics").'),
-    modelId: z.string().optional().describe('Model for this session: alias "opus" | "sonnet" | "haiku", or a full model id. Omit to use the per-role default (or inherit the user default). Pipeline orchestrators set this per stage (plan/implement → opus, research probes → haiku, review → sonnet, final verification → opus).'),
+    modelId: z.string().optional().describe('Model for this session: alias "opus" | "sonnet" | "haiku" | "fable" (resolved to the latest version by the claude CLI), or a full model id. Omit to use the per-role default (or inherit the user default). Pipeline orchestrators set this per stage (plan/implement → opus, research probes → haiku, review → sonnet, final verification → opus).'),
     worktreeBranch: z.string().optional().describe('Agentic pipeline: for worktree workers, the branch they build on (recorded for resume / read-only-after-merge).'),
     isolate: z.boolean().optional().describe('Agentic pipeline: create an isolated git worktree+branch for this worker so parallel workers cannot clobber each other. Requires worktreeBranch and a git projectPath; falls back to the shared dir (with a warning) for non-git projects.'),
   },
@@ -960,7 +960,7 @@ server.tool(
     prompt: z.string().describe('The task prompt for the agent. Include full context — the agent has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the session. Defaults to the current working directory.'),
     reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): agent must report back findings. "done": agent sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
-    modelId: z.string().optional().describe('Model for this agent: alias "opus" | "sonnet" | "haiku", or a full model id. Omit to inherit the user default.'),
+    modelId: z.string().optional().describe('Model for this agent: alias "opus" | "sonnet" | "haiku" | "fable" (resolved to the latest version by the claude CLI), or a full model id. Omit to inherit the user default.'),
   },
   async ({ agentName, prompt, projectPath, reportBack, modelId }) => {
     try {
@@ -1372,7 +1372,7 @@ const scheduleRecurrenceSchema = z
 
 server.tool(
   'list-scheduled-tasks',
-  'List all scheduled tasks (name, schedule, enabled state, last run). Read-only.',
+  'List all scheduled tasks (name, schedule, model override if set, enabled state, last run). Read-only.',
   {},
   async () => {
     try {
@@ -1385,7 +1385,9 @@ server.tool(
             : s.recurrence.kind === 'daily'
               ? `daily ${s.recurrence.hour}:${String(s.recurrence.minute).padStart(2, '0')}`
               : 'no recurrence'
-        const flags = [s.onLaunch ? 'onLaunch' : null, s.enabled ? 'enabled' : 'disabled'].filter(Boolean).join(', ')
+        const launchFlag = s.launch && s.launch !== 'off' ? `launch:${s.launch}` : null
+        const modelFlag = s.model ? `model:${s.model}` : null
+        const flags = [launchFlag, modelFlag, s.enabled ? 'enabled' : 'disabled'].filter(Boolean).join(', ')
         return `- ${s.name} (${rec}; ${flags})  lastRun: ${s.lastRunAt ?? 'never'}  (id: ${s.id})`
       })
       return { content: [{ type: 'text', text: `${r.schedules.length} scheduled task(s):\n${lines.join('\n')}` }] }
@@ -1397,11 +1399,27 @@ server.tool(
 
 server.tool(
   'get-scheduled-task',
-  'Read the full definition of one scheduled task by id (prompt, projectPath, recurrence, allowedTools, run history). Read-only.',
-  { id: z.string() },
-  async ({ id }) => {
+  "Read one scheduled task's definition by id (prompt, projectPath, recurrence, launch, allowedTools, model). Run history is OMITTED by default so a long history doesn't bloat context — read it separately with list-scheduled-task-runs, or pass includeRuns:true here. Read-only.",
+  {
+    id: z.string(),
+    includeRuns: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('Include the full run history in the output. Default false — prefer list-scheduled-task-runs to avoid context bloat.'),
+  },
+  async ({ id, includeRuns }) => {
     try {
-      const s = await callHookServer('/schedules/get', { id })
+      const s = (await callHookServer('/schedules/get', { id })) as Record<string, any>
+      if (!includeRuns && s && typeof s === 'object' && Array.isArray(s.runs)) {
+        const { runs, ...rest } = s
+        const out = { ...rest, runCount: runs.length }
+        const hint =
+          runs.length > 0
+            ? `\n\n(${runs.length} run(s) hidden — use list-scheduled-task-runs with id:"${id}", or get-scheduled-task with includeRuns:true)`
+            : ''
+        return { content: [{ type: 'text', text: `${JSON.stringify(out, null, 2)}${hint}` }] }
+      }
       return { content: [{ type: 'text', text: JSON.stringify(s, null, 2) }] }
     } catch (err) {
       return { content: [{ type: 'text', text: `Error reading scheduled task: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
@@ -1417,10 +1435,20 @@ server.tool(
     prompt: z.string().describe('The prompt the scheduled session runs.'),
     projectPath: z.string().describe('Absolute project dir the session runs in.'),
     recurrence: scheduleRecurrenceSchema.optional().default({ kind: 'none' }),
-    onLaunch: z.boolean().optional().default(false).describe('Also fire once at app launch.'),
+    launch: z
+      .enum(['off', 'every', 'firstOfDay'])
+      .optional()
+      .default('off')
+      .describe(
+        "When the task fires off an app launch: 'off' = never (recurrence only), 'every' = on every launch, 'firstOfDay' = once on the first launch of each calendar day.",
+      ),
     autoApprove: z.boolean().optional().default(true).describe('Run with --permission-mode auto (unattended).'),
     enabled: z.boolean().optional().default(true),
     allowedTools: z.array(z.string()).optional().describe('Restrict to these tools (send-message auto-added).'),
+    model: z
+      .string()
+      .optional()
+      .describe('Model for spawned runs: alias "haiku" | "sonnet" | "opus" | "fable", or a full model id. Omit to inherit the user\'s current default model.'),
   },
   async (args) => {
     try {
@@ -1441,10 +1469,17 @@ server.tool(
     prompt: z.string().optional(),
     projectPath: z.string().optional(),
     recurrence: scheduleRecurrenceSchema.optional(),
-    onLaunch: z.boolean().optional(),
+    launch: z
+      .enum(['off', 'every', 'firstOfDay'])
+      .optional()
+      .describe("Launch-trigger behaviour: 'off' (recurrence only) | 'every' (every launch) | 'firstOfDay' (first launch each day)."),
     autoApprove: z.boolean().optional(),
     enabled: z.boolean().optional(),
     allowedTools: z.array(z.string()).optional(),
+    model: z
+      .string()
+      .optional()
+      .describe('Model for spawned runs: alias "haiku" | "sonnet" | "opus" | "fable", or a full model id. Pass "" to clear (inherit the default model).'),
   },
   async ({ id, ...rest }) => {
     try {

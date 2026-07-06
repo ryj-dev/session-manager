@@ -3,16 +3,20 @@
 
 import type { PipelineRole } from './pipeline-roles'
 
-/** Concrete Claude model ids per tier. Aliases (opus|sonnet|haiku) resolve here. */
+/** Model-family aliases per tier. The `claude` CLI accepts these verbatim on
+ *  --model and resolves each to the NEWEST version the installed CLI supports,
+ *  so no concrete model version is ever hardcoded here — upgrading Claude Code
+ *  upgrades every spawn automatically. */
 export const MODEL_IDS = {
-  opus: 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6',
-  haiku: 'claude-haiku-4-5',
+  opus: 'opus',
+  sonnet: 'sonnet',
+  haiku: 'haiku',
+  fable: 'fable',
 } as const
 
-/** Map an alias (opus|sonnet|haiku, case-insensitive) OR a full model id to a
- *  concrete id. Returns undefined for empty input (→ inherit default model). A
- *  non-alias, non-empty string is passed through verbatim (full id override). */
+/** Normalize an alias (opus|sonnet|haiku|fable, case-insensitive) OR pass a
+ *  full model id through verbatim. Returns undefined for empty input
+ *  (→ inherit default model). */
 export function resolveModelId(input?: string): string | undefined {
   if (!input) return undefined
   const trimmed = input.trim()

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../../store'
 import { Terminal, disposeTerminal } from '../Terminal'
-import type { ScheduledTask, ScheduleRun, ScheduleRecurrence, ScheduleRunStatus } from '../../store'
+import type { ScheduledTask, ScheduleRun, ScheduleRecurrence, ScheduleRunStatus, LaunchTrigger } from '../../store'
 
 /**
  * Scheduled Tasks (Cmd+J)
@@ -24,13 +24,41 @@ import type { ScheduledTask, ScheduleRun, ScheduleRecurrence, ScheduleRunStatus 
 
 const pad2 = (n: number): string => String(n).padStart(2, '0')
 
-/** Human one-line summary of when a schedule fires. */
-function summarizeSchedule(t: ScheduledTask): string {
-  const parts: string[] = []
-  if (t.onLaunch) parts.push('At launch')
-  if (t.recurrence.kind === 'interval') parts.push(`Every ${t.recurrence.minutes} min`)
-  else if (t.recurrence.kind === 'daily') parts.push(`Daily ${pad2(t.recurrence.hour)}:${pad2(t.recurrence.minute)}`)
-  return parts.length ? parts.join(' · ') : 'Manual (run now only)'
+/** "every hour" / "every 2 hours" / "every 30 minutes" / "every minute". */
+function humanInterval(minutes: number): string {
+  if (minutes > 0 && minutes % 60 === 0) {
+    const h = minutes / 60
+    return h === 1 ? 'every hour' : `every ${h} hours`
+  }
+  return minutes === 1 ? 'every minute' : `every ${minutes} minutes`
+}
+
+/** Join trigger clauses into a readable sequence: "A", "A, then B". */
+function joinClauses(clauses: string[]): string {
+  if (clauses.length <= 1) return clauses[0] ?? ''
+  return `${clauses.slice(0, -1).join(', ')}, then ${clauses.at(-1)}`
+}
+
+/** Plain-English description of when a schedule fires — the single source of
+ *  truth for both the card summary and the live preview in the form. */
+function describeSchedule(t: {
+  launch: LaunchTrigger
+  recurrence: ScheduleRecurrence
+  maxRunsPerDay?: number
+}): string {
+  const clauses: string[] = []
+  if (t.launch === 'every') clauses.push('every time you open the app')
+  else if (t.launch === 'firstOfDay') clauses.push('the first time you open the app each day')
+
+  if (t.recurrence.kind === 'interval') clauses.push(`${humanInterval(t.recurrence.minutes)} while the app is open`)
+  else if (t.recurrence.kind === 'daily') clauses.push(`every day at ${pad2(t.recurrence.hour)}:${pad2(t.recurrence.minute)} while the app is open`)
+
+  if (clauses.length === 0) return 'Runs only when you trigger it manually.'
+
+  let sentence = `Runs ${joinClauses(clauses)}.`
+  const cap = t.maxRunsPerDay
+  if (cap && cap > 0) sentence += ` Up to ${cap} time${cap === 1 ? '' : 's'} a day.`
+  return sentence
 }
 
 function fmtTime(iso?: string): string {
@@ -202,15 +230,19 @@ function ScheduleCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-[13px] font-medium text-zinc-100">{task.name}</span>
+            {task.model && <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] text-violet-300">{task.model}</span>}
             {!task.enabled && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-500">disabled</span>}
           </div>
           <p className="mt-0.5 truncate font-mono text-[10px] text-zinc-500">{task.projectPath}</p>
-          <p className="mt-1 text-[11px] text-zinc-400">{summarizeSchedule(task)}</p>
+          <p className="mt-1 text-[11px] text-zinc-400">{describeSchedule(task)}</p>
           <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-500">
             {hasRuns ? (
               <>
                 <span>Last run {fmtTime(task.lastRunAt)}</span>
                 {lastRun && <RunStatusBadge status={lastRun.status} />}
+                {lastRun?.status === 'error' && lastRun.error && (
+                  <span className="truncate text-red-300/60" title={lastRun.error}>{lastRun.error}</span>
+                )}
               </>
             ) : (
               <span>Never run</span>
@@ -263,19 +295,34 @@ function ScheduleCard({
 }
 
 function RunHistoryItem({ run, onClick }: { run: ScheduleRun; onClick: () => void }): JSX.Element {
-  const resumable = !!run.finishedAt && !!run.claudeSessionId
+  // In-progress runs are always openable — opening attaches to the LIVE terminal
+  // (RunTerminalPane's live branch), so a run stuck at a login prompt can be
+  // signed into in place. Finished runs still require a saved conversation to
+  // `claude --resume`.
+  const inProgress = !run.finishedAt
+  const openable = inProgress ? true : !!run.claudeSessionId
+  const baseTitle = inProgress
+    ? 'Open the live run'
+    : openable
+      ? 'Resume this run in a terminal'
+      : 'No saved conversation — cannot resume'
   return (
     <button
-      onClick={resumable ? onClick : undefined}
-      disabled={!resumable}
-      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[10px] ${
-        resumable ? 'hover:bg-zinc-800/60' : 'cursor-default opacity-50'
+      onClick={openable ? onClick : undefined}
+      disabled={!openable}
+      className={`flex w-full flex-col gap-0.5 rounded px-2 py-1 text-left text-[10px] ${
+        openable ? 'hover:bg-zinc-800/60' : 'cursor-default opacity-50'
       }`}
-      title={resumable ? 'Resume this run in a terminal' : run.finishedAt ? 'No saved conversation — cannot resume' : 'Run in progress'}
+      title={run.error ?? baseTitle}
     >
-      <span className="text-zinc-400">{fmtTime(run.startedAt)}</span>
-      <span className="tabular-nums text-zinc-600">{fmtDuration(run.startedAt, run.finishedAt)}</span>
-      <span className="ml-auto"><RunStatusBadge status={run.status} /></span>
+      <div className="flex w-full items-center gap-2">
+        <span className="text-zinc-400">{fmtTime(run.startedAt)}</span>
+        <span className="tabular-nums text-zinc-600">{fmtDuration(run.startedAt, run.finishedAt)}</span>
+        <span className="ml-auto"><RunStatusBadge status={run.status} /></span>
+      </div>
+      {run.status === 'error' && run.error && (
+        <span className="truncate text-[9px] text-red-300/70">{run.error}</span>
+      )}
     </button>
   )
 }
@@ -321,23 +368,36 @@ function ScheduleFormDrawer({
   const [name, setName] = useState(task?.name ?? '')
   const [prompt, setPrompt] = useState(task?.prompt ?? '')
   const [projectPath, setProjectPath] = useState(task?.projectPath ?? baseProjectsDir ?? '')
-  const [onLaunch, setOnLaunch] = useState(task?.onLaunch ?? false)
+  const [launch, setLaunch] = useState<LaunchTrigger>(task?.launch ?? 'off')
   const [recurrenceKind, setRecurrenceKind] = useState<ScheduleRecurrence['kind']>(task?.recurrence.kind ?? 'none')
-  const [intervalMinutes, setIntervalMinutes] = useState(task?.recurrence.kind === 'interval' ? task.recurrence.minutes : 60)
+  // Interval is stored in minutes but edited as a value + unit so "hourly" reads
+  // naturally (1 hour) rather than "60 minutes".
+  const initialMinutes = task?.recurrence.kind === 'interval' ? task.recurrence.minutes : 60
+  const initialUnitHours = initialMinutes % 60 === 0
+  const [intervalValue, setIntervalValue] = useState(initialUnitHours ? initialMinutes / 60 : initialMinutes)
+  const [intervalUnit, setIntervalUnit] = useState<'minutes' | 'hours'>(initialUnitHours ? 'hours' : 'minutes')
   const [dailyHour, setDailyHour] = useState(task?.recurrence.kind === 'daily' ? task.recurrence.hour : 10)
   const [dailyMinute, setDailyMinute] = useState(task?.recurrence.kind === 'daily' ? task.recurrence.minute : 0)
+  // 0 = unlimited.
+  const [maxRunsPerDay, setMaxRunsPerDay] = useState(task?.maxRunsPerDay ?? 0)
   const [autoApprove, setAutoApprove] = useState(task?.autoApprove ?? true)
+  // '' = inherit the user's current default model.
+  const [model, setModel] = useState(task?.model ?? '')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [allowedToolsText, setAllowedToolsText] = useState((task?.allowedTools ?? []).join(', '))
 
   const canSave = name.trim().length > 0
 
+  const intervalMinutes = Math.max(1, Math.round(intervalUnit === 'hours' ? intervalValue * 60 : intervalValue) || 60)
+  const recurrence: ScheduleRecurrence = useMemo(() =>
+    recurrenceKind === 'interval' ? { kind: 'interval', minutes: intervalMinutes }
+    : recurrenceKind === 'daily' ? { kind: 'daily', hour: dailyHour, minute: dailyMinute }
+    : { kind: 'none' },
+    [recurrenceKind, intervalMinutes, dailyHour, dailyMinute])
+  const cap = maxRunsPerDay > 0 ? Math.round(maxRunsPerDay) : undefined
+
   const submit = (): void => {
     if (!canSave) return
-    const recurrence: ScheduleRecurrence =
-      recurrenceKind === 'interval' ? { kind: 'interval', minutes: Math.max(1, Math.round(intervalMinutes) || 60) }
-      : recurrenceKind === 'daily' ? { kind: 'daily', hour: dailyHour, minute: dailyMinute }
-      : { kind: 'none' }
     const allowedTools = allowedToolsText
       .split(/[,\n]/)
       .map((s) => s.trim())
@@ -348,8 +408,10 @@ function ScheduleFormDrawer({
       projectPath: projectPath.trim() || baseProjectsDir || '',
       allowedTools: allowedTools.length ? allowedTools : undefined,
       autoApprove,
-      onLaunch,
+      model: model || undefined,
+      launch,
       recurrence,
+      maxRunsPerDay: cap,
       enabled: task?.enabled ?? true,
     })
   }
@@ -393,37 +455,69 @@ function ScheduleFormDrawer({
             />
           </Field>
 
-          <div className="space-y-2">
-            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-zinc-300">
-              <input type="checkbox" checked={onLaunch} onChange={(e) => setOnLaunch(e.target.checked)} />
-              Run once at app launch
-            </label>
+          <Field label="Model">
+            <select
+              value={model} onChange={(e) => setModel(e.target.value)}
+              className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[12px] text-zinc-100 outline-none focus:border-sky-500"
+            >
+              <option value="">Default (current model)</option>
+              <option value="haiku">Haiku</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="opus">Opus</option>
+              <option value="fable">Fable</option>
+              {/* A full model id set via MCP isn't one of the aliases — keep it
+                  selectable so opening the form doesn't silently clear it. */}
+              {model && !['haiku', 'sonnet', 'opus', 'fable'].includes(model) && (
+                <option value={model}>{model}</option>
+              )}
+            </select>
+          </Field>
 
-            <Field label="Recurrence">
+          <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+            <span className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">When to run</span>
+
+            <Field label="On app launch">
+              <select
+                value={launch} onChange={(e) => setLaunch(e.target.value as LaunchTrigger)}
+                className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[12px] text-zinc-100 outline-none focus:border-sky-500"
+              >
+                <option value="off">Don't run on launch</option>
+                <option value="every">Every time the app launches</option>
+                <option value="firstOfDay">First launch of the day</option>
+              </select>
+            </Field>
+
+            <Field label="Repeat while open">
               <select
                 value={recurrenceKind} onChange={(e) => setRecurrenceKind(e.target.value as ScheduleRecurrence['kind'])}
                 className="w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[12px] text-zinc-100 outline-none focus:border-sky-500"
               >
-                <option value="none">None</option>
-                <option value="interval">Every N minutes</option>
-                <option value="daily">Daily at a time</option>
+                <option value="none">Don't repeat</option>
+                <option value="interval">On an interval</option>
+                <option value="daily">Daily at a set time</option>
               </select>
             </Field>
 
             {recurrenceKind === 'interval' && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 pl-1">
                 <span className="text-[11px] text-zinc-500">Every</span>
                 <input
-                  type="number" min={1} value={intervalMinutes}
-                  onChange={(e) => setIntervalMinutes(Number(e.target.value))}
+                  type="number" min={1} value={intervalValue}
+                  onChange={(e) => setIntervalValue(Math.max(1, Number(e.target.value)))}
                   className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[12px] text-zinc-100 outline-none focus:border-sky-500"
                 />
-                <span className="text-[11px] text-zinc-500">minutes</span>
+                <select
+                  value={intervalUnit} onChange={(e) => setIntervalUnit(e.target.value as 'minutes' | 'hours')}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[12px] text-zinc-100 outline-none focus:border-sky-500"
+                >
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                </select>
               </div>
             )}
 
             {recurrenceKind === 'daily' && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 pl-1">
                 <span className="text-[11px] text-zinc-500">At</span>
                 <input
                   type="number" min={0} max={23} value={dailyHour}
@@ -439,6 +533,22 @@ function ScheduleFormDrawer({
                 <span className="text-[11px] text-zinc-500">(24h)</span>
               </div>
             )}
+
+            <Field label="Max runs per day">
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={0} value={maxRunsPerDay}
+                  onChange={(e) => setMaxRunsPerDay(Math.max(0, Number(e.target.value)))}
+                  className="w-20 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[12px] text-zinc-100 outline-none focus:border-sky-500"
+                />
+                <span className="text-[11px] text-zinc-500">{maxRunsPerDay > 0 ? `cap of ${maxRunsPerDay}/day` : '0 = unlimited'}</span>
+              </div>
+            </Field>
+
+            {/* Live plain-English summary of the settings above. */}
+            <p className="rounded border border-sky-500/20 bg-sky-500/5 px-2.5 py-2 text-[11px] leading-relaxed text-sky-200/90">
+              {describeSchedule({ launch, recurrence, maxRunsPerDay: cap })}
+            </p>
           </div>
 
           <label className="flex cursor-pointer items-center gap-2 text-[12px] text-zinc-300">

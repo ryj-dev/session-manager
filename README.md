@@ -36,7 +36,7 @@ npm run dist:mac     # produces release/Session Manager-<ver>-arm64.dmg
 
 Session Manager integrates with your local Claude Code install. On startup it will:
 
-- **Register an MCP server** named `session-manager` in `~/.claude.json` so sessions can talk to its memory/todo/spawn tools.
+- **Register an MCP server** named `session-manager` in `~/.claude.json` so sessions can talk to its memory, todo, session-spawning, pipeline, and scheduling tools.
 - **Install hooks** in `~/.claude/settings.json` so Claude Code reports session status, stop events, and inter-session messages back to the app's hook server.
 - **Install a local plugin marketplace + plugin** named `session-manager-local` so the bundled agents and skills are available as slash commands in any session.
 
@@ -63,12 +63,14 @@ All of this is reversible. Open **Settings → Cleanup & uninstall** to see exac
 - **Memory knowledge graph** — markdown notes with `[[wikilinks]]`, backlinks, a Sigma.js graph view, and semantic search via local embeddings.
 - **Todos / project notes** — a global hybrid todo + note system, tagged by project, shared between you and any agent.
 - **Inter-session messaging** — sessions can `send-message` to each other and spawn child sessions; the app routes delivery and shows queued messages.
+- **Agentic pipeline** (Cmd+L) — hand a todo to an autonomous orchestrator session that plans, implements, and runs a multi-dimension review loop, fanning work out into isolated git worktrees and merging the results back. Pick an autonomy level (auto, gated, or manual approval gates) and watch progress as a milestone feed. Orchestrator and worker sessions run as real terminals but stay out of the graph.
+- **Scheduled tasks** (Cmd+J) — fire a saved prompt into a fresh session in a chosen directory on a trigger: app launch, first launch of the day, every N minutes/hours, or daily at a set time, with an optional per-day run cap. Schedules only fire while the app is open; each run is kept as resumable history so you can pick up the conversation later.
 - **Agents, skills, and design gallery** — 4 bundled agents, 2 skills, and 60+ design system references browsable in a gallery and injectable into any session.
 - **Hook server** — local HTTP server bridging Claude Code's hook events into the app for status updates and routing.
 
 ## Hotkeys and settings
 
-All keyboard shortcuts are configurable. Open **Settings → Keyboard shortcuts** for the full list of capabilities and their default bindings (Cmd+T to spawn, Cmd+W to return to the graph, Cmd+M for memory, Cmd+E for the file explorer, Cmd+O for settings, and so on). Browsing that panel is the fastest way to discover what the app can do.
+All keyboard shortcuts are configurable. Open **Settings → Keyboard shortcuts** for the full list of capabilities and their default bindings (Cmd+T to spawn, Cmd+W to return to the graph, Cmd+M for memory, Cmd+E for the file explorer, Cmd+L for the agentic pipeline, Cmd+J for scheduled tasks, Cmd+O for settings, and so on). Browsing that panel is the fastest way to discover what the app can do.
 
 Other settings worth knowing about live in the same panel: base projects directory, terminal pairing mode (off / split / overlay shell alongside Claude), auto-mode defaults for spawned sessions, message popup behavior, and per-integration disable toggles.
 

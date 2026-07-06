@@ -508,6 +508,40 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
 }
 
 // ── Scheduled task spawn ────────────────────────────────────────────────────
+
+// Output markers that mean a scheduled `claude` run couldn't authenticate. When
+// not logged in, `claude` never reaches a real session, so NO Stop hook ever
+// fires and the run would otherwise stay 'working' forever. We scan a small tail
+// of its output for these (ANSI-stripped, lower-cased) to classify the failure.
+const LOGIN_FAILURE_MARKERS = [
+  'invalid api key',
+  'please run /login',
+  '/login',
+  'not logged in',
+  'log in to claude',
+  'please log in',
+  'login failed',
+  'authentication error',
+  'oauth token has expired',
+  'credit balance is too low',
+]
+
+// Per-scheduled-session output scan state: a capped tail buffer + a sticky flag
+// set once a login marker is seen. Cleaned up when the PTY exits.
+const scheduledOutputScan = new Map<string, { tail: string; loginIssue: boolean }>()
+const SCAN_TAIL_LIMIT = 4096
+
+function scanScheduledOutput(sessionId: string, data: string): void {
+  const state = scheduledOutputScan.get(sessionId)
+  if (!state) return
+  const clean = data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+  state.tail = (state.tail + clean).slice(-SCAN_TAIL_LIMIT)
+  if (!state.loginIssue) {
+    const hay = state.tail.toLowerCase()
+    if (LOGIN_FAILURE_MARKERS.some((m) => hay.includes(m))) state.loginIssue = true
+  }
+}
+
 // Spawns a scheduled task as a normal PTY `claude` session (flagged isScheduled
 // so the renderer can route it to the Scheduled Tasks panel, not the graph).
 // Records a 'working' run on the schedule; the Stop hook later marks it done and
@@ -531,6 +565,9 @@ export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string 
   if (schedule.autoApprove) {
     args = ['--permission-mode', 'auto', ...args]
   }
+  // Explicit model (alias or full id) overrides the user's current default.
+  const modelId = resolveModelId(schedule.model)
+  if (modelId) args = ['--model', modelId, ...args]
 
   // Prompt passed as positional after `--` (same rationale as handleSpawnRequest:
   // bypasses PTY paste/timing, and `--` stops --allowedTools consuming it).
@@ -562,6 +599,27 @@ export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string 
   }
   scheduleStore.recordRunStarted(schedule.id, run)
   broadcastSchedules()
+
+  // Failure detection. A logged-out run never reaches a Claude session, so the
+  // Stop hook (which marks 'done') never fires and the run would stay 'working'
+  // forever. Scan output for login markers, and on PTY exit mark the run 'error'
+  // IF it is still working (markRunErrored guards against racing a Stop 'done').
+  // node-pty allows multiple listeners, so these coexist with attachListenersFn's.
+  scheduledOutputScan.set(id, { tail: '', loginIssue: false })
+  session.process.onData((data) => scanScheduledOutput(id, data))
+  session.process.onExit(({ exitCode }) => {
+    const scan = scheduledOutputScan.get(id)
+    scheduledOutputScan.delete(id)
+    const reason = scan?.loginIssue
+      ? 'Not logged in — open this run and sign in (/login), or log in and restart.'
+      : exitCode !== 0
+        ? `Run exited (code ${exitCode}) before completing.`
+        : 'Run ended before completing.'
+    if (scheduleStore.markRunErrored(schedule.id, run.id, new Date().toISOString(), reason)) {
+      console.log(`[hook-server] scheduled run ${run.id} errored: ${reason}`)
+      broadcastSchedules()
+    }
+  })
 
   console.log(`[hook-server] ran scheduled task ${schedule.id} as session ${id} in ${cwd}`)
   return id

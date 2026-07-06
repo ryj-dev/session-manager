@@ -18,6 +18,13 @@ export type ScheduleRecurrence =
   | { kind: 'interval'; minutes: number } // 60 = hourly
   | { kind: 'daily'; hour: number; minute: number }
 
+/** When (if ever) a schedule fires off the back of an app launch.
+ *  - 'off'        — never fire on launch (recurrence only)
+ *  - 'every'      — fire on every app launch
+ *  - 'firstOfDay' — fire only on the first launch of a calendar day (skips later
+ *                   launches that day; "first" = no run has happened today yet). */
+export type LaunchTrigger = 'off' | 'every' | 'firstOfDay'
+
 export type ScheduleRunStatus = 'working' | 'done' | 'error'
 
 export interface ScheduleRun {
@@ -31,6 +38,9 @@ export interface ScheduleRun {
   /** ISO 8601; absent while the run is in-flight. */
   finishedAt?: string
   status: ScheduleRunStatus
+  /** Human-readable failure reason when status === 'error' (e.g. "Not logged
+   *  in", "Interrupted — app restarted"). Surfaced in the run history UI. */
+  error?: string
 }
 
 export interface ScheduledTask {
@@ -42,9 +52,17 @@ export interface ScheduledTask {
   allowedTools?: string[]
   /** Default true → run spawned with --permission-mode auto. */
   autoApprove: boolean
-  /** Fire once at app launch. */
-  onLaunch: boolean
+  /** Model for spawned runs: alias (haiku|sonnet|opus|fable) or a full model id.
+   *  Undefined/empty = inherit the user's current default model. */
+  model?: string
+  /** Launch-trigger behaviour: 'off' = recurrence only, 'every' = each app
+   *  launch, 'firstOfDay' = first launch of a calendar day. */
+  launch: LaunchTrigger
   recurrence: ScheduleRecurrence
+  /** Cap on how many times this schedule may fire per calendar day (counting
+   *  every trigger: launch, interval, daily — but NOT manual Run-now). Undefined
+   *  or <= 0 means unlimited. */
+  maxRunsPerDay?: number
   enabled: boolean
   /** ISO 8601. */
   createdAt: string
@@ -204,6 +222,35 @@ export function recordRunFinished(
       }
     }),
   )
+}
+
+/** Flip a run to 'error' with a reason — but ONLY if it is still 'working'. This
+ *  guard is the whole point: it races the Stop hook's recordRunFinished('done')
+ *  and an already-finished (done/error) run must never be clobbered. The guard
+ *  lives inside the read-modify-write so the decision is made against on-disk
+ *  truth. Returns whether anything actually changed (so callers can skip a
+ *  redundant broadcast). */
+export function markRunErrored(
+  taskId: string,
+  runId: string,
+  finishedAt: string,
+  error: string,
+): boolean {
+  let changed = false
+  updateSchedules((all) =>
+    all.map((s) => {
+      if (s.id !== taskId) return s
+      return {
+        ...s,
+        runs: s.runs.map((r) => {
+          if (r.id !== runId || r.status !== 'working' || r.finishedAt) return r
+          changed = true
+          return { ...r, status: 'error', finishedAt, error }
+        }),
+      }
+    }),
+  )
+  return changed
 }
 
 // ── Cross-task lookups (for spawn/teardown + restore paths) ─────────────────────

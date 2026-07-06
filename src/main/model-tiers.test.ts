@@ -14,6 +14,7 @@ test('resolveModelId maps aliases case-insensitively', () => {
   assert.equal(resolveModelId('opus'), MODEL_IDS.opus)
   assert.equal(resolveModelId('sonnet'), MODEL_IDS.sonnet)
   assert.equal(resolveModelId('haiku'), MODEL_IDS.haiku)
+  assert.equal(resolveModelId('fable'), MODEL_IDS.fable)
   assert.equal(resolveModelId('OPUS'), MODEL_IDS.opus)
   assert.equal(resolveModelId('  Sonnet  '), MODEL_IDS.sonnet)
 })

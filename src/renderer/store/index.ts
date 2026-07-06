@@ -181,6 +181,10 @@ export type ScheduleRecurrence =
   | { kind: 'interval'; minutes: number } // 60 = hourly
   | { kind: 'daily'; hour: number; minute: number }
 
+/** Launch-trigger behaviour. 'off' = never on launch, 'every' = each launch,
+ *  'firstOfDay' = only the first launch of a calendar day. */
+export type LaunchTrigger = 'off' | 'every' | 'firstOfDay'
+
 export type ScheduleRunStatus = 'working' | 'done' | 'error'
 
 export interface ScheduleRun {
@@ -194,6 +198,8 @@ export interface ScheduleRun {
   /** ISO 8601; absent while the run is in-flight. */
   finishedAt?: string
   status: ScheduleRunStatus
+  /** Human-readable failure reason when status === 'error'. */
+  error?: string
 }
 
 export interface ScheduledTask {
@@ -205,9 +211,15 @@ export interface ScheduledTask {
   allowedTools?: string[]
   /** Default true → run spawned with --permission-mode auto. */
   autoApprove: boolean
-  /** Fire once at app launch. */
-  onLaunch: boolean
+  /** Model for spawned runs: alias (haiku|sonnet|opus|fable) or a full model id.
+   *  Undefined/empty = inherit the user's current default model. */
+  model?: string
+  /** Launch-trigger behaviour: 'off' = recurrence only, 'every' = each app
+   *  launch, 'firstOfDay' = first launch of a calendar day. */
+  launch: LaunchTrigger
   recurrence: ScheduleRecurrence
+  /** Cap on automatic fires per calendar day; undefined/<=0 = unlimited. */
+  maxRunsPerDay?: number
   enabled: boolean
   /** ISO 8601. */
   createdAt: string
