@@ -24,7 +24,7 @@ Hold `Cmd` still for 1.5 s **while inside a split** to reopen the preview modal 
 - **Drag a tile** to another region to rearrange.
 - **Drag a divider** to resize; dividers snap to aligned edges (snap targets highlight).
 - **Shift+drag a divider** to move all aligned dividers together.
-- A **+** control lets you jump back to the graph (Cmd still held) and Cmd+click more sessions into the group.
+- **Add sessions to an existing group**: the modal header shows a small clickable **+ button** (mouse only — not a keyboard shortcut; `Cmd`+`+` is zoom). While still holding Cmd, click it to jump back to the graph, `Cmd+click` the extra sessions, then release Cmd to append them to the group.
 
 Minimum pane weight is 8% of the axis, so nothing can be squeezed invisible.
 
