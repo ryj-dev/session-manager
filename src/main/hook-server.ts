@@ -1,5 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, clipboard } from 'electron'
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync, appendFileSync, mkdirSync, rmSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
@@ -93,6 +93,11 @@ export function cleanupSession(appSessionId: string): void {
   lastProjectTodoCount.delete(appSessionId)
   sessionTurnCount.delete(appSessionId)
   lastNudgeTurn.delete(appSessionId)
+  // Unresolved clipboard pastes die with the session (files swept on discard)
+  for (const entry of pastedImageStash.get(appSessionId) ?? []) {
+    try { unlinkSync(entry.path) } catch { /* sweep catches it */ }
+  }
+  pastedImageStash.delete(appSessionId)
   // Clean up the session's inbox directory (may fail on Windows if files are still locked by exiting PTY)
   try {
     rmSync(join(app.getPath('userData'), 'messages', appSessionId), { recursive: true, force: true })
@@ -278,11 +283,15 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
           try {
             const appSessionId = url.searchParams.get('sid')
             const payload: HookPayload = JSON.parse(body)
-            // User-sent image auto-display: scan the prompt off the sync path so
-            // the hook reply (which Claude blocks on) is never delayed.
+            // User-sent image auto-display: scan the prompt (typed/dragged paths)
+            // and resolve any clipboard-paste stash, off the sync path so the
+            // hook reply (which Claude blocks on) is never delayed.
             if (appSessionId && payload.hook_event_name === 'UserPromptSubmit' && payload.prompt) {
               const prompt = payload.prompt
-              setImmediate(() => scanPromptForUserImages(appSessionId, prompt))
+              setImmediate(() => {
+                scanPromptForUserImages(appSessionId, prompt)
+                resolvePastedImageStash(appSessionId, prompt)
+              })
             }
             const reply = buildSyncHookResponse(appSessionId, payload)
             res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1624,6 +1633,92 @@ function handleCanvasList(body: string, res: import('http').ServerResponse): voi
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+// ── Clipboard-pasted images (send-time display) ──────────────────────────────
+//
+// Claude Code's image paste is Ctrl+V: the keystroke goes into the PTY and the
+// CLI reads the OS clipboard itself, inserting an "[Image #N]" placeholder into
+// the prompt — no image bytes ever pass anywhere we can see them at submit
+// time. So the renderer's Terminal notifies us on the paste combo, we snapshot
+// the clipboard image into canvas-images/ as a silent STASH, and the next
+// UserPromptSubmit resolves it: placeholder present → the paste was actually
+// sent → emit user-source artifacts (display at SEND time, never at paste
+// time); no placeholder → the user deleted it or pasted text → discard.
+
+interface StashedPaste {
+  path: string
+  ts: number
+}
+
+/** Per-session unresolved clipboard pastes. In-memory only — a stash that
+ *  never resolves (app quit mid-prompt) leaves orphaned files that
+ *  sweepOrphanedImages() clears on next launch. */
+const pastedImageStash = new Map<string, StashedPaste[]>()
+
+/** Pastes older than this at resolution time are discarded, not displayed. */
+const PASTE_STASH_TTL_MS = 15 * 60_000
+
+/** Max unresolved pastes kept per session (oldest dropped + file deleted). */
+const PASTE_STASH_CAP = 6
+
+/** Claude Code's pasted-image placeholder in a submitted prompt. */
+const PASTED_PLACEHOLDER_RE = /\[Image #\d+\]/
+
+/** Snapshot the clipboard image (if any) into the stash for a session. Called
+ *  via IPC when the renderer sees a paste combo in that session's terminal.
+ *  Silent: nothing is displayed until the next submit confirms it was sent. */
+export function stashClipboardImage(appSessionId: string): { stashed: boolean } {
+  try {
+    if (loadSettings().canvasAutoShowUserImages === false) return { stashed: false }
+    if (!getSession(appSessionId)) return { stashed: false }
+    const image = clipboard.readImage()
+    if (image.isEmpty()) return { stashed: false }
+    const png = image.toPNG()
+    if (png.length === 0 || png.length > 10 * 1024 * 1024) return { stashed: false }
+
+    const path = join(canvasStore.canvasImagesDir(), `paste-${randomUUID()}.png`)
+    writeFileSync(path, png)
+
+    const stash = pastedImageStash.get(appSessionId) ?? []
+    stash.push({ path, ts: Date.now() })
+    while (stash.length > PASTE_STASH_CAP) {
+      const dropped = stash.shift()
+      if (dropped) { try { unlinkSync(dropped.path) } catch { /* sweep catches it */ } }
+    }
+    pastedImageStash.set(appSessionId, stash)
+    return { stashed: true }
+  } catch (err) {
+    console.error('[canvas] clipboard stash failed:', err)
+    return { stashed: false }
+  }
+}
+
+/** Resolve a session's paste stash against the just-submitted prompt. Every
+ *  submit resolves the whole stash one way or the other — display or discard —
+ *  so stale pastes can't leak into a later, unrelated message. */
+function resolvePastedImageStash(appSessionId: string, prompt: string): void {
+  const stash = pastedImageStash.get(appSessionId)
+  if (!stash?.length) return
+  pastedImageStash.delete(appSessionId)
+
+  const session = getSession(appSessionId)
+  const confirmed =
+    !!session &&
+    loadSettings().canvasAutoShowUserImages !== false &&
+    PASTED_PLACEHOLDER_RE.test(prompt)
+
+  for (const entry of stash) {
+    const fresh = Date.now() - entry.ts < PASTE_STASH_TTL_MS
+    if (confirmed && fresh && existsSync(entry.path)) {
+      emitCanvasArtifact(
+        { component: 'image', title: 'Pasted image', image: { path: entry.path } },
+        { sessionId: appSessionId, claudeSessionId: session!.claudeSessionId ?? null, source: 'user' },
+      )
+    } else {
+      try { unlinkSync(entry.path) } catch { /* sweep catches it */ }
+    }
   }
 }
 

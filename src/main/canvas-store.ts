@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { join, dirname } from 'path'
-import { readFileSync, mkdirSync, watch, type FSWatcher } from 'fs'
+import { readFileSync, mkdirSync, watch, readdirSync, unlinkSync, type FSWatcher } from 'fs'
 import { randomUUID } from 'crypto'
 import { atomicWriteSync } from './atomic-write'
 import { MAX_CANVAS_ARTIFACTS, type CanvasArtifact, type CanvasArtifactPayload, type CanvasArtifactSource } from './canvas-types'
@@ -27,6 +27,25 @@ function storePath(): string {
   const dir = join(app.getPath('userData'), 'state')
   mkdirSync(dir, { recursive: true })
   return join(dir, 'canvas.json')
+}
+
+/** Directory for images the app itself owns (clipboard pastes saved by the
+ *  stash). ONLY files under this dir are ever garbage-collected — user-owned
+ *  image paths referenced by artifacts are never touched. */
+export function canvasImagesDir(): string {
+  const dir = join(app.getPath('userData'), 'canvas-images')
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+function isOwnedImagePath(path: string | undefined): path is string {
+  return !!path && dirname(path) === canvasImagesDir()
+}
+
+/** Best-effort unlink of an app-owned pasted-image file. */
+function gcOwnedImage(path: string | undefined): void {
+  if (!isOwnedImagePath(path)) return
+  try { unlinkSync(path) } catch { /* already gone / locked — sweep catches it */ }
 }
 
 /** Parse the current on-disk artifact list. Never throws (missing/corrupt → []). */
@@ -91,7 +110,9 @@ export function getArtifactsForSession(sessionId: string, claudeSessionId?: stri
 // ── Mutators ─────────────────────────────────────────────────────────────────
 
 /** Append a validated artifact. Stamps id + createdAt and prunes to the
- *  most-recent MAX_CANVAS_ARTIFACTS globally (append order = chronological). */
+ *  most-recent MAX_CANVAS_ARTIFACTS globally (append order = chronological).
+ *  Pruned artifacts whose image file lives in canvas-images/ (clipboard
+ *  pastes) have that file deleted — it can never be referenced again. */
 export function addArtifact(
   payload: CanvasArtifactPayload,
   meta: { sessionId: string; claudeSessionId: string | null; source: CanvasArtifactSource },
@@ -102,12 +123,42 @@ export function addArtifact(
     id: randomUUID(),
     createdAt: Date.now(),
   } as CanvasArtifact
-  updateArtifacts((all) => [...all, artifact].slice(-MAX_CANVAS_ARTIFACTS))
+  updateArtifacts((all) => {
+    const next = [...all, artifact]
+    const dropped = next.slice(0, Math.max(0, next.length - MAX_CANVAS_ARTIFACTS))
+    for (const d of dropped) {
+      if ('image' in d) gcOwnedImage(d.image.path)
+    }
+    return next.slice(-MAX_CANVAS_ARTIFACTS)
+  })
   return artifact
+}
+
+/** Startup sweep: delete files in canvas-images/ that no artifact references —
+ *  clipboard pastes that were never confirmed by a submit (app quit mid-prompt)
+ *  or whose artifact was pruned by an older build. Call once from app ready. */
+export function sweepOrphanedImages(): void {
+  try {
+    const dir = canvasImagesDir()
+    const referenced = new Set(
+      loadArtifacts().flatMap((a) => ('image' in a ? [a.image.path] : [])),
+    )
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      if (!referenced.has(full)) {
+        try { unlinkSync(full) } catch { /* best-effort */ }
+      }
+    }
+  } catch { /* dir unreadable — nothing to sweep */ }
 }
 
 /** Remove all artifacts for a session. Not called automatically (artifacts
  *  outlive sessions by design) — exported for a future "clear" affordance. */
 export function deleteArtifactsForSession(sessionId: string): CanvasArtifact[] {
-  return updateArtifacts((all) => all.filter((a) => a.sessionId !== sessionId))
+  return updateArtifacts((all) => {
+    for (const a of all) {
+      if (a.sessionId === sessionId && 'image' in a) gcOwnedImage(a.image.path)
+    }
+    return all.filter((a) => a.sessionId !== sessionId)
+  })
 }

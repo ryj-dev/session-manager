@@ -17,7 +17,7 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators, pausePipelineTask, resumePipelineTask } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators, pausePipelineTask, resumePipelineTask, stashClipboardImage } from './hook-server'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -661,6 +661,13 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Mutations come exclusively through the hook-server path (/canvas/emit +
   // the user-image scan) — dismissal/selection are renderer-local UI state.
   ipcMain.handle('canvas:list', () => canvasStore.getArtifacts())
+
+  // Renderer saw a paste combo (Ctrl/Cmd+V) in a session's terminal — snapshot
+  // any clipboard image into the silent stash. Displays only if the NEXT
+  // prompt submit carries an [Image #N] placeholder (send-time semantics).
+  ipcMain.handle('canvas:stashClipboardImage', (_e, sessionId: string) =>
+    stashClipboardImage(sessionId),
+  )
 
   // Send an inter-session message (used by notes dispatch + future hooks)
   ipcMain.handle(

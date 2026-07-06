@@ -460,6 +460,25 @@ export function Terminal({ sessionId, visible, onTitleChange, autoFocus = true }
     loadWebGL(instance)
   }, [sessionId, visible])
 
+  // Canvas: clipboard-paste capture. Claude Code's image paste is Ctrl+V — the
+  // keystroke goes into the PTY and the CLI reads the OS clipboard itself, so
+  // no image bytes are observable at submit time. On the paste combo we ask the
+  // main process to snapshot any clipboard image into a silent stash; nothing
+  // displays unless the NEXT prompt submit carries an [Image #N] placeholder
+  // (send-time display semantics). Text pastes no-op (clipboard has no image).
+  // We never preventDefault — the keystroke flows to the PTY untouched.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if ((e.key === 'v' || e.key === 'V') && (e.ctrlKey || e.metaKey)) {
+        void window.api.canvasStashClipboardImage(sessionId)
+      }
+    }
+    el.addEventListener('keydown', onKeyDown, true)
+    return () => el.removeEventListener('keydown', onKeyDown, true)
+  }, [sessionId])
+
   // Refit ONLY when visible — never resize the PTY when off-screen
   useEffect(() => {
     if (!visible) return

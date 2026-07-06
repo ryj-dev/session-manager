@@ -316,6 +316,8 @@ const api = {
     ipcRenderer.on('canvas:focus', handler)
     return (): void => { ipcRenderer.removeListener('canvas:focus', handler) }
   },
+  canvasStashClipboardImage: (sessionId: string): Promise<{ stashed: boolean }> =>
+    ipcRenderer.invoke('canvas:stashClipboardImage', sessionId),
 
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>

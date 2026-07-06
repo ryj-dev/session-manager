@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell, protocol, net, Menu } from 'electron'
 import { join, resolve, relative, isAbsolute, extname } from 'path'
 import { rmSync } from 'fs'
 import { pathToFileURL } from 'url'
-import { getArtifactById } from './canvas-store'
+import { getArtifactById, sweepOrphanedImages } from './canvas-store'
 import { ALLOWED_IMAGE_EXTS } from './canvas-types'
 import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions } from './pty-manager'
@@ -186,6 +186,10 @@ app.whenReady().then(async () => {
     }
     return net.fetch(pathToFileURL(imagePath).toString())
   })
+
+  // GC clipboard-paste images that no artifact references (never-confirmed
+  // pastes from a previous run, or files orphaned by artifact pruning).
+  sweepOrphanedImages()
 
   // Remove Chromium's default menu so it doesn't intercept our hotkeys
   // (e.g. Cmd+Shift+T = "Reopen Closed Tab", Cmd+N = "New Window")
