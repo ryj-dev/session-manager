@@ -11,13 +11,28 @@ A desktop app for managing many [Claude Code](https://claude.com/claude-code) se
 
 ## Running it
 
-### Option A — download a release (macOS arm64)
+### Option A — Homebrew (macOS arm64)
+
+```sh
+brew tap ryj-dev/tap
+brew install --cask --no-quarantine session-manager
+```
+
+The `--no-quarantine` flag matters: the app is unsigned, and without it macOS will refuse to launch it (see Option B).
+
+### Option B — download a release (macOS arm64)
 
 1. Grab the latest DMG from the [releases page](https://github.com/ryj-dev/session-manager/releases).
 2. Open the DMG, drag *Session Manager* to Applications.
-3. First launch will be blocked by Gatekeeper (the build is unsigned). Right-click the app → **Open** → confirm. Or, after the block dialog, go to **System Settings → Privacy & Security → Open Anyway**.
+3. **The build is unsigned**, so on first launch macOS will report the app "is damaged and can't be opened" — it isn't damaged, it's quarantined. Clear the quarantine flag and it launches normally:
 
-### Option B — run from source
+   ```sh
+   xattr -cr "/Applications/Session Manager.app"
+   ```
+
+   (Alternatively, download with `curl -L` instead of the browser — quarantine is only applied to browser downloads.)
+
+### Option C — run from source
 
 ```sh
 git clone https://github.com/ryj-dev/session-manager.git
