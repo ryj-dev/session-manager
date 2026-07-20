@@ -1,6 +1,6 @@
 {
   "name": "session-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Desktop app for managing multiple Claude Code sessions",
   "author": "Ry J",
   "license": "MIT",
@@ -31,6 +31,7 @@
       "output": "release",
       "buildResources": "build"
     },
+    "asar": false,
     "files": [
       "out/**/*",
       "package.json",
@@ -51,14 +52,6 @@
           "**/*.md"
         ]
       }
-    ],
-    "asarUnpack": [
-      "node_modules/better-sqlite3/**/*",
-      "node_modules/node-pty/**/*",
-      "node_modules/sqlite-vec/**/*",
-      "node_modules/sqlite-vec-darwin-arm64/**/*",
-      "node_modules/sqlite-vec-darwin-x64/**/*",
-      "node_modules/@huggingface/**/*"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
