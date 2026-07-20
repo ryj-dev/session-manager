@@ -86,6 +86,12 @@ function attachSessionListeners(
 }
 
 export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
+  // Real quit (renderer Cmd+Q fallback). app.quit() fires before-quit, which
+  // runs the full saveAndCleanup teardown — never bypass it with window.close().
+  ipcMain.on('app:quit', () => {
+    app.quit()
+  })
+
   // Register the attach-listeners callback for hook-server spawned sessions
   setAttachListeners((id, session) => attachSessionListeners(id, session))
 

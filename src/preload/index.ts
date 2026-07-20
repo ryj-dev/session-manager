@@ -355,6 +355,10 @@ const api = {
   cleanupRemoveNotes: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeNotes'),
   cleanupRemoveSessions: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSessions'),
   cleanupResetAppSettings: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:resetAppSettings'),
+
+  // App lifecycle — real quit via app.quit() so the full before-quit cleanup
+  // (session save, PTY teardown, MCP unregister, plugin uninstall) always runs
+  quitApp: (): void => ipcRenderer.send('app:quit'),
 }
 
 export type CleanupResult = { ok: boolean; error?: string }

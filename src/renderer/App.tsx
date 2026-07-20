@@ -970,11 +970,15 @@ export function App(): JSX.Element {
         return
       }
 
-      // Quit app — on Mac this is handled natively by Cmd+Q via the menu;
-      // on Windows/Linux there's no menu so we handle it here
+      // Quit app. This capture-phase handler fires before the macOS menu's
+      // quit accelerator, so it must perform a REAL quit: window.close() here
+      // would only close the window and leave the app lingering in the dock
+      // (macOS keeps apps alive on window-all-closed). app:quit → app.quit()
+      // runs the full before-quit cleanup (session save, PTY teardown,
+      // MCP unregister, plugin uninstall) on every platform.
       if (key === 'q') {
         e.preventDefault()
-        window.close()
+        window.api.quitApp()
         return
       }
     }
