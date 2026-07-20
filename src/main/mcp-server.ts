@@ -35,6 +35,7 @@ import {
   searchKeyword as embedClientKeyword
 } from './memory/embed-client'
 import * as notes from './notes-manager'
+import { listWikiArticles, readWikiArticle, scoreWikiKeyword, WIKI_KEY_PREFIX } from './wiki'
 
 // ─── Storage ───────────────────────────────────────────────────────────────
 
@@ -46,6 +47,12 @@ const MEMORIES_DIR = process.env.SM_MEMORIES_DIR || path.join(
 )
 
 const io: NoteIO = createNoteIO(MEMORIES_DIR)
+
+// Feature wiki (read-only product docs). The app sets SM_WIKI_DIR at
+// registration (repo docs/wiki in dev, resources/wiki packaged); the
+// import.meta fallback covers running the built server outside the app.
+const WIKI_DIR = process.env.SM_WIKI_DIR ||
+  path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../docs/wiki')
 
 // Connect to the main process's embed-server for semantic search. The model
 // is loaded once in the main process; this child sends queries over a Unix
@@ -142,6 +149,9 @@ Not all sections are required. Each note type has recommended sections.
 | canvas-inspect-image | Get an image's pixel dimensions + an upscaled copy for precise annotation, in one call — never use sips/ImageMagick for this (canvas) |
 | canvas-list-artifacts | List your session's existing canvas artifacts (ids + summaries) (canvas) |
 | canvas-focus | Bring an existing canvas artifact back into view without re-emitting it (canvas) |
+| list-wiki-articles | List feature wiki articles: slug + one-line summary (wiki) |
+| read-wiki-article | Read one wiki article in full by slug (wiki) |
+| search-wiki | Hybrid keyword + semantic search over the feature wiki (wiki) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -150,6 +160,10 @@ Use **edit-memory** for simple single-section edits.
 ## Linking
 
 Use [[wikilinks]] in note content to connect related notes. Wikilinks are resolved by **filename** (without the .md extension), not by note title — e.g. \`[[my-note]]\` links to \`my-note.md\`. Backlinks in ## Related are fully automatic — never edit them manually.
+
+## Feature wiki — how session-manager itself works
+
+The app ships a read-only feature wiki: one article per feature (graph view, terminal management, agentic pipeline, canvas, scheduled tasks, memory KB, todos, …) covering what it does, how to use it, and gotchas. **When you need to know how any session-manager feature works — or the user asks — call search-wiki or read-wiki-article instead of guessing.** It is authoritative product documentation, versioned with the app; the memory KB is per-user knowledge and may be stale by comparison.
 
 ## Keyword routing — IMPORTANT
 
@@ -1677,6 +1691,99 @@ server.tool(
       return { content: [{ type: 'text', text: `Error listing runs: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   },
+)
+
+// ─── Feature wiki ────────────────────────────────────────────────────────────
+// Read-only product docs bundled with the app — how each session-manager
+// feature works and how agents should use it. Separate namespace from the
+// user's memory KB: the wiki is versioned and authoritative; memory is
+// per-user accumulated knowledge.
+
+const WIKI_SEMANTIC_DISTANCE_THRESHOLD = 0.8
+
+server.tool(
+  'list-wiki-articles',
+  'List all feature wiki articles (slug + one-line summary). The wiki is the authoritative product documentation for session-manager itself — how each feature works, how to use it, gotchas. Consult it BEFORE guessing at how a session-manager feature behaves.',
+  {},
+  async () => {
+    const articles = listWikiArticles(WIKI_DIR)
+    if (articles.length === 0) {
+      return { content: [{ type: 'text', text: `No wiki articles found in ${WIKI_DIR}` }], isError: true }
+    }
+    const lines = articles.map((a) => `- ${a.slug} — ${a.summary || a.title}`)
+    return { content: [{ type: 'text', text: `${articles.length} wiki article(s):\n${lines.join('\n')}\n\nRead one with read-wiki-article(slug).` }] }
+  }
+)
+
+server.tool(
+  'read-wiki-article',
+  'Read one feature wiki article in full by slug (from list-wiki-articles or search-wiki). Returns the article markdown plus its related-article slugs.',
+  { slug: z.string().describe('Article slug, e.g. "canvas", "agentic-pipeline" (with or without .md)') },
+  async ({ slug }) => {
+    const article = readWikiArticle(WIKI_DIR, slug)
+    if (!article) {
+      const available = listWikiArticles(WIKI_DIR).map((a) => a.slug)
+      return {
+        content: [{ type: 'text', text: `Error: no wiki article "${slug}". Available: ${available.join(', ') || '(none)'}` }],
+        isError: true
+      }
+    }
+    const relatedLine = article.related.length
+      ? `\n\n---\nRelated articles: ${article.related.join(', ')}`
+      : ''
+    return { content: [{ type: 'text', text: article.body + relatedLine }] }
+  }
+)
+
+server.tool(
+  'search-wiki',
+  'Search the feature wiki. Hybrid keyword + semantic (when the embedding index is available). Returns ranked slugs with summaries — follow up with read-wiki-article for the full text.',
+  { query: z.string().describe('What you want to know, e.g. "how do worktree workers merge back"') },
+  async ({ query }) => {
+    const articles = listWikiArticles(WIKI_DIR)
+    if (articles.length === 0) {
+      return { content: [{ type: 'text', text: `No wiki articles found in ${WIKI_DIR}` }], isError: true }
+    }
+
+    const keywordRanked = articles
+      .map((a) => ({ a, score: scoreWikiKeyword(a, query) }))
+      .filter((r) => r.score > 0)
+      .sort((x, y) => y.score - x.score)
+      .map((r) => r.a.slug)
+
+    let ranked = keywordRanked
+    if (query.trim() && (await isEmbedClientAvailable())) {
+      const hits = await embedClientSearch(query, 80) // overfetch — most hits are memories/todos
+      const semanticRanked: string[] = []
+      const seen = new Set<string>()
+      for (const h of hits) {
+        if (!h.filename.startsWith(WIKI_KEY_PREFIX)) continue
+        if (h.distance > WIKI_SEMANTIC_DISTANCE_THRESHOLD) continue
+        const slug = h.filename.slice(WIKI_KEY_PREFIX.length)
+        if (seen.has(slug)) continue
+        seen.add(slug)
+        semanticRanked.push(slug)
+      }
+      if (semanticRanked.length > 0) {
+        ranked = rrf<string>(
+          [{ items: keywordRanked }, { items: semanticRanked }],
+          (slug) => slug
+        ).map((f) => f.item)
+      }
+    }
+
+    if (ranked.length === 0) {
+      return { content: [{ type: 'text', text: `No wiki articles match "${query}". Try list-wiki-articles to browse all slugs.` }] }
+    }
+
+    const bySlug = new Map(articles.map((a) => [a.slug, a] as const))
+    const lines = ranked
+      .map((slug) => bySlug.get(slug))
+      .filter((a): a is NonNullable<typeof a> => Boolean(a))
+      .slice(0, 8)
+      .map((a) => `- ${a.slug} — ${a.summary || a.title}`)
+    return { content: [{ type: 'text', text: `Top matches:\n${lines.join('\n')}\n\nRead one with read-wiki-article(slug).` }] }
+  }
 )
 
 // ─── Start server ───────────────────────────────────────────────────────────

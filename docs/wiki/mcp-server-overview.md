@@ -1,7 +1,7 @@
 ---
 slug: mcp-server-overview
 title: MCP Server Overview
-summary: The session-manager stdio MCP server — how it's registered, and the full 39-tool surface grouped by area.
+summary: The session-manager stdio MCP server — how it's registered, and the full 46-tool surface grouped by area.
 related: [memory-knowledge-base, todos-project-notes, spawned-sessions, agentic-pipeline, scheduled-tasks, hook-integration-status]
 ---
 
@@ -15,7 +15,7 @@ Session Manager ships a stdio MCP server named `session-manager` that gives ever
 
 The MCP server runs **out of process** (spawned per-session by Claude Code over stdio). Memory notes and todos it reads/writes directly on disk (shared app data dir, with a file watcher keeping the app UI live). Anything involving the *running app* — spawning, messaging, pipeline, schedules — goes over HTTP to the app's [hook server](hook-integration-status.md), using the port and per-launch secret files in the app data dir. If the app isn't running, those tools fail with "hook server is not running"; the disk-backed memory/todo tools keep working.
 
-## Tool surface (39 tools)
+## Tool surface (46 tools)
 
 **Memory knowledge base (10)** — `create-memory`, `read-memory`, `edit-memory`, `batch-section-edit`, `delete-memory`, `search-memories`, `list-memories`, `add-tags`, `remove-tags`, `repair-related`. See [memory-knowledge-base](memory-knowledge-base.md).
 
@@ -26,6 +26,10 @@ The MCP server runs **out of process** (spawned per-session by Claude Code over 
 **Agentic pipeline (10)** — `pipeline-start`, `pipeline-start-review`, `pipeline-get-task`, `pipeline-set-stage`, `emit-milestone`, `pipeline-rename-session`, `pipeline-request-approval`, `merge-worktree`, `pipeline-put-artifact`, `pipeline-get-artifact`. See [agentic-pipeline](agentic-pipeline.md).
 
 **Scheduled tasks (8)** — `list-scheduled-tasks`, `get-scheduled-task`, `create-scheduled-task`, `update-scheduled-task`, `enable-scheduled-task`, `disable-scheduled-task`, `delete-scheduled-task`, `list-scheduled-task-runs`. See [scheduled-tasks](scheduled-tasks.md).
+
+**Canvas (4)** — `canvas-show`, `canvas-inspect-image`, `canvas-list-artifacts`, `canvas-focus`. See [canvas](canvas.md).
+
+**Feature wiki (3)** — `list-wiki-articles`, `read-wiki-article`, `search-wiki`. Read-only access to this wiki: articles ship with the app (`docs/wiki` in the repo, `resources/wiki` packaged) and are indexed into the same embedding DB as memories/todos under a `wiki:` namespace, so `search-wiki` is hybrid keyword + semantic. The wiki is authoritative, versioned product documentation — distinct from the per-user memory KB.
 
 Tool names are invoked as `mcp__session-manager__<tool>` from a session.
 

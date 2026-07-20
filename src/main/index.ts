@@ -17,6 +17,8 @@ import { initMemoryEmbeddings, reindexAll } from './memory/embeddings-runtime'
 import { startEmbedServer, stopEmbedServer } from './memory/embed-server'
 import { setNotesRoot, startNotesWatcher, stopNotesWatcher, setEmbedHooks } from './notes-manager'
 import { indexTodo, removeTodoFromIndex, searchTodosSemantic, reindexAllTodos } from './todos-embeddings'
+import { reindexAllWiki } from './wiki-embeddings'
+import { resolveAppWikiDir } from './wiki'
 import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 import { loadSettings } from './settings-store'
@@ -251,6 +253,7 @@ app.whenReady().then(async () => {
     console.error('[memory] embed-server failed to start:', err)
     return null
   })
+  const wikiDir = resolveAppWikiDir(app.getAppPath(), app.isPackaged, process.resourcesPath)
   // Kick off model resolution (bundled or downloaded). Doesn't block UI.
   // The bootstrap reindex awaits this internally.
   void initMemoryEmbeddings().then(async () => {
@@ -266,6 +269,8 @@ app.whenReady().then(async () => {
     }
     // Todo embeddings live in the same DB; reindex after memory.
     try { await reindexAllTodos() } catch (err) { console.error('[todos:embed] bootstrap reindex failed:', err) }
+    // Feature wiki is read-only product docs — one reindex at startup, no watcher.
+    try { await reindexAllWiki(wikiDir) } catch (err) { console.error('[wiki:embed] bootstrap reindex failed:', err) }
   })
   startMemoryWatcher()
   setEmbedHooks({
@@ -284,7 +289,8 @@ app.whenReady().then(async () => {
       join(app.getPath('userData'), 'memories'),
       app.getPath('userData'),
       join(app.getPath('userData'), 'notes'),
-      embedHandle?.socketPath
+      embedHandle?.socketPath,
+      wikiDir
     )
   }
   if (!disabled.mcp) doRegisterMcp()

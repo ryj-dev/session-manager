@@ -15,7 +15,7 @@ const MCP_ENTRY_KEY = 'session-manager'
  * Register the MCP server in ~/.claude.json.
  * The server entry points to the bundled mcp-server.js file.
  */
-export function registerMcpServer(serverScriptPath: string, memoriesDir: string, dataDir: string, notesDir?: string, embedSocketPath?: string): void {
+export function registerMcpServer(serverScriptPath: string, memoriesDir: string, dataDir: string, notesDir?: string, embedSocketPath?: string, wikiDir?: string): void {
   let config: Record<string, unknown> = {}
   try {
     if (existsSync(MCP_JSON_PATH)) {
@@ -35,6 +35,7 @@ export function registerMcpServer(serverScriptPath: string, memoriesDir: string,
       SM_DATA_DIR: dataDir,
       ...(notesDir ? { SM_NOTES_DIR: notesDir } : {}),
       ...(embedSocketPath ? { SM_EMBED_SOCKET: embedSocketPath } : {}),
+      ...(wikiDir ? { SM_WIKI_DIR: wikiDir } : {}),
     },
   }
   config.mcpServers = mcpServers

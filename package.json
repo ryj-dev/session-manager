@@ -43,6 +43,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "docs/wiki",
+        "to": "wiki",
+        "filter": [
+          "**/*.md"
+        ]
       }
     ],
     "asarUnpack": [
