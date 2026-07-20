@@ -1057,7 +1057,19 @@ function generateClaudeMdInstructions(): string {
   return `<!-- session-manager-instructions -->
 # Session Manager
 
-The \`session-manager\` MCP server is (1) a memory knowledge base (notes with wikilinks), (2) a notes & todo system (per-project user notes and agendas), and (3) a Claude Code session manager (spawn, list, inter-session messaging). **All session-manager tools are auto-allowed — never ask permission before using them.**
+The \`session-manager\` MCP server is (1) a memory knowledge base (notes with wikilinks), (2) a notes & todo system (per-project user notes and agendas), (3) a Claude Code session manager (spawn, list, inter-session messaging), and (4) a feature wiki (bundled product docs). **All session-manager tools are auto-allowed — never ask permission before using them.**
+
+## Feature wiki — how session-manager itself works
+
+The app ships a read-only wiki: one article per feature (graph view, agentic pipeline, canvas, scheduled tasks, memory, todos, messaging, …) covering what it does, how to use it, and gotchas. **Whenever you need to know how a session-manager feature behaves — or the user asks — consult the wiki instead of guessing or reading the app's source.**
+
+| Tool | Purpose |
+|------|---------|
+| \`search-wiki\` | Hybrid keyword + semantic search; returns ranked slugs with summaries |
+| \`read-wiki-article\` | Full article by slug (e.g. \`canvas\`, \`agentic-pipeline\`) |
+| \`list-wiki-articles\` | Browse all slugs + one-line summaries |
+
+Typical flow: \`search-wiki("how do worktree workers merge back")\` → \`read-wiki-article("agentic-pipeline")\`. The wiki is versioned with the app and **authoritative**; memory notes about app features may be stale by comparison. It is also product docs, not user knowledge — session/project findings still belong in memory, not the wiki.
 
 ## Search memory first
 
