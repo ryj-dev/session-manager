@@ -90,9 +90,11 @@ All keyboard shortcuts are configurable. Open **Settings → Keyboard shortcuts*
 
 Other settings worth knowing about live in the same panel: base projects directory, terminal pairing mode (off / split / overlay shell alongside Claude), auto-mode defaults for spawned sessions, message popup behavior, and per-integration disable toggles.
 
-## Reporting issues
+## Reporting issues & contributing
 
-Open an issue at <https://github.com/ryj-dev/session-manager/issues>.
+Open an issue at <https://github.com/ryj-dev/session-manager/issues> — there are templates for bug reports and feature requests.
+
+Want to contribute a fix or feature? See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow (fork → branch → PR) and development setup.
 
 ## Credits
 
