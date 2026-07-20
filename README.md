@@ -15,10 +15,11 @@ A desktop app for managing many [Claude Code](https://claude.com/claude-code) se
 
 ```sh
 brew tap ryj-dev/tap
-brew install --cask --no-quarantine session-manager
+brew trust ryj-dev/tap    # Homebrew ≥ 6 requires trusting third-party taps
+brew install --cask session-manager
 ```
 
-The `--no-quarantine` flag matters: the app is unsigned, and without it macOS will refuse to launch it (see Option B).
+The app is unsigned, so macOS would normally block it as "damaged" on first launch — the cask removes the quarantine flag automatically after install, so it launches normally.
 
 ### Option B — download a release (macOS arm64)
 
