@@ -139,9 +139,13 @@ export function ScheduledTasksView({ visible, onClose }: Props): JSX.Element | n
       <header className="flex items-center gap-2.5 border-b border-zinc-800 px-4 py-2">
         <ClockGlyph />
         <h1 className="text-[13px] font-semibold tracking-tight text-zinc-100">Scheduled Tasks</h1>
+        {/* titlebar-no-drag: the view-mode titlebars underneath (GraphView/SplitView/
+            focused) keep their app-region: drag strip active through this overlay —
+            drag regions are window-level and ignore z-order — so controls in the
+            top 40px must carve themselves out. */}
         <button
           onClick={() => setEditing('new')}
-          className="ml-auto rounded bg-sky-500/15 px-2.5 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/25"
+          className="titlebar-no-drag ml-auto rounded bg-sky-500/15 px-2.5 py-1 text-[11px] font-medium text-sky-300 hover:bg-sky-500/25"
         >+ New schedule</button>
       </header>
 
@@ -430,7 +434,7 @@ function ScheduleFormDrawer({
       >
         <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3">
           <h2 className="text-sm font-medium text-zinc-100">{task ? 'Edit schedule' : 'New schedule'}</h2>
-          <button onClick={onClose} className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
+          <button onClick={onClose} className="titlebar-no-drag ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
@@ -619,7 +623,7 @@ function RunTerminalDrawer({ task, run, onClose }: { task: ScheduledTask; run: S
             <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">Run · {fmtTime(run.startedAt)}</span>
             <h2 className="mt-1.5 truncate text-sm font-medium text-zinc-100">{task.name}</h2>
           </div>
-          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
+          <button onClick={onClose} className="titlebar-no-drag rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
         </div>
         <div className="flex min-h-0 flex-1 flex-col p-4">
           <RunTerminalPane task={task} run={run} />

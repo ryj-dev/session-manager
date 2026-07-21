@@ -748,7 +748,7 @@ function SessionDrawer({
             <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${ACCENT[stageMeta.accent].chipBg} ${ACCENT[stageMeta.accent].text}`}>{stageMeta.label}</span>
             <h2 className="mt-1.5 truncate text-sm font-medium text-zinc-100">{card.title}</h2>
           </div>
-          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
+          <button onClick={onClose} className="titlebar-no-drag rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
         </div>
 
         <StageStepper current={card.stage} />
@@ -907,7 +907,7 @@ function BacklogDetailDrawer({
             <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${ACCENT.zinc.chipBg} ${ACCENT.zinc.text}`}>Backlog</span>
             <h2 className="mt-1.5 line-clamp-3 text-sm font-medium text-zinc-100">{todo.title}</h2>
           </div>
-          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
+          <button onClick={onClose} className="titlebar-no-drag rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">✕</button>
         </div>
 
         {/* Meta: status + tags */}
@@ -1299,7 +1299,10 @@ function ProjectPicker({
   const select = (name: string | null): void => { onChange(name); setOpen(false) }
 
   return (
-    <div ref={ref} className="relative">
+    // titlebar-no-drag: the view-mode titlebars underneath keep their
+    // app-region: drag strip active through this overlay (drag regions are
+    // window-level and ignore z-order), and this trigger sits inside it.
+    <div ref={ref} className="relative titlebar-no-drag">
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-500 focus:outline-none focus:border-zinc-500"

@@ -129,10 +129,14 @@ export function FileExplorer({
         case 'ArrowLeft':
         case 'Backspace':
           e.preventDefault()
-          // Go up one directory
+          // Go up one directory, but only if the parent is actually accessible —
+          // navigating above an allowed root (e.g. /Users) returns an empty
+          // listing with no entries to move forward into, stranding the user.
           const parent = currentPath.split('/').slice(0, -1).join('/')
           if (parent) {
-            setCurrentPath(parent)
+            window.api.isDirectory(parent).then((ok) => {
+              if (ok) setCurrentPath(parent)
+            })
           }
           break
         case 'Escape':
@@ -156,8 +160,12 @@ export function FileExplorer({
           transition={{ duration: 0.2 }}
           className="absolute inset-y-0 left-0 w-80 z-30 bg-zinc-900/95 backdrop-blur-xl border-r border-zinc-800 flex flex-col"
         >
-          {/* Header */}
-          <div className="h-10 flex items-center px-3 border-b border-zinc-800/50 shrink-0 titlebar-drag">
+          {/* Header — offset past the macOS traffic lights so the path isn't hidden behind them */}
+          <div
+            className={`h-10 flex items-center pr-3 border-b border-zinc-800/50 shrink-0 titlebar-drag ${
+              navigator.platform.startsWith('Mac') ? 'pl-20' : 'pl-3'
+            }`}
+          >
             <span className="titlebar-no-drag text-xs text-zinc-400 font-medium truncate">
               {currentPath}
             </span>
