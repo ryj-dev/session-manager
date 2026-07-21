@@ -68,21 +68,33 @@ export function SplitView({ onTitleChange }: SplitViewProps): JSX.Element | null
   const setFocusedSessionId = useStore((s) => s.setFocusedSessionId)
   const setCmdHeld = useStore((s) => s.setCmdHeld)
   const setGroupingSelection = useStore((s) => s.setGroupingSelection)
+  const setSplitGroupLastFocus = useStore((s) => s.setSplitGroupLastFocus)
   const markSessionSeen = useStore((s) => s.markSessionSeen)
 
   const group = splitGroups.find((g) => g.id === activeSplitGroupId)
   const N = group?.orderedSessionIds.length ?? 0
 
-  // Default focus to slot 0 when entering the view.
+  // Default focus to slot 0 when entering the view with no remembered pane
+  // (enterSplitGroup restores the group's last-focused member when it can).
+  // Also re-homes focus if the focused pane leaves the group mid-session.
   useEffect(() => {
     if (!group) return
     if (focusedSessionId && group.orderedSessionIds.includes(focusedSessionId)) return
     const first = group.orderedSessionIds[0]
-    if (first) {
-      setFocusedSessionId(first)
-      requestAnimationFrame(() => focusTerminal(first))
-    }
+    if (first) setFocusedSessionId(first)
   }, [group, focusedSessionId, setFocusedSessionId])
+
+  // Keyboard focus follows the highlight. Whenever the focused pane changes,
+  // give its terminal real focus and remember it for the group's next entry.
+  // Split terminals mount with autoFocus off, so a pane finishing its initial
+  // fit can't steal focus from the highlighted one (it used to land on the
+  // last pane to fit while the highlight sat on slot 0).
+  useEffect(() => {
+    if (!group || !focusedSessionId) return
+    if (!group.orderedSessionIds.includes(focusedSessionId)) return
+    setSplitGroupLastFocus(group.id, focusedSessionId)
+    requestAnimationFrame(() => focusTerminal(focusedSessionId))
+  }, [group, focusedSessionId, setSplitGroupLastFocus])
 
   // Cmd-hold-still detection — opens the reshape modal after 1.5s of held Cmd
   // with no other key. Mirror of the graph-view flow but pre-populates the
@@ -378,6 +390,7 @@ function SplitPanel({ session, slotIndex, isFocused, onFocus, onTitleChange }: S
             key={`split-${session.id}`}
             sessionId={session.id}
             visible={true}
+            autoFocus={false}
             onTitleChange={(title) => onTitleChange(session.id, title)}
           />
         </div>

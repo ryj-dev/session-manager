@@ -383,6 +383,10 @@ export interface AppState {
   dissolveSplitGroup: (groupId: string) => void
   /** Switch to split view on the given group. */
   enterSplitGroup: (groupId: string) => void
+  /** Last-focused pane per group — restored by `enterSplitGroup` on re-entry.
+   *  In-memory only; not persisted across app restarts. */
+  splitGroupLastFocus: Record<string, string>
+  setSplitGroupLastFocus: (groupId: string, sessionId: string) => void
   /** Replace the group's layout tree. `orderedSessionIds` is recomputed from leaves. */
   setSplitGroupLayout: (groupId: string, layout: Layout) => void
   /** Append a new session into the active group by splitting the largest pane. */
@@ -656,12 +660,31 @@ export const useStore = create<AppState>((set, get) => ({
     return id
   },
   dissolveSplitGroup: (groupId) =>
-    set((state) => ({
-      splitGroups: state.splitGroups.filter((g) => g.id !== groupId),
-      activeSplitGroupId: state.activeSplitGroupId === groupId ? null : state.activeSplitGroupId,
-    })),
+    set((state) => {
+      const { [groupId]: _dropped, ...lastFocus } = state.splitGroupLastFocus
+      return {
+        splitGroups: state.splitGroups.filter((g) => g.id !== groupId),
+        activeSplitGroupId: state.activeSplitGroupId === groupId ? null : state.activeSplitGroupId,
+        splitGroupLastFocus: lastFocus,
+      }
+    }),
   enterSplitGroup: (groupId) =>
-    set({ activeSplitGroupId: groupId, viewMode: 'split', focusedSessionId: null }),
+    set((state) => {
+      // Restore the pane the user had focused last time they were in this
+      // group; fall back to null so SplitView defaults to slot 0.
+      const group = state.splitGroups.find((g) => g.id === groupId)
+      const remembered = state.splitGroupLastFocus[groupId]
+      const focusedSessionId =
+        remembered && group?.orderedSessionIds.includes(remembered) ? remembered : null
+      return { activeSplitGroupId: groupId, viewMode: 'split', focusedSessionId }
+    }),
+  splitGroupLastFocus: {},
+  setSplitGroupLastFocus: (groupId, sessionId) =>
+    set((state) =>
+      state.splitGroupLastFocus[groupId] === sessionId
+        ? {}
+        : { splitGroupLastFocus: { ...state.splitGroupLastFocus, [groupId]: sessionId } }
+    ),
   setSplitGroupLayout: (groupId, layout) =>
     set((state) => ({
       splitGroups: state.splitGroups.map((g) =>
