@@ -150,7 +150,13 @@ async function getEmbedder(): Promise<any> {
 
     const embedder = await pipeline('feature-extraction', modelId, {
       // ONNX quantized weights → fast CPU inference, ~25MB on disk
-      dtype: 'q8' as any
+      dtype: 'q8' as any,
+      // Disable onnxruntime's BFC memory arena. The arena doubles on every
+      // extension and never shrinks (observed 1.6GB RSS for this 25MB model),
+      // and its huge aligned allocations fatally abort malloc inside the
+      // Electron main process — crashed the whole app 3× on 2026-07-24.
+      // Plain malloc/free per tensor is slightly slower but bounded.
+      session_options: { enableCpuMemArena: false } as any
     })
     handle!.embedder = embedder
     return embedder
@@ -165,12 +171,25 @@ async function getEmbedder(): Promise<any> {
   return handle.embedderPromise
 }
 
+// Peak inference memory scales with batch size — a 20+ chunk note embedded in
+// one call needs multi-GB of activation buffers, which is what pushed the
+// allocator over the edge. Small batches keep the peak bounded at negligible
+// throughput cost (~0.6s per 21-chunk note).
+const EMBED_BATCH_SIZE = 4
+
 async function embedTexts(texts: string[]): Promise<Float32Array[]> {
   const embedder = await getEmbedder()
-  const out = await embedder(texts, { pooling: 'mean', normalize: true })
-  // transformers.js returns a Tensor with .tolist(): number[][]
-  const list: number[][] = out.tolist()
-  return list.map((row) => Float32Array.from(row))
+  const result: Float32Array[] = []
+  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
+    const out = await embedder(texts.slice(i, i + EMBED_BATCH_SIZE), {
+      pooling: 'mean',
+      normalize: true
+    })
+    // transformers.js returns a Tensor with .tolist(): number[][]
+    const list: number[][] = out.tolist()
+    for (const row of list) result.push(Float32Array.from(row))
+  }
+  return result
 }
 
 // ─── Chunking ───────────────────────────────────────────────────────────────
