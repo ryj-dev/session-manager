@@ -5,8 +5,8 @@ import { pathToFileURL } from 'url'
 import { getArtifactById, sweepOrphanedImages } from './canvas-store'
 import { ALLOWED_IMAGE_EXTS } from './canvas-types'
 import { registerIpcHandlers } from './ipc'
-import { getResumableSessions, killAllSessions } from './pty-manager'
-import { saveSessions } from './session-store'
+import { getResumableSessions, killAllSessions, onClaudeSessionIdChange } from './pty-manager'
+import { saveSessions, type SavedSession } from './session-store'
 import { getPipelineClaudeSessionIds } from './pipeline-store'
 import { getScheduleClaudeSessionIds } from './schedule-store'
 import { startHookServer, stopHookServer } from './hook-server'
@@ -51,28 +51,59 @@ const isDev = !app.isPackaged
 let mainWindow: BrowserWindow | null = null
 let didSave = false
 
-function saveAndCleanup(): void {
-  if (didSave) return
-  didSave = true
-
-  // Exclude agentic-pipeline and scheduled-task sessions — they shouldn't be offered
-  // in the generic restore prompt (which would re-add them as ordinary graph nodes).
-  // Pipeline resume is on-demand via the board (pipeline.json); scheduled runs resume
-  // on-demand via the Scheduled Tasks panel (schedules.json).
+// Exclude agentic-pipeline and scheduled-task sessions — they shouldn't be offered
+// in the generic restore prompt (which would re-add them as ordinary graph nodes).
+// Pipeline resume is on-demand via the board (pipeline.json); scheduled runs resume
+// on-demand via the Scheduled Tasks panel (schedules.json).
+function collectResumableSessions(): SavedSession[] {
   const pipelineIds = getPipelineClaudeSessionIds()
   const scheduleIds = getScheduleClaudeSessionIds()
-  const resumable = getResumableSessions().filter(
-    (s) => !s.claudeSessionId || (!pipelineIds.has(s.claudeSessionId) && !scheduleIds.has(s.claudeSessionId))
-  )
-  console.log('[main] saving resumable sessions:', resumable.length, resumable.map(s => s.claudeSessionId))
-  saveSessions(
-    resumable.map((s) => ({
+  return getResumableSessions()
+    .filter(
+      (s) => !s.claudeSessionId || (!pipelineIds.has(s.claudeSessionId) && !scheduleIds.has(s.claudeSessionId))
+    )
+    .map((s) => ({
       claudeSessionId: s.claudeSessionId,
       projectPath: s.projectPath,
       terminalTitle: s.terminalTitle,
       savedAt: Date.now()
     }))
-  )
+}
+
+// Crash-resilient session journal: sessions.json is written on graceful quit
+// (saveAndCleanup), but a hard crash — e.g. a native-module fault — never
+// reaches that path, so every session was lost. Journal the same snapshot
+// during runtime so a relaunch after a crash still offers the restore prompt.
+let journalTimer: NodeJS.Timeout | null = null
+let journalWroteNonEmpty = false
+let lastJournal = ''
+
+function journalSessions(): void {
+  if (didSave) return
+  const resumable = collectResumableSessions()
+  // Never clobber a previous run's saved sessions with an empty list before
+  // this run has produced any resumable sessions of its own — e.g. while the
+  // restore prompt is still open right after a crash relaunch.
+  if (resumable.length === 0 && !journalWroteNonEmpty) return
+  // savedAt changes every call; compare content without it to skip no-op writes.
+  const serialized = JSON.stringify(resumable.map(({ savedAt: _, ...rest }) => rest))
+  if (serialized === lastJournal) return
+  lastJournal = serialized
+  if (resumable.length > 0) journalWroteNonEmpty = true
+  saveSessions(resumable)
+}
+
+function saveAndCleanup(): void {
+  if (didSave) return
+  didSave = true
+
+  if (journalTimer) {
+    clearInterval(journalTimer)
+    journalTimer = null
+  }
+  const resumable = collectResumableSessions()
+  console.log('[main] saving resumable sessions:', resumable.length, resumable.map(s => s.claudeSessionId))
+  saveSessions(resumable)
   killAllSessions()
   cleanupAllSkillCommands()
   stopScheduler()
@@ -297,6 +328,12 @@ app.whenReady().then(async () => {
   registerIpcHandlers({ reinstallMcp: doRegisterMcp })
   createWindow()
   startScheduler()
+
+  // Session journal: interval catches title/activity changes; the
+  // claudeSessionId listener captures new sessions as soon as they get an id,
+  // so a crash loses at most ~15s of state.
+  journalTimer = setInterval(journalSessions, 15_000)
+  onClaudeSessionIdChange(() => journalSessions())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
