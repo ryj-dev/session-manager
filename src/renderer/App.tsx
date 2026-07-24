@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact } from './store'
+import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -16,6 +16,7 @@ import { StatuslineEditor } from './components/StatuslineEditor'
 import { CleanupPanel } from './components/CleanupPanel'
 import { SplitView } from './components/SplitView'
 import { SplitArrangementModal } from './components/SplitArrangementModal'
+import { ShareTurnModal } from './components/ShareTurnModal'
 import { SidebarPicker } from './components/SidebarPicker'
 import { DesignGallery } from './components/DesignGallery'
 import { AgentGallery } from './components/AgentGallery'
@@ -172,6 +173,8 @@ export function App(): JSX.Element {
   // blob); the task list itself lives in the main-process pipeline store.
   const pipelineDefaultAutonomy = useStore((s) => s.pipelineDefaultAutonomy)
   const completedFilter = useStore((s) => s.completedFilter)
+  const turnExportFolder = useStore((s) => s.turnExportFolder)
+  const turnShareDefaults = useStore((s) => s.turnShareDefaults)
 
   // Settings
   const [showSettings, setShowSettings] = useState(false)
@@ -213,6 +216,10 @@ export function App(): JSX.Element {
       if (settings.pipelineDefaultAutonomy === 'manual' || settings.pipelineDefaultAutonomy === 'gated' || settings.pipelineDefaultAutonomy === 'auto') {
         useStore.getState().setPipelineDefaultAutonomy(settings.pipelineDefaultAutonomy)
       }
+      if (typeof settings.turnExportFolder === 'string') useStore.getState().setTurnExportFolder(settings.turnExportFolder)
+      if (settings.turnShareDefaults && typeof settings.turnShareDefaults === 'object') {
+        useStore.getState().setTurnShareDefaults({ ...defaultTurnShareDefaults, ...(settings.turnShareDefaults as Partial<TurnShareDefaults>) })
+      }
       settingsLoadedRef.current = true
     })
   }, [])
@@ -247,8 +254,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -964,6 +971,20 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.shareTurn) {
+        e.preventDefault()
+        // Opens the Share Turn modal for the FOCUSED session (focused/split
+        // views only — the graph has no "current" session).
+        const store = useStore.getState()
+        const sid = store.focusedSessionId
+        if (store.shareTurnSessionId) {
+          store.setShareTurnSessionId(null)
+        } else if (sid && store.viewMode !== 'graph') {
+          store.setShareTurnSessionId(sid)
+        }
+        return
+      }
+
       if (key === hotkeys.openSettings) {
         e.preventDefault()
         setShowSettings((prev) => !prev)
@@ -1480,6 +1501,9 @@ export function App(): JSX.Element {
 
       {/* Split arrangement modal */}
       <SplitArrangementModal />
+
+      {/* Share turn modal (Cmd+Shift+S on a focused session) */}
+      <ShareTurnModal />
 
       {/* Restore sessions prompt */}
       {showRestorePrompt && (

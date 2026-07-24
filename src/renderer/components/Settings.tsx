@@ -43,7 +43,12 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
   const terminalPairingMode = useStore((s) => s.terminalPairingMode)
   const setTerminalPairingMode = useStore((s) => s.setTerminalPairingMode)
+  const turnExportFolder = useStore((s) => s.turnExportFolder)
+  const setTurnExportFolder = useStore((s) => s.setTurnExportFolder)
+  const turnShareDefaults = useStore((s) => s.turnShareDefaults)
+  const setTurnShareDefaults = useStore((s) => s.setTurnShareDefaults)
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
+  const [turnFolderInput, setTurnFolderInput] = useState(turnExportFolder || '')
   const [claudeMdInstalled, setClaudeMdInstalled] = useState<boolean | null>(null)
   const [claudeMdBusy, setClaudeMdBusy] = useState(false)
   const [claudeMdPreview, setClaudeMdPreview] = useState<string | null>(null)
@@ -51,6 +56,10 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   useEffect(() => {
     setDirInput(baseProjectsDir || '')
   }, [baseProjectsDir])
+
+  useEffect(() => {
+    setTurnFolderInput(turnExportFolder || '')
+  }, [turnExportFolder])
 
   // Check CLAUDE.md status when settings open
   useEffect(() => {
@@ -283,6 +292,54 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </select>
               <p className="text-[10px] text-zinc-600 mt-1">
                 The orchestrator&apos;s default decision-making freedom. Per-task autonomy can still be changed inside the pipeline (⌘L) when you open a task.
+              </p>
+            </div>
+
+            {/* Share turn */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Share turn (⌘⇧S)</div>
+              <label className="text-xs text-zinc-400 block mb-1.5">Layers included by default</label>
+              <div className="flex flex-col gap-1.5 mb-3">
+                {([
+                  ['prompt', 'Prompt'],
+                  ['tool', 'Tool activity'],
+                  ['result', 'Result / diff'],
+                ] as const).map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={turnShareDefaults[key]}
+                      onChange={(e) => setTurnShareDefaults({ ...turnShareDefaults, [key]: e.target.checked })}
+                      className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-zinc-500"
+                    />
+                    <span className="text-xs text-zinc-300">{label}</span>
+                  </label>
+                ))}
+              </div>
+              <label className="text-xs text-zinc-400 block mb-1.5">Default tool-activity level</label>
+              <select
+                value={turnShareDefaults.toolLevel}
+                onChange={(e) => setTurnShareDefaults({ ...turnShareDefaults, toolLevel: e.target.value as 'summary' | 'commands' | 'full' })}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 appearance-none cursor-pointer"
+              >
+                <option value="summary">Summary — one-line rollup</option>
+                <option value="commands">Commands — calls with truncated output</option>
+                <option value="full">Full — calls with complete output</option>
+              </select>
+              <label className="text-xs text-zinc-400 block mb-1.5 mt-3">Turn export folder</label>
+              <input
+                type="text"
+                value={turnFolderInput}
+                onChange={(e) => setTurnFolderInput(e.target.value)}
+                onBlur={() => setTurnExportFolder(turnFolderInput.trim() || null)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') setTurnExportFolder(turnFolderInput.trim() || null)
+                }}
+                placeholder="<project>/turns/"
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-500"
+              />
+              <p className="text-[10px] text-zinc-600 mt-1">
+                Where &quot;Save as file&quot; writes shared turns. Blank saves into a <span className="font-mono">turns/</span> folder inside the session&apos;s project.
               </p>
             </div>
 

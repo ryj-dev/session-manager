@@ -17,6 +17,28 @@ export interface MemoryNote {
   wikilinks: string[]
 }
 
+/** Mirrors ShareableTurn from turn-parser.ts (preload can't import main process modules). */
+export interface TurnFileDiff {
+  filePath: string
+  hunks: Array<{ oldStart: number; oldLines: number; newStart: number; newLines: number; lines: string[] }>
+}
+
+export type TurnTimelineItem =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; id: string; name: string; arg: string; resultText: string | null; isEdit: boolean; diff?: TurnFileDiff }
+
+export interface ShareableTurn {
+  index: number
+  timestamp: string
+  endTimestamp: string | null
+  promptText: string
+  label: string
+  resultText: string
+  timeline: TurnTimelineItem[]
+  diffs: TurnFileDiff[]
+  interrupted: boolean
+}
+
 export interface MemoryIndexEntry {
   filename: string
   title: string
@@ -101,11 +123,18 @@ const api = {
     ipcRenderer.send('splitGroups:save', groups),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay' }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay' }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
+
+  // Share Turn
+  listTurns: (sessionId: string): Promise<{ turns: ShareableTurn[]; error?: string }> =>
+    ipcRenderer.invoke('turns:list', sessionId),
+
+  saveTurn: (payload: { sessionId: string; filename: string; markdown: string }): Promise<{ path?: string; error?: string }> =>
+    ipcRenderer.invoke('turns:save', payload),
 
   // File system operations
   readFile: (path: string): Promise<string> =>

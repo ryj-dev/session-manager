@@ -111,6 +111,7 @@ const lastPtyActivity = new Map<string, number>()
 export function cleanupSession(appSessionId: string): void {
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
+  sessionTranscriptPath.delete(appSessionId)
   lastPtyActivity.delete(appSessionId)
   lastProjectTodoCount.delete(appSessionId)
   sessionTurnCount.delete(appSessionId)
@@ -148,6 +149,17 @@ interface HookPayload {
   /** UserPromptSubmit only: the submitted prompt text (used to auto-display
    *  user-sent image paths on the canvas). */
   prompt?: string
+  /** Path to the session's transcript JSONL — present on every hook event.
+   *  Captured for the Share Turn feature (turn reconstruction). */
+  transcript_path?: string
+}
+
+/** Last transcript path seen per app session — survives /resume id changes
+ *  because every hook event carries the current path. */
+const sessionTranscriptPath = new Map<string, string>()
+
+export function getTranscriptPath(appSessionId: string): string | null {
+  return sessionTranscriptPath.get(appSessionId) ?? null
 }
 
 export function getHookServerPort(): number {
@@ -2514,6 +2526,9 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   // Detect session ID changes (e.g. user did /resume inside the session)
   if (payload.session_id) {
     updateClaudeSessionId(appSessionId, payload.session_id)
+  }
+  if (payload.transcript_path) {
+    sessionTranscriptPath.set(appSessionId, payload.transcript_path)
   }
 
   const event = payload.hook_event_name

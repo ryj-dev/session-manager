@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Copy turn — mockup</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel-bg: #0e0f11;
+    --surface: #15171a;
+    --surface-2: #1c1f23;
+    --border: #25282d;
+    --border-strong: #2f3338;
+    --text: #e6e8ea;
+    --dim: #9aa0a6;
+    --faint: #5e646b;
+    --accent: #7aa2f7;
+    --accent-dim: #4b6fb3;
+    --done: #34d399;
+    --danger: #f87171;
+    --chip: #1f232a;
+    --chip-hover: #262b33;
+    --amber: #e0b072;
+    --amber-dim: #a8834e;
+    --add: #3fb950;
+    --add-bg: rgba(46, 160, 67, 0.14);
+    --del: #f85149;
+    --del-bg: rgba(248, 81, 73, 0.12);
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  ::selection { background: rgba(122, 162, 247, 0.3); }
+
+  /* ─────────────────────────── Mock terminal backdrop ─────────────── */
+  .stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .terminal {
+    position: absolute;
+    inset: 0;
+    padding: 44px 40px 40px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: #6b7178;
+    filter: blur(0.4px);
+    user-select: none;
+    overflow: hidden;
+  }
+  .terminal .tbar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 32px;
+    background: #111316;
+    border-bottom: 1px solid #1c1e22;
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    gap: 7px;
+  }
+  .terminal .tbar i {
+    width: 11px; height: 11px; border-radius: 50%; display: inline-block;
+  }
+  .dot-r { background: #ec6a5e; } .dot-y { background: #f4bf4f; } .dot-g { background: #61c554; }
+  .terminal .tbar span {
+    margin-left: 12px; color: #5e646b; font-family: var(--sans); font-size: 11px;
+  }
+  .term-u { color: #7aa2f7; }
+  .term-a { color: #c9d1d9; }
+  .term-t { color: #56b6c2; }
+  .term-dim { color: #4a4f56; }
+  .term-g { color: #4d9e5a; }
+  .cursor-blk {
+    display: inline-block; width: 7px; height: 14px;
+    background: #6b7178; vertical-align: text-bottom;
+    animation: blink 1.1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* The floating "Copy turn" button sitting on a turn in the terminal */
+  .turn-affordance {
+    position: absolute;
+    top: 150px;
+    right: 46px;
+    z-index: 5;
+  }
+  .copy-turn-btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 6px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    color: var(--dim);
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+    transition: all 140ms ease;
+  }
+  .copy-turn-btn:hover { color: var(--text); border-color: var(--accent-dim); background: var(--surface-2); }
+  .copy-turn-btn svg { width: 13px; height: 13px; }
+  .turn-hint {
+    position:absolute; top: 40px; right: 4px;
+    font-family: var(--sans); font-size: 10.5px; color: var(--faint);
+    white-space: nowrap; letter-spacing: .02em;
+  }
+
+  /* ─────────────────────────── Modal ──────────────────────────────── */
+  .backdrop {
+    position: absolute; inset: 0;
+    background: rgba(5, 6, 7, 0.62);
+    backdrop-filter: blur(3px);
+    z-index: 10;
+    animation: fade 200ms ease both;
+  }
+  @keyframes fade { from { opacity: 0; } }
+  @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(0.985); } }
+
+  .modal {
+    position: relative;
+    z-index: 11;
+    width: min(940px, 94vw);
+    height: min(660px, 92vh);
+    background: var(--panel-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 16px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.02) inset;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: pop 240ms cubic-bezier(0.2,0.7,0.2,1) both;
+  }
+
+  /* Header */
+  .m-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    padding: 18px 20px 15px;
+    border-bottom: 1px solid var(--border);
+  }
+  .m-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; display:flex; align-items:center; gap:9px; }
+  .m-title .badge {
+    font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--accent); background: rgba(122,162,247,0.12);
+    border: 1px solid rgba(122,162,247,0.25); border-radius: 5px; padding: 2px 6px;
+  }
+  .m-sub { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  .m-close {
+    background: none; border: 0; color: var(--faint); cursor: pointer;
+    width: 28px; height: 28px; border-radius: 7px; display:flex; align-items:center; justify-content:center;
+    transition: all 120ms ease;
+  }
+  .m-close:hover { background: var(--surface-2); color: var(--text); }
+  .m-close svg { width: 15px; height: 15px; }
+
+  /* Body: two columns */
+  .m-body { flex: 1; display: grid; grid-template-columns: 316px 1fr; min-height: 0; }
+
+  /* Left column: controls */
+  .controls {
+    padding: 16px 18px;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  .ctl-label {
+    font-size: 10.5px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--faint); margin-bottom: 9px;
+  }
+
+  /* Presets */
+  .presets { display: flex; flex-wrap: wrap; gap: 7px; }
+  .preset {
+    padding: 6px 11px; border-radius: 999px;
+    border: 1px solid var(--border-strong); background: var(--chip);
+    color: var(--dim); font-size: 12px; font-weight: 500; cursor: pointer;
+    transition: all 130ms ease;
+  }
+  .preset:hover { background: var(--chip-hover); color: var(--text); }
+  .preset.active { background: rgba(122,162,247,0.16); border-color: var(--accent-dim); color: #cdddff; }
+
+  /* Layer rows */
+  .layers { display: flex; flex-direction: column; gap: 3px; }
+  .layer-row {
+    display: flex; align-items: flex-start; gap: 11px;
+    padding: 9px 10px; border-radius: 9px; cursor: pointer;
+    border: 1px solid transparent;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .layer-row:hover { background: var(--surface); }
+  .layer-row.on { background: var(--surface); border-color: var(--border); }
+
+  .check {
+    width: 17px; height: 17px; border-radius: 5px;
+    border: 1.5px solid var(--faint); background: var(--surface-2);
+    flex-shrink: 0; margin-top: 1px;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: all 120ms ease; position: relative;
+  }
+  .layer-row:hover .check { border-color: var(--dim); }
+  .check.done { background: var(--accent); border-color: var(--accent); }
+  .check.done::after {
+    content: ''; width: 9px; height: 5px;
+    border-left: 2px solid #0b1220; border-bottom: 2px solid #0b1220;
+    transform: rotate(-45deg) translate(0.5px, -1px);
+  }
+  .layer-meta { flex: 1; min-width: 0; }
+  .layer-name { font-size: 13px; font-weight: 500; color: var(--text); display:flex; align-items:center; gap:7px; }
+  .layer-name .ico { width: 14px; height: 14px; color: var(--dim); flex-shrink:0; }
+  .layer-desc { font-size: 11.5px; color: var(--faint); margin-top: 2px; line-height: 1.4; }
+  .layer-row:not(.on) .layer-name { color: var(--dim); }
+
+  /* Segmented control for tool-activity level */
+  .seg-wrap { margin-top: 11px; overflow: hidden; }
+  .seg-wrap.hidden { display: none; }
+  .seg {
+    display: flex; background: var(--panel-bg);
+    border: 1px solid var(--border-strong); border-radius: 9px; padding: 3px;
+    gap: 3px;
+  }
+  .seg button {
+    flex: 1; padding: 6px 4px; border: 0; background: none; cursor: pointer;
+    color: var(--dim); font-family: var(--sans); font-size: 11.5px; font-weight: 500;
+    border-radius: 6px; transition: all 130ms ease;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button.active { background: var(--surface-2); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+  .seg-hint { font-size: 11px; color: var(--faint); margin-top: 8px; line-height: 1.45; padding: 0 2px; }
+  .seg-hint b { color: var(--dim); font-weight: 600; }
+
+  /* Right column: preview */
+  .preview-col { display: flex; flex-direction: column; min-width: 0; background: #0b0c0e; }
+  .preview-top {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 16px; border-bottom: 1px solid var(--border);
+  }
+  .preview-top .ptitle { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+  .preview-top .pmeta { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+
+  /* Redaction strip */
+  .redact-strip {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 16px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(224, 176, 114, 0.08);
+    color: var(--amber);
+  }
+  .redact-strip.clean { background: rgba(52, 211, 153, 0.07); color: var(--done); }
+  .redact-strip.empty { background: var(--surface); color: var(--faint); }
+  .redact-strip .rico { flex-shrink: 0; font-size: 13px; }
+  .redact-strip .deep {
+    margin-left: auto; font-size: 11px; font-weight: 500;
+    color: var(--dim); border: 1px solid var(--border-strong); background: var(--surface);
+    border-radius: 6px; padding: 4px 9px; cursor: pointer; white-space: nowrap;
+    transition: all 130ms ease;
+  }
+  .redact-strip .deep:hover { color: var(--text); border-color: var(--accent-dim); }
+
+  .preview {
+    flex: 1; overflow-y: auto; padding: 16px 18px 22px;
+    display: flex; flex-direction: column; gap: 13px;
+    scroll-behavior: smooth;
+  }
+  .preview.empty-state {
+    align-items: center; justify-content: center; color: var(--faint); font-size: 13px; text-align:center;
+  }
+
+  /* preview blocks */
+  .blk { border: 1px solid var(--border); border-radius: 11px; overflow: hidden; background: var(--surface); animation: pop 200ms ease both; }
+  .blk-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
+  }
+  .blk-head .bh-ico { width: 14px; height: 14px; flex-shrink:0; }
+  .blk-head .bh-name { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+  .blk-head .bh-tag { margin-left:auto; font-size:10.5px; color: var(--faint); font-family: var(--mono); }
+  .blk-body { padding: 11px 13px; font-size: 12.5px; line-height: 1.6; color: var(--text); }
+  .blk-body.thinking { color: var(--dim); font-style: italic; }
+
+  .role-prompt .blk-head { color: var(--accent); }
+  .role-thinking .blk-head { color: #b48ead; }
+  .role-tool .blk-head { color: #56b6c2; }
+  .role-result .blk-head { color: var(--done); }
+
+  /* tool activity inner */
+  .summary-line {
+    font-family: var(--mono); font-size: 12px; color: var(--dim);
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+  .summary-line .sdot { color: var(--faint); }
+  .tool-call { border-top: 1px solid var(--border); }
+  .tool-call:first-child { border-top: 0; }
+  .tc-line {
+    display: flex; align-items: center; gap: 8px; padding: 8px 13px;
+    font-family: var(--mono); font-size: 12px;
+  }
+  .tc-name {
+    font-weight: 600; color: #8ab4d8; background: rgba(86,182,194,0.1);
+    padding: 1px 7px; border-radius: 5px; font-size: 11px; flex-shrink: 0;
+  }
+  .tc-name.edit { color: #c3a6e0; background: rgba(180,142,173,0.12); }
+  .tc-name.bash { color: #7aa2f7; background: rgba(122,162,247,0.1); }
+  .tc-arg { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tc-result {
+    padding: 2px 13px 10px 13px; font-family: var(--mono); font-size: 11.5px;
+    color: var(--faint); line-height: 1.55; white-space: pre-wrap;
+  }
+  .tc-trunc { color: var(--accent-dim); font-style: normal; }
+  .kept-note {
+    display:inline-block; margin-left: 8px; font-size: 10px; font-family: var(--sans);
+    color: var(--amber-dim); border: 1px solid rgba(168,131,78,0.4); border-radius: 4px; padding: 0 5px;
+  }
+
+  /* diff */
+  .diff { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); margin: 4px 13px 12px; }
+  .diff-file { padding: 5px 11px; background: var(--surface-2); color: var(--dim); border-bottom: 1px solid var(--border); font-size: 11px; }
+  .diff-line { padding: 0 11px; white-space: pre-wrap; }
+  .diff-line.add { background: var(--add-bg); color: #7ee787; }
+  .diff-line.del { background: var(--del-bg); color: #ffa198; }
+  .diff-line.ctx { color: var(--faint); }
+  .diff-line .gutter { display:inline-block; width: 14px; color: rgba(255,255,255,0.25); user-select:none; }
+
+  /* masked + flagged inline styles */
+  .masked {
+    font-family: var(--mono);
+    background: rgba(224, 176, 114, 0.16);
+    color: var(--amber);
+    border: 1px solid rgba(224,176,114,0.35);
+    border-radius: 4px; padding: 0 4px; font-size: 0.94em;
+    cursor: help;
+  }
+  .flagged {
+    font-family: var(--mono);
+    text-decoration: underline dashed rgba(248,81,73,0.8);
+    text-underline-offset: 3px;
+    color: #ffb3ad; cursor: help;
+  }
+
+  /* Footer */
+  .m-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 13px 18px; border-top: 1px solid var(--border); background: var(--panel-bg);
+  }
+  .foot-left { font-size: 11.5px; color: var(--faint); display:flex; align-items:center; gap: 8px; }
+  .foot-left kbd {
+    font-family: var(--mono); font-size: 10.5px; background: var(--surface-2);
+    border: 1px solid var(--border-strong); border-radius: 5px; padding: 1px 6px; color: var(--dim);
+  }
+  .foot-right { display: flex; align-items: center; gap: 9px; position: relative; }
+
+  .btn-ghost {
+    padding: 8px 14px; border-radius: 9px; border: 1px solid var(--border-strong);
+    background: transparent; color: var(--dim); font-size: 12.5px; font-weight: 500; cursor: pointer;
+    transition: all 130ms ease;
+  }
+  .btn-ghost:hover { color: var(--text); background: var(--surface); }
+
+  /* split button */
+  .split-btn { display: flex; align-items: stretch; border-radius: 9px; overflow: hidden; box-shadow: 0 2px 10px rgba(122,162,247,0.25); }
+  .split-btn .main {
+    padding: 8px 15px; background: var(--accent); color: #0a1020; border: 0; cursor: pointer;
+    font-size: 12.5px; font-weight: 600; display:flex; align-items:center; gap:8px;
+    transition: filter 130ms ease;
+  }
+  .split-btn .caret {
+    padding: 8px 10px; background: var(--accent); color: #0a1020; border: 0; cursor: pointer;
+    border-left: 1px solid rgba(10,16,32,0.22); display:flex; align-items:center;
+    transition: filter 130ms ease;
+  }
+  .split-btn .main:hover, .split-btn .caret:hover { filter: brightness(1.08); }
+  .split-btn svg { width: 14px; height: 14px; }
+
+  .menu {
+    position: absolute; bottom: calc(100% + 8px); right: 0;
+    width: 220px; background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 11px; padding: 5px; box-shadow: 0 18px 40px rgba(0,0,0,0.55);
+    z-index: 20; animation: pop 160ms ease both;
+  }
+  .menu.hidden { display: none; }
+  .menu-item {
+    display: flex; align-items: flex-start; gap: 11px; width: 100%;
+    padding: 9px 10px; border-radius: 8px; background: none; border: 0; cursor: pointer;
+    text-align: left; color: var(--text); transition: background 110ms ease;
+  }
+  .menu-item:hover { background: var(--surface-2); }
+  .menu-item .mi-ico { width: 15px; height: 15px; color: var(--accent); margin-top: 1px; flex-shrink:0; }
+  .menu-item .mi-title { font-size: 12.5px; font-weight: 500; }
+  .menu-item .mi-desc { font-size: 11px; color: var(--faint); margin-top: 1px; }
+  .menu-item .mi-badge { margin-left:auto; font-size: 9.5px; color: var(--faint); border:1px solid var(--border-strong); border-radius:4px; padding: 1px 5px; align-self:center; }
+
+  /* toast */
+  .toast {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--surface); border: 1px solid var(--border-strong);
+    color: var(--text); padding: 10px 16px; border-radius: 10px; font-size: 12.5px;
+    box-shadow: 0 14px 34px rgba(0,0,0,0.5); opacity: 0; pointer-events: none;
+    transition: all 240ms cubic-bezier(0.2,0.7,0.2,1); z-index: 40; display:flex; align-items:center; gap:9px;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast .tk { color: var(--done); }
+
+  .preview::-webkit-scrollbar, .controls::-webkit-scrollbar { width: 8px; }
+  .preview::-webkit-scrollbar-thumb, .controls::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+  .preview::-webkit-scrollbar-track, .controls::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <!-- ── Faint mock terminal behind the modal ─────────────────────── -->
+  <div class="terminal" aria-hidden="true">
+    <div class="tbar">
+      <i class="dot-r"></i><i class="dot-y"></i><i class="dot-g"></i>
+      <span>session-manager · claude — split-view focus fix</span>
+    </div>
+    <div><span class="term-u">❯</span> <span class="term-a">the split view focus isn't following the highlighted pane — clicking a pane should move focus there. can you fix it?</span></div>
+    <div>&nbsp;</div>
+    <div><span class="term-dim">✻ Thinking… the focus state lives in the store but split view reads a stale ref on click.</span></div>
+    <div>&nbsp;</div>
+    <div><span class="term-t">⏺ Read</span><span class="term-dim">(src/renderer/store/index.ts)</span></div>
+    <div><span class="term-t">⏺ Read</span><span class="term-dim">(src/renderer/components/SplitView.tsx)</span></div>
+    <div><span class="term-t">⏺ Read</span><span class="term-dim">(src/renderer/hooks/useSession.ts)</span></div>
+    <div><span class="term-t">⏺ Read</span><span class="term-dim">(src/renderer/lib/paneUtils.ts)</span></div>
+    <div><span class="term-t">⏺ Update</span><span class="term-dim">(src/renderer/store/index.ts)</span> <span class="term-g">+1 -1</span></div>
+    <div><span class="term-t">⏺ Bash</span><span class="term-dim">(npm run typecheck)</span></div>
+    <div><span class="term-dim">&nbsp;&nbsp;⎿  tsc --noEmit … 0 errors</span></div>
+    <div>&nbsp;</div>
+    <div><span class="term-a">⏺ Fixed. Focus now derives from the highlighted pane rather than a</span></div>
+    <div><span class="term-a">&nbsp;&nbsp;separate ref, so clicking a pane moves focus with the highlight.</span></div>
+    <div>&nbsp;</div>
+    <div><span class="term-u">❯</span> <span class="cursor-blk"></span></div>
+
+    <div class="turn-affordance">
+      <div class="turn-hint">↑ one turn · prompt + response</div>
+      <button class="copy-turn-btn" onclick="openModal()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy turn
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Modal ─────────────────────────────────────────────────────── -->
+  <div class="backdrop" id="backdrop">
+    <div class="modal" role="dialog" aria-label="Copy turn" onclick="event.stopPropagation()">
+
+      <div class="m-head">
+        <div>
+          <div class="m-title">Copy turn <span class="badge">handoff</span></div>
+          <div class="m-sub">Choose what to include, then copy — nothing leaves until you confirm.</div>
+        </div>
+        <button class="m-close" onclick="closeModal()" title="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="m-body">
+        <!-- Controls -->
+        <div class="controls">
+          <div>
+            <div class="ctl-label">Presets</div>
+            <div class="presets" id="presets"></div>
+          </div>
+
+          <div>
+            <div class="ctl-label">Layers</div>
+            <div class="layers" id="layers"></div>
+          </div>
+        </div>
+
+        <!-- Preview -->
+        <div class="preview-col">
+          <div class="preview-top">
+            <span class="ptitle">Live preview</span>
+            <span class="pmeta" id="pmeta">markdown · clipboard</span>
+          </div>
+          <div class="redact-strip" id="redactStrip">
+            <span class="rico">⚠</span>
+            <span id="redactText">2 values redacted · 1 possible secret flagged</span>
+            <button class="deep" onclick="deepScan(this)">✦ Deep scan (optional)</button>
+          </div>
+          <div class="preview" id="preview"></div>
+        </div>
+      </div>
+
+      <div class="m-foot">
+        <div class="foot-left">
+          <span id="footSummary">Prompt · Tool activity · Result</span>
+        </div>
+        <div class="foot-right">
+          <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+          <div class="split-btn">
+            <button class="main" onclick="doCopy('clipboard')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+            <button class="caret" onclick="toggleMenu(event)" title="Copy options">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+          </div>
+          <div class="menu hidden" id="menu">
+            <button class="menu-item" onclick="doCopy('clipboard')">
+              <svg class="mi-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <div><div class="mi-title">Clipboard</div><div class="mi-desc">Rich markdown — paste into Slack</div></div>
+              <span class="mi-badge">⌘↵</span>
+            </button>
+            <button class="menu-item" onclick="doCopy('link')">
+              <svg class="mi-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              <div><div class="mi-title">Copy link</div><div class="mi-desc">Publishes a shareable artifact</div></div>
+            </button>
+            <button class="menu-item" onclick="doCopy('embed')">
+              <svg class="mi-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg>
+              <div><div class="mi-title">Embed in note</div><div class="mi-desc">Insert as a turn block in a memory note</div></div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast"><span class="tk">✓</span><span id="toastText"></span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ────────────────────────────────────────────────────────────────────
+   Sample turn data. Each layer declares any redactions it contributes,
+   so the warning strip reflects exactly what's in the current selection.
+   ──────────────────────────────────────────────────────────────────── */
+
+const state = {
+  prompt: true,
+  thinking: false,
+  tool: true,
+  toolLevel: 'commands',   // summary | commands | full
+  result: true,
+};
+
+const LAYERS = [
+  { key: 'prompt',   name: 'Prompt',        icon: iconChat(),  desc: 'What you asked' },
+  { key: 'thinking', name: 'Thinking',      icon: iconBrain(), desc: 'Reasoning · usually stripped for external shares' },
+  { key: 'tool',     name: 'Tool activity', icon: iconWrench(),desc: 'What the agent actually did', level: true },
+  { key: 'result',   name: 'Result / diff', icon: iconCheck(), desc: 'Final answer + code changes' },
+];
+
+const PRESETS = [
+  { name: 'Result only',   state: { prompt:false, thinking:false, tool:false, toolLevel:'commands', result:true } },
+  { name: 'Full turn',     state: { prompt:true,  thinking:true,  tool:true,  toolLevel:'full',      result:true } },
+  { name: 'Prompt + diff', state: { prompt:true,  thinking:false, tool:false, toolLevel:'commands', result:true } },
+];
+
+const SEG_HINTS = {
+  summary:  'One-line rollup — no commands or output.',
+  commands: 'Tool calls with results truncated. <b>File edits keep their full diff</b> — only command output is trimmed.',
+  full:     'Commands plus complete output. Most verbose — good for PR evidence.',
+};
+
+// ── Escape helper ──
+function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// mask + flag spans (declared once, reused so counts stay in sync)
+const MASK_DAPI  = `<span class="masked" title="Known secret masked — matched a value in ~/.tc-cli/credentials (DATABRICKS_TOKEN)">dapi••••1a2b</span>`;
+const MASK_SLACK = `<span class="masked" title="Known secret masked — matched a value in project .env (SLACK_BOT_TOKEN)">xoxb-••••••••4Qf2</span>`;
+const FLAG_ENTROPY = `<span class="flagged" title="⚠ Possible secret — high-entropy string (len 32, entropy 4.6). Not auto-masked; review before sharing.">a7F3kZ9pQ2wL8xR4mB6nT1vC5yH0jD7s</span>`;
+
+/* ── Preview block builders. Each returns { html, redacted, flagged } ── */
+
+function blockPrompt(){
+  return {
+    redacted: 0, flagged: 0,
+    html: blk('role-prompt', iconChat(), 'Prompt', '', `
+      the split view focus isn't following the highlighted pane — clicking a
+      pane should move focus there. can you fix it?`)
+  };
+}
+
+function blockThinking(){
+  return {
+    redacted: 0, flagged: 0,
+    html: blk('role-thinking', iconBrain(), 'Thinking', 'reasoning', `
+      The focus state lives in the store, but <code>SplitView</code> reads a stale
+      <code>focusedPaneRef</code> on click, so focus and highlight drift apart.
+      Cleaner to derive focus from the highlighted pane id in the store's
+      <code>setHighlightedPane</code> action rather than tracking two sources of truth.`, true)
+  };
+}
+
+function blockTool(){
+  const level = state.toolLevel;
+  let inner = '';
+  let redacted = 0, flagged = 0;
+
+  if (level === 'summary') {
+    inner = `<div class="blk-body"><div class="summary-line">
+      Read 4 files <span class="sdot">·</span> ran 1 command <span class="sdot">·</span> edited <code>store.ts</code>
+    </div></div>`;
+  } else {
+    // Commands + Full share the calls; Full adds untruncated Bash output.
+    const readCall = toolCall('Read', 'read', 'store.ts, SplitView.tsx, useSession.ts, paneUtils.ts', '');
+    // Edit keeps its diff at every level (except summary).
+    const editCall = toolCall('Edit', 'edit',
+      'src/renderer/store/index.ts <span class="kept-note">diff kept</span>', '') + editDiff();
+
+    // Bash with a masked known value + a flagged high-entropy arg.
+    redacted += 1; flagged += 1;   // dapi token (masked) + entropy arg (flagged)
+    const bashArg = `DATABRICKS_TOKEN=${MASK_DAPI} npm run test:int -- --seed ${FLAG_ENTROPY}`;
+    let bashResult;
+    if (level === 'commands') {
+      bashResult = `<div class="tc-result">PASS  split-view.focus.test.ts (6 tests)\n<span class="tc-trunc">… 34 more lines truncated · full output in “Full” ▸</span></div>`;
+    } else {
+      bashResult = `<div class="tc-result">PASS  split-view.focus.test.ts (6 tests)\n  ✓ clicking a pane moves focus to it (12 ms)\n  ✓ focus follows highlight across splits (8 ms)\nTest Suites: 1 passed  ·  Tests: 6 passed\nRun on runner ${FLAG_ENTROPY}\nTests completed in 1.84s</div>`;
+      flagged += 1; // entropy string also surfaces in full output
+    }
+    const bashCall = toolCall('Bash', 'bash', bashArg, bashResult, true);
+
+    inner = `<div>${readCall}${editCall}${bashCall}</div>`;
+  }
+
+  const tag = level === 'summary' ? '1 line' : (level === 'full' ? '3 calls · full' : '3 calls · truncated');
+  return {
+    redacted, flagged,
+    html: `<div class="blk role-tool">
+      <div class="blk-head">${iconWrench()}<span class="bh-name">Tool activity</span><span class="bh-tag">${tag}</span></div>
+      ${inner}
+    </div>`
+  };
+}
+
+function blockResult(){
+  // A masked known value surfaces in the result too (config line in the diff).
+  return {
+    redacted: 1, flagged: 0,
+    html: `<div class="blk role-result">
+      <div class="blk-head">${iconCheck()}<span class="bh-name">Result</span><span class="bh-tag">+2 -1</span></div>
+      <div class="blk-body">
+        Fixed. Focus now derives from the highlighted pane instead of a separate ref, so
+        clicking a pane moves focus with the highlight — and the focused pane is remembered
+        across splits. Type-check and the focus tests pass.
+      </div>
+      <div class="diff">
+        <div class="diff-file">src/renderer/store/index.ts</div>
+        <div class="diff-line ctx"><span class="gutter"> </span>setHighlightedPane: (id) => {</div>
+        <div class="diff-line del"><span class="gutter">-</span>  set({ highlightedPane: id })</div>
+        <div class="diff-line add"><span class="gutter">+</span>  set({ highlightedPane: id, focusedPane: id })</div>
+        <div class="diff-line add"><span class="gutter">+</span>  persistFocus(id, cfg.token ?? '${MASK_SLACK}')</div>
+        <div class="diff-line ctx"><span class="gutter"> </span>},</div>
+      </div>
+    </div>`
+  };
+}
+
+/* ── small render helpers ── */
+function blk(role, icon, name, tag, body, isThinking){
+  return `<div class="blk ${role}">
+    <div class="blk-head">${icon}<span class="bh-name">${name}</span>${tag?`<span class="bh-tag">${tag}</span>`:''}</div>
+    <div class="blk-body ${isThinking?'thinking':''}">${body}</div>
+  </div>`;
+}
+function toolCall(name, cls, arg, result, rawArg){
+  return `<div class="tool-call">
+    <div class="tc-line"><span class="tc-name ${cls}">${name}</span><span class="tc-arg">${rawArg?arg:arg}</span></div>
+    ${result||''}
+  </div>`;
+}
+function editDiff(){
+  return `<div class="diff">
+    <div class="diff-file">src/renderer/store/index.ts</div>
+    <div class="diff-line del"><span class="gutter">-</span>  set({ highlightedPane: id })</div>
+    <div class="diff-line add"><span class="gutter">+</span>  set({ highlightedPane: id, focusedPane: id })</div>
+  </div>`;
+}
+
+/* ────────────────────────────── Render ────────────────────────────── */
+
+function render(){
+  renderPresets();
+  renderLayers();
+  renderPreview();
+  renderFooter();
+}
+
+function renderPresets(){
+  const el = document.getElementById('presets');
+  el.innerHTML = PRESETS.map((p,i) => {
+    const active = matchesPreset(p.state);
+    return `<button class="preset ${active?'active':''}" onclick="applyPreset(${i})">${p.name}</button>`;
+  }).join('');
+}
+
+function matchesPreset(s){
+  // ignore toolLevel when tool is off
+  if (state.prompt!==s.prompt || state.thinking!==s.thinking || state.tool!==s.tool || state.result!==s.result) return false;
+  if (state.tool && state.toolLevel!==s.toolLevel) return false;
+  return true;
+}
+
+function renderLayers(){
+  const el = document.getElementById('layers');
+  el.innerHTML = LAYERS.map(l => {
+    const on = state[l.key];
+    let seg = '';
+    if (l.level) {
+      const levels = ['summary','commands','full'];
+      const names = { summary:'Summary', commands:'Commands', full:'Full' };
+      seg = `<div class="seg-wrap ${on?'':'hidden'}">
+        <div class="seg">
+          ${levels.map(lv => `<button class="${state.toolLevel===lv?'active':''}" onclick="event.stopPropagation(); setLevel('${lv}')">${names[lv]}</button>`).join('')}
+        </div>
+        <div class="seg-hint">${SEG_HINTS[state.toolLevel]}</div>
+      </div>`;
+    }
+    return `<div class="layer-row ${on?'on':''}" onclick="toggle('${l.key}')">
+      <span class="check ${on?'done':''}"></span>
+      <div class="layer-meta">
+        <div class="layer-name">${l.name}</div>
+        <div class="layer-desc">${l.desc}</div>
+        ${seg}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderPreview(){
+  const el = document.getElementById('preview');
+  const blocks = [];
+  let redacted = 0, flagged = 0;
+
+  if (state.prompt)   { const b = blockPrompt();   blocks.push(b.html); redacted+=b.redacted; flagged+=b.flagged; }
+  if (state.thinking) { const b = blockThinking(); blocks.push(b.html); redacted+=b.redacted; flagged+=b.flagged; }
+  if (state.tool)     { const b = blockTool();     blocks.push(b.html); redacted+=b.redacted; flagged+=b.flagged; }
+  if (state.result)   { const b = blockResult();   blocks.push(b.html); redacted+=b.redacted; flagged+=b.flagged; }
+
+  if (blocks.length === 0){
+    el.classList.add('empty-state');
+    el.innerHTML = `<div>Nothing selected.<br><span style="color:var(--faint)">Pick at least one layer to build a turn block.</span></div>`;
+  } else {
+    el.classList.remove('empty-state');
+    el.innerHTML = blocks.join('');
+  }
+
+  updateRedactStrip(redacted, flagged, blocks.length);
+}
+
+function updateRedactStrip(redacted, flagged, n){
+  const strip = document.getElementById('redactStrip');
+  const text = document.getElementById('redactText');
+  const ico = strip.querySelector('.rico');
+  strip.classList.remove('clean','empty');
+
+  if (n === 0){
+    strip.classList.add('empty');
+    ico.textContent = '○';
+    text.textContent = 'Nothing selected';
+    return;
+  }
+  if (redacted === 0 && flagged === 0){
+    strip.classList.add('clean');
+    ico.textContent = '✓';
+    text.textContent = 'Scanned — no known secrets in this selection';
+    return;
+  }
+  ico.textContent = '⚠';
+  const parts = [];
+  if (redacted) parts.push(`${redacted} value${redacted>1?'s':''} redacted`);
+  if (flagged)  parts.push(`${flagged} possible secret${flagged>1?'s':''} flagged`);
+  text.textContent = parts.join(' · ');
+}
+
+function renderFooter(){
+  const on = LAYERS.filter(l => state[l.key]).map(l => {
+    if (l.key==='tool') return `Tool activity (${state.toolLevel})`;
+    return l.name.replace(' / diff','');
+  });
+  document.getElementById('footSummary').textContent = on.length ? on.join(' · ') : 'Nothing selected';
+}
+
+/* ─────────────────────────── Interactions ─────────────────────────── */
+
+function toggle(key){
+  state[key] = !state[key];
+  render();
+}
+function setLevel(lv){
+  state.toolLevel = lv;
+  if (!state.tool) state.tool = true;
+  render();
+}
+function applyPreset(i){
+  Object.assign(state, JSON.parse(JSON.stringify(PRESETS[i].state)));
+  render();
+}
+
+function toggleMenu(e){
+  e.stopPropagation();
+  document.getElementById('menu').classList.toggle('hidden');
+}
+function hideMenu(){ document.getElementById('menu').classList.add('hidden'); }
+
+function doCopy(dest){
+  hideMenu();
+  const map = {
+    clipboard: { pm:'markdown · clipboard', msg:'Turn copied to clipboard as markdown' },
+    link:      { pm:'artifact · link',      msg:'Shareable link copied — artifact published' },
+    embed:     { pm:'block · memory note',  msg:'Turn block inserted into memory note' },
+  };
+  const d = map[dest];
+  document.getElementById('pmeta').textContent = d.pm;
+  showToast(d.msg);
+}
+
+function deepScan(btn){
+  btn.disabled = true;
+  btn.textContent = '✦ Scanning…';
+  setTimeout(() => {
+    btn.textContent = '✦ Deep scan · 1 more found';
+    btn.style.color = 'var(--amber)';
+    btn.style.borderColor = 'rgba(224,176,114,0.5)';
+    showToast('Deep scan flagged 1 internal hostname for review');
+  }, 900);
+}
+
+let toastTimer;
+function showToast(msg){
+  const t = document.getElementById('toast');
+  document.getElementById('toastText').textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+function openModal(){ document.getElementById('backdrop').style.display = 'block'; }
+function closeModal(){ /* mockup: keep modal open, just flash */ hideMenu(); }
+
+document.getElementById('backdrop').addEventListener('click', hideMenu);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') hideMenu();
+  if ((e.metaKey||e.ctrlKey) && e.key === 'Enter') doCopy('clipboard');
+});
+
+/* ── icons ── */
+function iconChat(){ return svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'); }
+function iconBrain(){ return svg('<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>'); }
+function iconWrench(){ return svg('<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>'); }
+function iconCheck(){ return svg('<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="m9 11 3 3L22 4"/>'); }
+function svg(inner){ return `<svg class="bh-ico ico mi-ico" style="width:14px;height:14px" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`; }
+
+render();
+</script>
+</body>
+</html>

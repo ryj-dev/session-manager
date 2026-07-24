@@ -15,6 +15,7 @@ export interface HotkeyMap {
   toggleMemory: string
   toggleNotesProject: string
   toggleNotesGlobal: string
+  shareTurn: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -29,6 +30,22 @@ export const defaultHotkeys: HotkeyMap = {
   toggleMemory: 'm',
   toggleNotesProject: 'n',
   toggleNotesGlobal: 'shift+n',
+  shareTurn: 'shift+s',
+}
+
+/** Default layer selection + tool-activity level for the Share Turn modal. */
+export interface TurnShareDefaults {
+  prompt: boolean
+  tool: boolean
+  result: boolean
+  toolLevel: 'summary' | 'commands' | 'full'
+}
+
+export const defaultTurnShareDefaults: TurnShareDefaults = {
+  prompt: true,
+  tool: true,
+  result: true,
+  toolLevel: 'commands',
 }
 
 export type MessagePopupMode = 'manual' | 'timed' | 'disabled'
@@ -72,6 +89,9 @@ export interface AppSettings {
    *  the renderer owns the PipelineTask shape. */
   pipelineTasks?: unknown[]
   pipelineDefaultAutonomy?: 'manual' | 'gated' | 'auto'
+  /** Share Turn export folder. Blank/null = `<projectPath>/turns/`. */
+  turnExportFolder: string | null
+  turnShareDefaults: TurnShareDefaults
 }
 
 const defaults: AppSettings = {
@@ -97,6 +117,8 @@ const defaults: AppSettings = {
   terminalPairingMode: 'off',
   pipelineTasks: [],
   pipelineDefaultAutonomy: 'gated',
+  turnExportFolder: null,
+  turnShareDefaults: { ...defaultTurnShareDefaults },
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {
@@ -117,7 +139,12 @@ export function loadSettings(): AppSettings {
   try {
     const data = readFileSync(getSettingsPath(), 'utf-8')
     const parsed = JSON.parse(data)
-    return { ...defaults, ...parsed, hotkeys: { ...defaults.hotkeys, ...parsed.hotkeys } }
+    return {
+      ...defaults,
+      ...parsed,
+      hotkeys: { ...defaults.hotkeys, ...parsed.hotkeys },
+      turnShareDefaults: { ...defaults.turnShareDefaults, ...parsed.turnShareDefaults },
+    }
   } catch {
     return { ...defaults }
   }

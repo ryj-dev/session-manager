@@ -17,7 +17,8 @@ import {
   isDefaultTitle
 } from './pty-manager'
 import { readDirectory, readFile, getHomeDir, isDirectory, installSkillCommand, uninstallSkillCommand, cleanupAllSkillCommands } from './fs-service'
-import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators, pausePipelineTask, resumePipelineTask, stashClipboardImage } from './hook-server'
+import { onPtyData as hookOnPtyData, setAttachListeners, cleanupSession as hookCleanupSession, deliverSessionMessage, removeHooks, reinstallHooks, startPipelineTaskFlow, cleanupTaskWorktrees, finalizeTaskCompletion, restartPipelineOrchestrator, autoResumeInflightOrchestrators, pausePipelineTask, resumePipelineTask, stashClipboardImage, getTranscriptPath } from './hook-server'
+import { parseTranscriptTurns, deriveTranscriptPath, type ShareableTurn } from './turn-parser'
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
@@ -222,6 +223,50 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   ipcMain.handle('settings:save', (_event, settings: AppSettings) => {
     saveSettings(settings)
   })
+
+  // Share Turn — reconstruct a session's turns from its transcript JSONL.
+  ipcMain.handle('turns:list', (_event, sessionId: string): { turns: ShareableTurn[]; error?: string } => {
+    const session = getSession(sessionId)
+    if (!session) return { turns: [], error: 'Session not found' }
+    // Hook-captured path is authoritative (survives /resume); fall back to the
+    // path derived from the session's cwd + claude session id.
+    const candidates: string[] = []
+    const hookPath = getTranscriptPath(sessionId)
+    if (hookPath) candidates.push(hookPath)
+    if (session.claudeSessionId) {
+      candidates.push(deriveTranscriptPath(session.projectPath, session.claudeSessionId))
+    }
+    for (const path of candidates) {
+      try {
+        return { turns: parseTranscriptTurns(readFileSync(path, 'utf-8')) }
+      } catch {
+        continue
+      }
+    }
+    return { turns: [], error: 'No transcript found for this session yet — send a prompt first.' }
+  })
+
+  // Share Turn — write composed markdown to the export folder.
+  ipcMain.handle(
+    'turns:save',
+    (_event, payload: { sessionId: string; filename: string; markdown: string }): { path?: string; error?: string } => {
+      const session = getSession(payload.sessionId)
+      if (!session) return { error: 'Session not found' }
+      const configured = loadSettings().turnExportFolder
+      const dir = configured && configured.trim() ? configured.trim() : join(session.projectPath, 'turns')
+      // Keep the filename a plain basename — no path traversal, no separators.
+      const base = payload.filename.replace(/[/\\:]/g, '-').replace(/^\.+/, '').trim() || 'turn'
+      const filename = base.endsWith('.md') ? base : `${base}.md`
+      try {
+        mkdirSync(dir, { recursive: true })
+        const path = join(dir, filename)
+        writeFileSync(path, payload.markdown, 'utf-8')
+        return { path }
+      } catch (err) {
+        return { error: `Failed to save: ${err instanceof Error ? err.message : String(err)}` }
+      }
+    }
+  )
 
   // File system operations
   ipcMain.handle('fs:readdir', (_event, path: string) => {

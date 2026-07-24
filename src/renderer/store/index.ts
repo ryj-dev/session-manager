@@ -34,6 +34,7 @@ export interface HotkeyMap {
   togglePipeline: string
   toggleScheduled: string
   toggleCanvas: string
+  shareTurn: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -54,6 +55,24 @@ export const defaultHotkeys: HotkeyMap = {
   togglePipeline: 'l',
   toggleScheduled: 'j',
   toggleCanvas: 'k',
+  shareTurn: 'shift+s',
+}
+
+export type TurnToolLevel = 'summary' | 'commands' | 'full'
+
+/** Default layer selection + tool-activity level for the Share Turn modal. */
+export interface TurnShareDefaults {
+  prompt: boolean
+  tool: boolean
+  result: boolean
+  toolLevel: TurnToolLevel
+}
+
+export const defaultTurnShareDefaults: TurnShareDefaults = {
+  prompt: true,
+  tool: true,
+  result: true,
+  toolLevel: 'commands',
 }
 
 export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | null
@@ -431,6 +450,14 @@ export interface AppState {
   /** How spawned Claude sessions are paired with a shell. Mutually exclusive. */
   terminalPairingMode: 'off' | 'split' | 'overlay'
   setTerminalPairingMode: (value: 'off' | 'split' | 'overlay') => void
+  /** Share Turn export folder. Blank/null = `<projectPath>/turns/`. */
+  turnExportFolder: string | null
+  setTurnExportFolder: (dir: string | null) => void
+  turnShareDefaults: TurnShareDefaults
+  setTurnShareDefaults: (defaults: TurnShareDefaults) => void
+  /** Session id the Share Turn modal is open for, or null when closed. */
+  shareTurnSessionId: string | null
+  setShareTurnSessionId: (id: string | null) => void
 
   // Hover-overlay attached-terminal pin state (per-parent-Claude-session ids).
   // When pinned, the overlay sticks open and lays side-by-side instead of overlaying.
@@ -752,6 +779,12 @@ export const useStore = create<AppState>((set, get) => ({
   setSpawnIntoCurrentSplit: (value) => set({ spawnIntoCurrentSplit: value }),
   terminalPairingMode: 'off',
   setTerminalPairingMode: (value) => set({ terminalPairingMode: value }),
+  turnExportFolder: null,
+  setTurnExportFolder: (dir) => set({ turnExportFolder: dir }),
+  turnShareDefaults: { ...defaultTurnShareDefaults },
+  setTurnShareDefaults: (defaults) => set({ turnShareDefaults: defaults }),
+  shareTurnSessionId: null,
+  setShareTurnSessionId: (id) => set({ shareTurnSessionId: id }),
 
   pinnedAttachedTerminalIds: [],
   togglePinnedAttachedTerminal: (parentId) =>
