@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store'
+import { useHotkeyDisplay } from '../lib/hotkeys'
 
 interface SettingsProps {
   visible: boolean
@@ -41,12 +42,18 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
   const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
+  const openBranchInSplit = useStore((s) => s.openBranchInSplit)
+  const setOpenBranchInSplit = useStore((s) => s.setOpenBranchInSplit)
   const terminalPairingMode = useStore((s) => s.terminalPairingMode)
   const setTerminalPairingMode = useStore((s) => s.setTerminalPairingMode)
   const turnExportFolder = useStore((s) => s.turnExportFolder)
   const setTurnExportFolder = useStore((s) => s.setTurnExportFolder)
   const turnShareDefaults = useStore((s) => s.turnShareDefaults)
   const setTurnShareDefaults = useStore((s) => s.setTurnShareDefaults)
+  const shareTurnKey = useHotkeyDisplay('shareTurn')
+  const branchSessionKey = useHotkeyDisplay('branchSession')
+  const notesProjectKey = useHotkeyDisplay('toggleNotesProject')
+  const pipelineKey = useHotkeyDisplay('togglePipeline')
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
   const [turnFolderInput, setTurnFolderInput] = useState(turnExportFolder || '')
   const [claudeMdInstalled, setClaudeMdInstalled] = useState<boolean | null>(null)
@@ -271,7 +278,7 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
                 <option value="all">All time</option>
               </select>
               <p className="text-[10px] text-zinc-600 mt-1">
-                Older completed items are archived (kept, not deleted) and hidden from the Notes (⌘N) and Pipeline (⌘L) screens. Open items always show.
+                Older completed items are archived (kept, not deleted) and hidden from the Notes ({notesProjectKey}) and Pipeline ({pipelineKey}) screens. Open items always show.
               </p>
             </div>
 
@@ -291,13 +298,13 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
                 <option value="auto">Autonomous — run the whole pipeline</option>
               </select>
               <p className="text-[10px] text-zinc-600 mt-1">
-                The orchestrator&apos;s default decision-making freedom. Per-task autonomy can still be changed inside the pipeline (⌘L) when you open a task.
+                The orchestrator&apos;s default decision-making freedom. Per-task autonomy can still be changed inside the pipeline ({pipelineKey}) when you open a task.
               </p>
             </div>
 
             {/* Share turn */}
             <div className="mb-4">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Share turn (⌘⇧S)</div>
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Share turn ({shareTurnKey})</div>
               <label className="text-xs text-zinc-400 block mb-1.5">Layers included by default</label>
               <div className="flex flex-col gap-1.5 mb-3">
                 {([
@@ -408,6 +415,23 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 While in a split view, new Claude/terminal sessions become extra panes instead of standalone graph nodes.
+              </p>
+            </div>
+
+            {/* Session branching */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Session branching ({branchSessionKey})</div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={openBranchInSplit}
+                  onChange={(e) => setOpenBranchInSplit(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Open branch in split view</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                Branching forks the current session; the branch opens beside the original (extending its split group if it has one). When off, the branch sits on the graph as a background node.
               </p>
             </div>
 

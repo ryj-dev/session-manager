@@ -17,7 +17,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   togglePipeline: 'Toggle agentic pipeline',
   toggleScheduled: 'Toggle scheduled tasks',
   toggleCanvas: 'Toggle canvas (focused session)',
-  shareTurn: 'Share turn (focused session)'
+  shareTurn: 'Share turn (focused session)',
+  branchSession: 'Branch session (focused session)'
 }
 
 /** All recognized modifier tokens in canonical order */

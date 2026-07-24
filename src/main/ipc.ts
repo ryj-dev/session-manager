@@ -162,6 +162,27 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     }
   )
 
+  // Branch (fork) a claude session: --fork-session copies the transcript into a
+  // NEW session id and starts from the copy, leaving the original untouched —
+  // both sessions stay alive.
+  ipcMain.handle(
+    'pty:fork',
+    (event, { claudeSessionId, projectPath, autoMode }: { claudeSessionId: string; projectPath: string; autoMode?: boolean }) => {
+      const id = randomUUID()
+      const forkArgs = ['--resume', claudeSessionId, '--fork-session']
+      const finalArgs = autoMode ? ['--permission-mode', 'auto', ...forkArgs] : forkArgs
+      const session = spawnSession(id, projectPath, 'claude', finalArgs)
+      // Unlike pty:resume, do NOT keep the original's claude session ID (spawnSession
+      // copies it from the --resume arg): --fork-session generates a NEW id we don't
+      // know upfront. Keeping the original's would collide with its node in the
+      // renderer and break resume-after-restart. Leave it null — the SessionStart
+      // hook delivers the real id, the same way fresh spawns reconcile theirs.
+      session.claudeSessionId = null
+      attachSessionListeners(id, session)
+      return { id, projectPath, claudeSessionId: null }
+    }
+  )
+
   // List active PTY sessions (for renderer reconnection after crash/reload)
   ipcMain.handle('pty:listActive', () => {
     return getActiveSessions()

@@ -35,6 +35,7 @@ export interface HotkeyMap {
   toggleScheduled: string
   toggleCanvas: string
   shareTurn: string
+  branchSession: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -56,6 +57,7 @@ export const defaultHotkeys: HotkeyMap = {
   toggleScheduled: 'j',
   toggleCanvas: 'k',
   shareTurn: 'shift+s',
+  branchSession: 'b',
 }
 
 export type TurnToolLevel = 'summary' | 'commands' | 'full'
@@ -458,6 +460,9 @@ export interface AppState {
   /** Session id the Share Turn modal is open for, or null when closed. */
   shareTurnSessionId: string | null
   setShareTurnSessionId: (id: string | null) => void
+  /** Cmd+B branch: open the fork beside the original in a split group. */
+  openBranchInSplit: boolean
+  setOpenBranchInSplit: (value: boolean) => void
 
   // Hover-overlay attached-terminal pin state (per-parent-Claude-session ids).
   // When pinned, the overlay sticks open and lays side-by-side instead of overlaying.
@@ -785,6 +790,8 @@ export const useStore = create<AppState>((set, get) => ({
   setTurnShareDefaults: (defaults) => set({ turnShareDefaults: defaults }),
   shareTurnSessionId: null,
   setShareTurnSessionId: (id) => set({ shareTurnSessionId: id }),
+  openBranchInSplit: true,
+  setOpenBranchInSplit: (value) => set({ openBranchInSplit: value }),
 
   pinnedAttachedTerminalIds: [],
   togglePinnedAttachedTerminal: (parentId) =>

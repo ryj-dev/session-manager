@@ -16,6 +16,7 @@ export interface HotkeyMap {
   toggleNotesProject: string
   toggleNotesGlobal: string
   shareTurn: string
+  branchSession: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -31,6 +32,7 @@ export const defaultHotkeys: HotkeyMap = {
   toggleNotesProject: 'n',
   toggleNotesGlobal: 'shift+n',
   shareTurn: 'shift+s',
+  branchSession: 'b',
 }
 
 /** Default layer selection + tool-activity level for the Share Turn modal. */
@@ -92,6 +94,8 @@ export interface AppSettings {
   /** Share Turn export folder. Blank/null = `<projectPath>/turns/`. */
   turnExportFolder: string | null
   turnShareDefaults: TurnShareDefaults
+  /** Cmd+B branch: open the fork beside the original in a split group. */
+  openBranchInSplit: boolean
 }
 
 const defaults: AppSettings = {
@@ -119,6 +123,7 @@ const defaults: AppSettings = {
   pipelineDefaultAutonomy: 'gated',
   turnExportFolder: null,
   turnShareDefaults: { ...defaultTurnShareDefaults },
+  openBranchInSplit: true,
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {

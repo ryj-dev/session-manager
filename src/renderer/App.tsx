@@ -133,6 +133,8 @@ export function App(): JSX.Element {
   const canvasAutoShowUserImages = useStore((s) => s.canvasAutoShowUserImages)
   const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
+  const openBranchInSplit = useStore((s) => s.openBranchInSplit)
+  const setOpenBranchInSplit = useStore((s) => s.setOpenBranchInSplit)
   const terminalPairingMode = useStore((s) => s.terminalPairingMode)
   const setTerminalPairingMode = useStore((s) => s.setTerminalPairingMode)
   const setAttachedTerminal = useStore((s) => s.setAttachedTerminal)
@@ -204,6 +206,7 @@ export function App(): JSX.Element {
       if (typeof settings.ambientTodoNudge === 'boolean') setAmbientTodoNudge(settings.ambientTodoNudge)
       if (typeof settings.canvasAutoShowUserImages === 'boolean') useStore.getState().setCanvasAutoShowUserImages(settings.canvasAutoShowUserImages)
       if (typeof settings.spawnIntoCurrentSplit === 'boolean') setSpawnIntoCurrentSplit(settings.spawnIntoCurrentSplit)
+      if (typeof settings.openBranchInSplit === 'boolean') setOpenBranchInSplit(settings.openBranchInSplit)
       if (settings.terminalPairingMode === 'off' || settings.terminalPairingMode === 'split' || settings.terminalPairingMode === 'overlay') {
         setTerminalPairingMode(settings.terminalPairingMode)
       }
@@ -254,8 +257,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -536,6 +539,49 @@ export function App(): JSX.Element {
     },
     [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, spawnIntoCurrentSplit, addToCurrentSplitIfActive]
   )
+
+  // Branch (fork) the focused Claude session: `claude --resume <id> --fork-session`
+  // copies the transcript into a NEW session id, so the original and the branch
+  // both stay alive. No-op on shells and sessions without a resumable conversation.
+  const branchSession = useCallback(async () => {
+    const state = useStore.getState()
+    if (state.viewMode === 'graph') return
+    const sid = state.focusedSessionId
+    if (!sid) return
+    const session = state.sessions.find((s) => s.id === sid)
+    if (!session || session.isAttached) return
+
+    const info = await window.api.getClaudeSessionInfo(sid)
+    if (!info?.isResumable || !info.claudeSessionId) return
+
+    const result = await window.api.forkSession(info.claudeSessionId, session.projectPath, autoModeForManualSessions)
+    // No claudeSessionId yet — --fork-session mints a new one that arrives via
+    // the SessionStart hook (pre-setting the original's id would dedupe the
+    // fork into the original node).
+    addSession(result.id, result.projectPath, null)
+    if (session.terminalTitle) {
+      updateSessionTitle(result.id, session.terminalTitle)
+      window.api.updateSessionTitle(result.id, session.terminalTitle)
+    }
+
+    if (!openBranchInSplit) return // fork sits on the graph as a background node
+
+    // Open the branch beside the original: extend the original's existing split
+    // group when it has one (avoid fragmenting groups), else make a 2-pane group.
+    const st = useStore.getState()
+    const group = st.splitGroups.find((g) => g.orderedSessionIds.includes(sid))
+    if (group) {
+      if (group.orderedSessionIds.length >= 9) return // group full — leave on graph
+      st.addSessionToSplitGroup(group.id, result.id)
+      if (st.viewMode !== 'split' || st.activeSplitGroupId !== group.id) {
+        st.enterSplitGroup(group.id)
+      }
+    } else {
+      const groupId = st.createSplitGroup([sid, result.id])
+      st.enterSplitGroup(groupId)
+      st.setFocusedSessionId(sid)
+    }
+  }, [autoModeForManualSessions, addSession, updateSessionTitle, openBranchInSplit])
 
   // Handle spawning from file explorer
   const handleSpawnInDir = useCallback(
@@ -985,6 +1031,16 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.branchSession) {
+        e.preventDefault()
+        // Branch (fork) the FOCUSED session (focused/split views only). No-op on
+        // shells and sessions without a resumable conversation — checked inside.
+        branchSession().catch((err) =>
+          console.error('[hotkey] branch session failed:', err)
+        )
+        return
+      }
+
       if (key === hotkeys.openSettings) {
         e.preventDefault()
         setShowSettings((prev) => !prev)
@@ -1007,7 +1063,7 @@ export function App(): JSX.Element {
     // Use capture phase so app hotkeys fire before native browser actions (e.g. Cmd+A select-all)
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession, forceClosePaneInSplit, activeSplitGroupId, sessions, selectedIndex])
+  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, branchSession, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession, forceClosePaneInSplit, activeSplitGroupId, sessions, selectedIndex])
 
   // Blur terminal when a panel opens so keyboard input goes to the panel
   useEffect(() => {

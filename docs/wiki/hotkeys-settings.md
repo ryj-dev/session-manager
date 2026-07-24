@@ -1,7 +1,7 @@
 ---
 slug: hotkeys-settings
 title: Hotkeys & Settings
-summary: All 14 configurable Cmd-hotkeys with defaults, plus the full Settings panel — spawn behavior, pairing, popups, autonomy, cleanup.
+summary: All 17 configurable Cmd-hotkeys with defaults, plus the full Settings panel — spawn behavior, pairing, popups, autonomy, cleanup.
 related: [graph-view, file-explorer, split-view, hook-integration-status]
 ---
 
@@ -25,6 +25,9 @@ All bindings use the Cmd modifier on macOS (Alt on Windows) and are configurable
 | toggleNotesGlobal | `Cmd+Shift+N` | Todos/notes, global view |
 | togglePipeline | `Cmd+L` | Agentic pipeline board |
 | toggleScheduled | `Cmd+J` | Scheduled tasks panel |
+| toggleCanvas | `Cmd+K` | Canvas dock for the focused session |
+| shareTurn | `Cmd+Shift+S` | Share Turn modal for the focused session |
+| branchSession | `Cmd+B` | Branch (fork) the focused session — both stay alive |
 | openSettings | `Cmd+O` | Settings modal |
 | copyFilePath | `Cmd+Opt+C` (mac) / `Alt+Shift+C` (win) | Copy selected explorer path |
 
@@ -36,6 +39,7 @@ All bindings use the Cmd modifier on macOS (Alt on Windows) and are configurable
 - **Spawn behavior** — *Auto-focus new sessions* (default on); *Spawn new sessions into current split*.
 - **Explorer** — *Remember explorer location*, *Default to active project directory*, *Color directories by project*.
 - **Terminal pairing** — pair each new Claude session with a shell: off / split / hover overlay.
+- **Session branching (⌘B)** — *Open branch in split view* (default on): the fork opens beside the original, extending the original's split group if it already has one; when off the fork sits on the graph as a background node.
 - **Auto mode** — start *child* sessions (spawned by other sessions), *manual* sessions, and/or *restored* sessions in permission-auto mode (all default off).
 - **Message popup** — manual dismiss / auto-dismiss after N seconds (default 15) / disabled.
 - **Todo nudges** — *Nudge sessions about unfinished todos* (ambient reminder, default off); *Completed items* window (day/week/month/all).
