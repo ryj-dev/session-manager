@@ -166,8 +166,9 @@ export function FileExplorer({
               navigator.platform.startsWith('Mac') ? 'pl-20' : 'pl-3'
             }`}
           >
-            <span className="titlebar-no-drag text-xs text-zinc-400 font-medium truncate">
-              {currentPath}
+            {/* direction:rtl + LRM marks truncate from the start, keeping the path's tail visible */}
+            <span className="titlebar-no-drag text-xs text-zinc-400 font-medium truncate [direction:rtl] text-left">
+              {'\u200e' + currentPath + '\u200e'}
             </span>
           </div>
 

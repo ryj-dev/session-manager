@@ -1343,8 +1343,9 @@ export function App(): JSX.Element {
               )}
               <span className="text-xs text-zinc-500 font-mono">{focusedSession.projectName}</span>
               <span className="text-zinc-700">·</span>
-              <span className="text-xs text-zinc-600 font-mono truncate max-w-[300px]">
-                {focusedSession.projectPath}
+              {/* direction:rtl + LRM marks truncate from the start, keeping the path's tail visible */}
+              <span className="text-xs text-zinc-600 font-mono truncate max-w-[300px] [direction:rtl] text-left">
+                {'\u200e' + focusedSession.projectPath + '\u200e'}
               </span>
             </div>
             <div className="ml-auto titlebar-no-drag flex items-center gap-3">
