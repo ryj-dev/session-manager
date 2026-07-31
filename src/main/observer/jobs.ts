@@ -24,9 +24,34 @@
  */
 
 import { getMetaNumber, setMetaNumber, isObserverDbReady } from './db'
-import { allSessionsIdle, msSinceLastActivity } from '../session-registry'
 
 const TICK_MS = 60_000
+
+/**
+ * The "is the app quiet" gate, injected rather than imported.
+ *
+ * The real implementation lives in session-registry, which reaches pty-manager
+ * and therefore electron. Injecting it keeps this module a leaf that can be
+ * unit-tested — debt accrual, the 2× cap and its persistence across a restart
+ * are exactly the kind of arithmetic that is worth pinning and impossible to
+ * exercise through the app.
+ */
+export interface IdleGate {
+  allSessionsIdle: () => boolean
+  msSinceLastActivity: () => number
+}
+
+/** Default: nothing is known to be running. Overwritten by startObserver at
+ *  boot; the permissive default only ever applies before wiring, where there
+ *  are no jobs registered to fire anyway. */
+let gate: IdleGate = {
+  allSessionsIdle: () => true,
+  msSinceLastActivity: () => Number.POSITIVE_INFINITY,
+}
+
+export function setIdleGate(next: IdleGate): void {
+  gate = next
+}
 
 /** Debt never exceeds this multiple of a job's interval. */
 const MAX_DEBT_MULTIPLIER = 2
@@ -37,9 +62,19 @@ export interface StalenessJob {
   everyHours: number
   /** How long the app must have been quiet before this job may fire. */
   quietMs: number
-  /** The work. Errors are caught and logged; debt is still reset so a
-   *  permanently failing job can't spin every tick. */
-  run: () => Promise<void> | void
+  /**
+   * The work.
+   *
+   * Return `false` to say the run was a NO-OP — it decided there was nothing
+   * to do and did not spawn anything. Debt is then left alone, so the job
+   * stays eligible instead of waiting out another full interval for a run that
+   * never happened. Anything else (including `undefined`) means the work ran
+   * and the debt is cleared.
+   *
+   * Errors are caught and logged, and clear the debt: a permanently failing
+   * job must not spin on every tick.
+   */
+  run: () => Promise<boolean | void> | boolean | void
 }
 
 interface JobState {
@@ -50,6 +85,13 @@ interface JobState {
 const jobs = new Map<string, JobState>()
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let lastTickAt = 0
+
+/** Test seam: forget every registered job and stop the timer. */
+export function resetJobsForTest(): void {
+  jobs.clear()
+  stopJobRunner()
+  lastTickAt = 0
+}
 
 const debtKey = (id: string): string => `job.${id}.debtMs`
 const lastRunKey = (id: string): string => `job.${id}.lastRunAt`
@@ -75,10 +117,14 @@ export function stopJobRunner(): void {
   accrue()
 }
 
-/** Add the elapsed app-open time since the previous tick to every job's debt. */
-function accrue(): void {
+/**
+ * Add the elapsed app-open time since the previous call to every job's debt.
+ *
+ * `now` is a parameter so the accrual arithmetic — including the sleep clamp
+ * and the 2× cap — can be driven deterministically in tests.
+ */
+export function accrue(now: number = Date.now()): void {
   if (!isObserverDbReady()) return
-  const now = Date.now()
   const elapsed = Math.max(0, now - lastTickAt)
   lastTickAt = now
   // A machine that slept shows a huge elapsed — that time was NOT app-open in
@@ -90,11 +136,41 @@ function accrue(): void {
   }
 }
 
+/**
+ * Start a job's run and settle its debt on the result.
+ *
+ * Debt is cleared AFTER the work reports back, not before it starts: a run
+ * that skips (`false`) leaves the debt intact so the job stays eligible.
+ * Zeroing up-front meant "Run curator now" on a run that skipped — no
+ * promotable patterns, or a full pending queue — silently pushed the next
+ * automatic run out by a whole 24h interval of app-open time, for nothing.
+ *
+ * `state.running` still guards re-entry for the whole duration, so leaving the
+ * debt in place cannot cause a second concurrent run.
+ */
+function startRun(state: JobState): void {
+  const { job } = state
+  state.running = true
+  setMetaNumber(lastRunKey(job.id), Date.now())
+  void Promise.resolve()
+    .then(() => job.run())
+    .then((result) => {
+      if (result === false) return    // no-op: keep the debt, stay eligible
+      setMetaNumber(debtKey(job.id), 0)
+    })
+    .catch((err) => {
+      // Clear on failure: a permanently failing job must not spin every tick.
+      console.error(`[observer] job "${job.id}" failed:`, err)
+      setMetaNumber(debtKey(job.id), 0)
+    })
+    .finally(() => { state.running = false })
+}
+
 function tick(): void {
   accrue()
   if (!isObserverDbReady()) return
 
-  const quiet = allSessionsIdle()
+  const quiet = gate.allSessionsIdle()
   for (const state of jobs.values()) {
     const { job } = state
     if (state.running) continue
@@ -102,29 +178,18 @@ function tick(): void {
     // Idle gate. Both conditions matter: `allSessionsIdle` catches "the user is
     // mid-turn right now", `msSinceLastActivity` catches "they just finished
     // and are about to type again".
-    if (!quiet || msSinceLastActivity() < job.quietMs) continue
+    if (!quiet || gate.msSinceLastActivity() < job.quietMs) continue
 
-    state.running = true
-    setMetaNumber(debtKey(job.id), 0)
-    setMetaNumber(lastRunKey(job.id), Date.now())
-    void Promise.resolve()
-      .then(() => job.run())
-      .catch((err) => console.error(`[observer] job "${job.id}" failed:`, err))
-      .finally(() => { state.running = false })
+    startRun(state)
   }
 }
 
-/** Fire a job immediately, ignoring debt and the idle gate (manual "run now"). */
+/** Fire a job immediately, ignoring debt and the idle gate (manual "run now").
+ *  A run that skips still leaves the debt alone — see startRun. */
 export function triggerJobNow(id: string): boolean {
   const state = jobs.get(id)
   if (!state || state.running) return false
-  state.running = true
-  setMetaNumber(debtKey(id), 0)
-  setMetaNumber(lastRunKey(id), Date.now())
-  void Promise.resolve()
-    .then(() => state.job.run())
-    .catch((err) => console.error(`[observer] manual job "${id}" failed:`, err))
-    .finally(() => { state.running = false })
+  startRun(state)
   return true
 }
 
@@ -142,7 +207,7 @@ export interface JobStatus {
 }
 
 export function jobStatuses(): JobStatus[] {
-  const quiet = allSessionsIdle()
+  const quiet = gate.allSessionsIdle()
   return [...jobs.values()].map(({ job, running }) => {
     const intervalMs = job.everyHours * 3_600_000
     const debtMs = getMetaNumber(debtKey(job.id))
@@ -151,7 +216,7 @@ export function jobStatuses(): JobStatus[] {
       running ? null
         : debtMs < intervalMs ? 'debt'
           : !quiet ? 'busy'
-            : msSinceLastActivity() < job.quietMs ? 'quiet'
+            : gate.msSinceLastActivity() < job.quietMs ? 'quiet'
               : null
     return {
       id: job.id,

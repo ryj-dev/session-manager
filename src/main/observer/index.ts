@@ -28,7 +28,11 @@ import {
   type SuggestionRow,
 } from './db'
 import { hasMiningBacklog, lastMiningRunAt, runMiningPass } from './mining'
-import { jobStatuses, registerJob, startJobRunner, stopJobRunner, triggerJobNow, type JobStatus } from './jobs'
+import {
+  jobStatuses, registerJob, setIdleGate, startJobRunner, stopJobRunner, triggerJobNow,
+  type JobStatus,
+} from './jobs'
+import { allSessionsIdle, msSinceLastActivity } from '../session-registry'
 import {
   activeCuratorSessionId,
   endCuratorRun,
@@ -78,6 +82,10 @@ export function startObserver(): void {
     return
   }
 
+  // jobs.ts is kept free of the pty-manager/electron import chain so its debt
+  // arithmetic is unit-testable; the real idle gate is injected here.
+  setIdleGate({ allSessionsIdle, msSinceLastActivity })
+
   registerJob({
     id: 'mining',
     everyHours: MINING_EVERY_HOURS,
@@ -85,10 +93,15 @@ export function startObserver(): void {
     run: () => {
       // Drain a backlog across a few passes rather than waiting a full
       // interval per BATCH_LIMIT chunk (matters after a long busy stretch).
+      let processedAny = false
       for (let i = 0; i < 5; i++) {
         const result = runMiningPass()
+        processedAny ||= result.processed > 0
         if (result.processed === 0 || !hasMiningBacklog()) break
       }
+      // Nothing in the log to mine: report a no-op so the debt survives and the
+      // next batch of events is picked up promptly rather than in two hours.
+      return processedAny
     },
   })
 
@@ -99,7 +112,14 @@ export function startObserver(): void {
     run: () => {
       const projectPath = loadSettings().baseProjectsDir || app.getPath('home')
       const result = runCurator({ projectPath })
-      if (result.status === 'skipped') console.log('[observer] curator skipped —', result.reason)
+      if (result.status === 'skipped') {
+        console.log('[observer] curator skipped —', result.reason)
+        // A skip spawned nothing. Zeroing the debt here — which "Run curator
+        // now" also did — pushed the next automatic run out by a full 24h of
+        // app-open time in exchange for no work at all.
+        return false
+      }
+      return true
     },
   })
 

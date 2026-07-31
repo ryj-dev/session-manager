@@ -23,6 +23,7 @@ import {
   eventsAfter,
   getMeta,
   getMetaNumber,
+  inTransaction,
   setMeta,
   setMetaNumber,
   upsertPatternObservations,
@@ -197,33 +198,47 @@ export function runMiningPass(opts: { now?: number } = {}): MiningResult {
     if (stream.tokens.length > maxN) stream.tokens = stream.tokens.slice(-(maxN - 1))
   }
 
-  // Persist only patterns that actually repeated in this window — a
-  // single occurrence is noise and would bloat the table.
-  let touched = 0
-  for (const b of buckets.values()) {
-    if (b.count < MIN_OCCURRENCES) continue
-    upsertPatternObservations({
-      id: patternId(b.project, b.type, b.signature),
-      project: b.project,
-      type: b.type,
-      signature: b.signature,
-      label: labelFor(b.type, b.signature, b.meta),
-      count: b.count,
-      days: [...b.days],
-      firstSeen: b.firstSeen,
-      lastSeen: b.lastSeen,
-      meta: b.meta,
-    })
-    touched++
-  }
-
-  // Carry each session's tail forward so cross-batch n-grams are counted once.
-  const nextCarry: Carry = {}
-  for (const [key, stream] of streams) nextCarry[key] = stream.tokens.slice(-(maxN - 1))
-  setMeta(CARRY_KEY, JSON.stringify(nextCarry))
-
   const newWatermark = events[events.length - 1].id
-  setMetaNumber(WATERMARK_KEY, newWatermark)
+
+  // ONE transaction for the whole pass. The counts and the watermark that says
+  // "these events are counted" are a single fact, and writing them separately
+  // meant a crash in between re-processed events already folded into the
+  // pattern table — double-counting up to BATCH_LIMIT observations straight
+  // into the support numbers the promotion rule reads. The carry belongs
+  // inside for the same reason: without it, the tail of the last session's
+  // stream is re-emitted and its cross-batch n-grams counted twice.
+  const touched = inTransaction(() => {
+    // Persist only patterns that actually repeated in this window — a
+    // single occurrence is noise and would bloat the table.
+    let n = 0
+    for (const b of buckets.values()) {
+      if (b.count < MIN_OCCURRENCES) continue
+      upsertPatternObservations({
+        id: patternId(b.project, b.type, b.signature),
+        project: b.project,
+        type: b.type,
+        signature: b.signature,
+        label: labelFor(b.type, b.signature, b.meta),
+        count: b.count,
+        days: [...b.days],
+        firstSeen: b.firstSeen,
+        lastSeen: b.lastSeen,
+        meta: b.meta,
+      })
+      n++
+    }
+
+    // Carry each session's tail forward so cross-batch n-grams are counted once.
+    const nextCarry: Carry = {}
+    for (const [key, stream] of streams) nextCarry[key] = stream.tokens.slice(-(maxN - 1))
+    setMeta(CARRY_KEY, JSON.stringify(nextCarry))
+
+    setMetaNumber(WATERMARK_KEY, newWatermark)
+    return n
+  })
+
+  // Outside the transaction: bookkeeping, not part of the "these events are
+  // counted" fact. A lost lastRunAt costs a status line, not correctness.
   setMetaNumber(LAST_RUN_KEY, now)
 
   // Maintenance rides along with mining rather than on its own timer.

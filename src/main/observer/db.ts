@@ -27,6 +27,9 @@ export const RAW_EVENT_RETENTION_DAYS = 60
 /** Cap on a stored payload string (a pasted heredoc can be enormous). */
 const MAX_PAYLOAD_CHARS = 2000
 
+/** Per-field cap applied when the whole payload busts MAX_PAYLOAD_CHARS. */
+const MAX_PAYLOAD_FIELD_CHARS = 400
+
 export type ObserverEventKind =
   /** A tool the assistant used. payload: { tool, arg? } */
   | 'tool'
@@ -92,12 +95,42 @@ export interface SuggestionRow {
  *  "≥4 distinct days in 14" promotion rule with slack for a slow reader. */
 const DAYS_WINDOW = 30
 
-let db: Database.Database | null = null
+/**
+ * The subset of better-sqlite3 this module actually uses.
+ *
+ * Named so the driver can be swapped: better-sqlite3 is a native addon built
+ * against ELECTRON's ABI (`electron-builder install-app-deps`), so plain
+ * `node --test` cannot load it at all. Tests therefore install an adapter over
+ * Node's built-in `node:sqlite`, which is the only way the incremental
+ * machinery here — watermarks, day-window promotion, the mining transaction —
+ * gets covered outside a running app. Production is untouched.
+ */
+export interface SqliteLike {
+  pragma(source: string): unknown
+  exec(source: string): unknown
+  prepare(sql: string): {
+    run(...params: unknown[]): { changes: number }
+    get(...params: unknown[]): unknown
+    all(...params: unknown[]): unknown[]
+  }
+  transaction<T extends (...args: never[]) => unknown>(fn: T): T
+  close(): void
+}
+
+let openDatabase: (dbPath: string) => SqliteLike =
+  (dbPath) => new Database(dbPath) as unknown as SqliteLike
+
+/** Test seam — see SqliteLike. Call before initObserverDb. */
+export function setSqliteDriver(open: (dbPath: string) => SqliteLike): void {
+  openDatabase = open
+}
+
+let db: SqliteLike | null = null
 
 export function initObserverDb(dbPath: string): void {
   if (db) return
   fs.mkdirSync(path.dirname(dbPath), { recursive: true })
-  db = new Database(dbPath)
+  db = openDatabase(dbPath)
   db.pragma('journal_mode = WAL')
   db.exec(`
     CREATE TABLE IF NOT EXISTS events (
@@ -150,12 +183,64 @@ export function isObserverDbReady(): boolean {
   return db !== null
 }
 
+/**
+ * Run `fn` inside a single SQLite transaction — all of its writes land, or
+ * none of them do.
+ *
+ * The mining pass needs this: it writes pattern counts first and its watermark
+ * last, so a crash in between re-processed events that had already been
+ * counted, double-counting up to BATCH_LIMIT observations and inflating the
+ * support numbers the promotion rule reads. Nothing else about the pass is
+ * transactional, and it does not need to be — the writes are the whole state.
+ *
+ * A no-op passthrough when the store never opened, so callers do not have to
+ * branch on it.
+ */
+export function inTransaction<T>(fn: () => T): T {
+  if (!db) return fn()
+  return db.transaction(fn)()
+}
+
 export function closeObserverDb(): void {
   try { db?.close() } catch { /* already closed */ }
   db = null
 }
 
 // ── Events ──────────────────────────────────────────────────────────────────
+
+/**
+ * Serialise an event payload, keeping it under the size cap WITHOUT ever
+ * producing invalid JSON.
+ *
+ * Slicing the serialised string was a silent tripwire: an oversized payload
+ * was cut mid-token, `JSON.parse` threw on read, and rowToEvent's catch turned
+ * the row into `{}` — an event with no tool name and no argument, which
+ * actionToken then drops. The events most likely to trip it (a pasted heredoc,
+ * a very long command) are exactly the ones a size cap is meant to shorten
+ * rather than erase.
+ *
+ * So shrink the VALUES instead, and fall back to an explicit marker rather
+ * than to corruption.
+ */
+function serializePayload(payload: Record<string, unknown>): string {
+  const json = JSON.stringify(payload)
+  if (json.length <= MAX_PAYLOAD_CHARS) return json
+
+  const shrunk: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(payload)) {
+    shrunk[key] = typeof value === 'string' ? value.slice(0, MAX_PAYLOAD_FIELD_CHARS) : value
+  }
+  const retry = JSON.stringify(shrunk)
+  if (retry.length <= MAX_PAYLOAD_CHARS) return retry
+
+  // Still oversized (many keys, or huge non-string values). Keep the shape
+  // that matters to mining and drop the rest, visibly.
+  return JSON.stringify({
+    tool: typeof payload.tool === 'string' ? payload.tool : undefined,
+    action: typeof payload.action === 'string' ? payload.action : undefined,
+    truncated: true,
+  })
+}
 
 /** Append one event. Never throws — observation must not break the app. */
 export function appendEvent(e: {
@@ -167,7 +252,7 @@ export function appendEvent(e: {
 }): void {
   if (!db) return
   try {
-    const payload = JSON.stringify(e.payload ?? {}).slice(0, MAX_PAYLOAD_CHARS)
+    const payload = serializePayload(e.payload ?? {})
     db.prepare(
       'INSERT INTO events (ts, session_id, project, kind, payload_json) VALUES (?, ?, ?, ?, ?)',
     ).run(e.ts ?? Date.now(), e.sessionId ?? null, e.project ?? null, e.kind, payload)
