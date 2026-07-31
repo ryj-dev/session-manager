@@ -21,7 +21,7 @@ import {
   initObserverDb,
   insertSuggestion,
   isObserverDbReady,
-  listPatterns,
+  countPatterns,
   listSuggestions,
   resolveSuggestion,
   type SuggestionKind,
@@ -170,7 +170,7 @@ export function getInbox(): ObserverInbox {
   const curator = jobs.find((j) => j.id === 'curator')
   const active = activeCuratorSessionId()
   const eventCount = countEvents()
-  const patternCount = listPatterns({ limit: 1000 }).length
+  const patternCount = countPatterns()
 
   const statusLine = active
     ? `Curator is running now — judging patterns and reviewing your notes.`

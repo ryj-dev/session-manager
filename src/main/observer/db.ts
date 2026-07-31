@@ -155,11 +155,6 @@ export function closeObserverDb(): void {
   db = null
 }
 
-function require_(): Database.Database {
-  if (!db) throw new Error('Observer DB not initialised')
-  return db
-}
-
 // ── Events ──────────────────────────────────────────────────────────────────
 
 /** Append one event. Never throws — observation must not break the app. */
@@ -331,6 +326,11 @@ export function getPattern(id: string): PatternRow | null {
   if (!db) return null
   const row = db.prepare('SELECT * FROM patterns WHERE id = ?').get(id) as Record<string, unknown> | undefined
   return row ? rowToPattern(row) : null
+}
+
+export function countPatterns(): number {
+  if (!db) return 0
+  return (db.prepare('SELECT COUNT(*) AS c FROM patterns').get() as { c: number }).c
 }
 
 export function listPatterns(filter?: { status?: PatternRow['status']; limit?: number }): PatternRow[] {
