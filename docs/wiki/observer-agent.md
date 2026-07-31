@@ -48,6 +48,10 @@ The app is not left running overnight, so the observer deliberately does **not**
 
 Debt persists across restarts but does not *grow* while the app is closed, and is capped at 2× the interval — so reopening after a week's absence does not trigger a stampede. You can bypass all of it with **Run curator now** in the inbox header.
 
+A run that **skips** — no promotable patterns, or 12+ suggestions already pending — keeps its debt, so the job stays eligible instead of waiting out another full interval for work that never happened. That applies to **Run curator now** too: pressing it when there is nothing to judge costs you nothing.
+
+The curator run **terminates when it finishes**. It is an interactive `claude`, so on its `Stop` hook it goes through the same teardown as a scheduled run: the PTY is killed and its run token invalidated, rather than the process sitting at a prompt for the rest of the app's life.
+
 ## Privacy
 
 The log records **what was done, never what was said**.
@@ -63,6 +67,7 @@ The log records **what was done, never what was said**.
 
   This is a **best-effort net, not a guarantee.** It is pattern-matching over a flattened command string, so a secret in a shape it does not know — an unrecognised flag name, a bare high-entropy argument, a credential read from a heredoc — can still land in the log. Treat the store as sensitive, and wipe it (below) if you know something slipped through. Every shape listed above has a regression test in `src/main/observer-mining.test.ts`.
 - MCP beacons send the tool **name** only, never arguments or note/todo content.
+- The observer does **not** record its own curator run, or the throwaway PTYs a drawer spawns to display an old conversation. Neither is you doing something, and mining the curator's own reads would hand it a daily "habit" manufactured out of the fact that it ran.
 - Raw events are pruned after 60 days; the derived patterns and suggestions are aggregates and are kept.
 - The whole store is deletable from **Settings → Cleanup → Observer activity log**, which also wipes your "never suggest this" mutes.
 
