@@ -98,19 +98,50 @@ const MAX_ARG_CHARS = 400
  */
 export function redactSecrets(command: string): string {
   return command
-    // KEY=value / KEY="value" where the key name smells secret
+    // URL credentials: scheme://user:pass@host. The username is real signal
+    // (which account, which registry) and the host must survive for the
+    // command to stay recognisable, so only the password is destroyed.
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)([^\s/:@'"]+):([^\s/@'"]+)@/gi, '$1$2:<redacted>@')
+
+    // KEY=value / KEY="value" where the key name smells secret.
     // The prefix is zero-or-more underscore-terminated words, so a bare
     // API_KEY= matches as readily as AWS_SECRET_ACCESS_KEY=. Getting this
     // wrong is not cosmetic — it is the difference between a usage log and a
     // credential file.
+    //
+    // The value alternation must handle QUOTED values before bare ones: a
+    // passphrase is exactly the kind of secret that contains spaces, and a
+    // bare-token-only pattern stops at the first space and stores the rest.
     .replace(
-      /\b((?:[A-Za-z0-9]+_)*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|AUTH)S?)\s*=\s*(['"]?)[^\s'"]+\2/gi,
+      /\b((?:[A-Za-z0-9]+_)*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|AUTH)S?)\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/gi,
       '$1=<redacted>',
     )
-    // --token=... / --password foo / -p foo
-    .replace(/(--?(?:token|password|passwd|secret|api[-_]?key|auth)[= ])\S+/gi, '$1<redacted>')
-    // Authorization: Bearer / Basic headers
-    .replace(/((?:Authorization|X-[A-Za-z-]*(?:Token|Key))\s*:\s*)\S+/gi, '$1<redacted>')
+
+    // --token=… / --password "a b c" / -p foo. Same quoted-value rule.
+    .replace(
+      /(--?(?:token|password|passwd|secret|api[-_]?key|auth)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,
+      '$1<redacted>',
+    )
+
+    // curl -u user:pass / --user user:pass. Gated on the colon so an unrelated
+    // `-u` flag (sort -u, docker -u) is not swallowed; username kept, as above.
+    .replace(
+      // A lookbehind, not \b: the boundary between a space and a '-' is not a
+      // word boundary, so \b-u never matches a flag at all.
+      /((?<![\w-])(?:-u|--user)(?:=|\s+)['"]?)([^\s:'"]+):[^\s'"]*/gi,
+      '$1$2:<redacted>',
+    )
+
+    // Authorization / X-…-Token headers. The auth SCHEME is not the secret —
+    // matching a single \S+ here consumed the word "Bearer" and stored the
+    // token that followed it, which is the exact opposite of the intent. Keep
+    // the scheme, redact the credential.
+    .replace(
+      /((?:Proxy-)?Authorization|X-[A-Za-z-]*(?:Token|Key|Secret))(\s*:\s*)(?:(Bearer|Basic|Token|Digest|Negotiate)\s+)?[^\s'"]+/gi,
+      (_m, header: string, sep: string, scheme?: string) =>
+        `${header}${sep}${scheme ? `${scheme} ` : ''}<redacted>`,
+    )
+
     // Long opaque blobs that look like keys (sk-…, ghp_…, AKIA…, JWTs)
     .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}\b/g, '<redacted>')
     .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, '<redacted>')

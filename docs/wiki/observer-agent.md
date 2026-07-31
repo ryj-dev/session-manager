@@ -54,7 +54,14 @@ The log records **what was done, never what was said**.
 
 - Prompt bodies are never stored — only a character count.
 - Tool arguments are reduced to a structural form: a shell command is kept (truncated), a file path is kept, a search pattern is kept, everything else is recorded as the tool name alone.
-- Command strings are **secret-redacted before they are written** — `TOKEN=`/`SECRET=`/`API_KEY=` style assignments, `--token`/`--password` flag values, `Authorization:` headers, and known key shapes (`sk-…`, `ghp_…`, `AKIA…`, JWTs).
+- Command strings are **secret-redacted before they are written**. The redactor covers:
+  - `TOKEN=` / `SECRET=` / `PASSWORD=` / `API_KEY=` style assignments, including quoted values that contain spaces (`PASSWORD="my secret pass"`);
+  - `--token` / `--password` / `--secret` / `--api-key` flag values, `=`-joined or space-separated, quoted or bare;
+  - `Authorization:` and `X-…-Token` / `X-…-Key` / `X-…-Secret` headers — the scheme word (`Bearer`, `Basic`, …) is kept, the credential after it is not;
+  - credentials inside a URL (`https://user:pass@host`) and `curl -u user:pass` / `--user user:pass` — the **username and host survive, the password does not**, so the command stays recognisable;
+  - known key shapes anywhere in the line: `sk-…`, `ghp_…`, `AKIA…`, JWTs.
+
+  This is a **best-effort net, not a guarantee.** It is pattern-matching over a flattened command string, so a secret in a shape it does not know — an unrecognised flag name, a bare high-entropy argument, a credential read from a heredoc — can still land in the log. Treat the store as sensitive, and wipe it (below) if you know something slipped through. Every shape listed above has a regression test in `src/main/observer-mining.test.ts`.
 - MCP beacons send the tool **name** only, never arguments or note/todo content.
 - Raw events are pruned after 60 days; the derived patterns and suggestions are aggregates and are kept.
 - The whole store is deletable from **Settings → Cleanup → Observer activity log**, which also wipes your "never suggest this" mutes.
@@ -65,4 +72,6 @@ The log records **what was done, never what was said**.
 - **Accepted scheduled tasks are created disabled.** A one-click accept should not silently start firing Claude sessions on a timer — read the prompt in `Cmd+J` and enable it yourself.
 - Proposed interval recurrences are floored at 15 minutes regardless of what the curator asks for.
 - The curator will not run for housekeeping alone; it needs at least one promoted pattern. It also skips entirely when 12+ suggestions are already pending — the goal is a trickle of good proposals, not a queue.
-- The curator's only write path is the `observer-suggest` MCP tool. It cannot create schedules, edit memory, or close todos itself, and its `--allowedTools` list enforces that.
+- The curator's only write path is the `observer-suggest` MCP tool. It cannot create schedules, edit memory, or close todos itself, and that is enforced in two places rather than by its prompt:
+  - its MCP server **never registers** the other tools. The run's environment carries `SM_OBSERVER_ROLE=curator`, and the server registers only the curator's read tools plus `observer-suggest`. (`--allowedTools` alone would not do this: it pre-approves a list, it does not deny what is missing, and the run uses `--permission-mode auto`.) Symmetrically, `observer-suggest` is withheld from every *ordinary* session, so nothing else can file suggestions into your inbox.
+  - the `/observer/suggest` endpoint behind it requires a **token minted fresh for each run**, delivered only through that run's environment and burned when the run ends. A missing token, another session's token, and a replay after the run has finished are all rejected.

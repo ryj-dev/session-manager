@@ -78,6 +78,70 @@ test('redactSecrets strips flag values and known key shapes', () => {
   assert.match(redactSecrets('aws --profile AKIAIOSFODNN7EXAMPLE'), /<redacted>/)
 })
 
+// ── Regression: shapes the redactor used to store verbatim ──────────────────
+// Every case below was empirically confirmed to leak. A redactor that quietly
+// keeps the credential is worse than none, because the privacy note in the
+// store header claims the log is safe to keep for 60 days.
+
+test('redactSecrets redacts the token after an auth scheme, not the scheme', () => {
+  // Used to match a single \S+ after the colon: it replaced the word "Bearer"
+  // and stored the token that followed it.
+  const secret = 'aVeryRealLookingSessionToken123'
+  for (const scheme of ['Bearer', 'Basic', 'Token', 'Digest']) {
+    const out = redactSecrets(`curl -H "Authorization: ${scheme} ${secret}" https://api.example.com`)
+    assert.ok(!out.includes(secret), `${scheme} token leaked: ${out}`)
+    assert.match(out, new RegExp(`Authorization: ${scheme} <redacted>`))
+  }
+  // A bare credential with no scheme word is still redacted.
+  assert.ok(!redactSecrets(`curl -H "Authorization: ${secret}"`).includes(secret))
+  // Custom header variants.
+  assert.ok(!redactSecrets(`curl -H "X-Api-Key: ${secret}"`).includes(secret))
+  assert.ok(!redactSecrets(`curl -H "X-Hook-Secret: ${secret}"`).includes(secret))
+})
+
+test('redactSecrets redacts quoted values that contain spaces', () => {
+  // A passphrase is exactly the kind of secret with spaces in it; the old
+  // pattern stopped at the first space and stored the remainder.
+  assert.equal(redactSecrets('PASSWORD="my secret pass" ./deploy.sh'), 'PASSWORD=<redacted> ./deploy.sh')
+  assert.equal(redactSecrets("DB_PASSWORD='correct horse battery' psql"), 'DB_PASSWORD=<redacted> psql')
+  assert.ok(!redactSecrets('API_KEY="two words here" run').includes('words'))
+  assert.match(redactSecrets('--password "a b c" login'), /--password <redacted> login/)
+})
+
+test('redactSecrets redacts credentials embedded in a URL', () => {
+  const out = redactSecrets('git clone https://alice:hunter2@github.com/org/repo.git')
+  assert.ok(!out.includes('hunter2'), out)
+  // Username and host survive — they are signal, and the command must stay
+  // recognisable as "clone that repo" for mining to be worth anything.
+  assert.match(out, /https:\/\/alice:<redacted>@github\.com/)
+  assert.ok(!redactSecrets('psql postgres://user:s3cr3t@db.internal:5432/app').includes('s3cr3t'))
+  // A URL with no credentials is untouched.
+  assert.equal(redactSecrets('curl https://example.com/x'), 'curl https://example.com/x')
+})
+
+test('redactSecrets redacts the password half of curl -u / --user', () => {
+  assert.match(redactSecrets('curl -u alice:hunter2 https://api.example.com'),
+    /-u alice:<redacted>/)
+  assert.match(redactSecrets('curl --user alice:hunter2 https://api.example.com'),
+    /--user alice:<redacted>/)
+  assert.ok(!redactSecrets('curl -u "alice:hunter2" https://x').includes('hunter2'))
+  // Gated on the colon, so an unrelated -u keeps its argument.
+  assert.equal(redactSecrets('sort -u names.txt'), 'sort -u names.txt')
+})
+
+test('redactSecrets still leaves non-secret commands intact', () => {
+  // Over-redaction is its own failure: a log of <redacted> mines nothing.
+  for (const cmd of [
+    'npm run build',
+    'git commit -m "fix the thing"',
+    'docker run -u 1000 alpine',
+    'NODE_ENV=production npm start',
+    'curl https://example.com/health',
+  ]) {
+    assert.equal(redactSecrets(cmd), cmd)
+  }
+})
+
 test('redactSecrets leaves an ordinary command untouched', () => {
   const cmd = 'npm run build && npm test -- --watch=false'
   assert.equal(redactSecrets(cmd), cmd)
