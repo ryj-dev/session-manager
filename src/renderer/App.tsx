@@ -152,6 +152,7 @@ export function App(): JSX.Element {
   const pinnedAttachedTerminalIds = useStore((s) => s.pinnedAttachedTerminalIds)
   const openCanvasSessionIds = useStore((s) => s.openCanvasSessionIds)
   const canvasArtifacts = useStore((s) => s.canvasArtifacts)
+  const observerPendingCount = useStore((s) => s.observerInbox?.pendingCount ?? 0)
 
   // Panel data
   const { items: designItems } = useDesigns()
@@ -241,6 +242,14 @@ export function App(): JSX.Element {
   useEffect(() => {
     window.api.schedulesList().then((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
     const unsub = window.api.onSchedulesChanged((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
+    return unsub
+  }, [])
+
+  // Observer inbox mirror. Pulled at startup so the pending-suggestions badge
+  // is right on first paint, then re-pulled whenever main says it changed.
+  useEffect(() => {
+    void useStore.getState().refreshObserverInbox()
+    const unsub = window.api.onObserverChanged(() => { void useStore.getState().refreshObserverInbox() })
     return unsub
   }, [])
 
@@ -462,6 +471,17 @@ export function App(): JSX.Element {
     setShowRestorePrompt(false)
   }, [])
 
+  // Observer instrumentation. Records the NAME of a meaningful user action so
+  // the observer can mine "you always do X then Y". Never records content —
+  // see src/main/observer/capture.ts for the privacy contract.
+  const observe = useCallback((action: string, detail?: string) => {
+    const state = useStore.getState()
+    const project = state.focusedSessionId
+      ? state.sessions.find((s) => s.id === state.focusedSessionId)?.projectPath
+      : undefined
+    window.api.observerUi(action, detail, project)
+  }, [])
+
   // Resolve the best project path for spawning.
   // Prefer the focused session's project (what the user is looking at) over the
   // keyboard-selected index, so spawning from inside a session uses the right project.
@@ -498,6 +518,7 @@ export function App(): JSX.Element {
       console.log('[spawn] calling api.spawnSession with path:', projectPath)
       const result = await window.api.spawnSession(projectPath, 'claude')
       console.log('[spawn] session created:', result)
+      observe('session.spawn', 'claude')
       addSession(result.id, result.projectPath, result.claudeSessionId ?? null)
 
       // Feature 2 — spawn into current split. Takes precedence over pairing/attach.
@@ -525,7 +546,7 @@ export function App(): JSX.Element {
         setViewMode('focused')
       }
     },
-    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, terminalPairingMode, spawnIntoCurrentSplit, createSplitGroup, enterSplitGroup, addToCurrentSplitIfActive, setAttachedTerminal]
+    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, terminalPairingMode, spawnIntoCurrentSplit, createSplitGroup, enterSplitGroup, addToCurrentSplitIfActive, setAttachedTerminal, observe]
   )
 
   // Spawn a plain terminal
@@ -536,6 +557,7 @@ export function App(): JSX.Element {
       // Pass 'shell' as a sentinel — main process resolves the actual shell binary
       const result = await window.api.spawnSession(projectPath, 'shell')
       addSession(result.id, result.projectPath)
+      observe('session.spawn', 'terminal')
 
       // Feature 2 — spawn into current split (terminals too).
       if (spawnIntoCurrentSplit && addToCurrentSplitIfActive(result.id)) {
@@ -547,7 +569,7 @@ export function App(): JSX.Element {
         setViewMode('focused')
       }
     },
-    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, spawnIntoCurrentSplit, addToCurrentSplitIfActive]
+    [resolveProjectPath, addSession, setFocusedSessionId, setViewMode, autoFocusOnSpawn, spawnIntoCurrentSplit, addToCurrentSplitIfActive, observe]
   )
 
   // Branch (fork) the focused Claude session: `claude --resume <id> --fork-session`
@@ -564,6 +586,7 @@ export function App(): JSX.Element {
     const info = await window.api.getClaudeSessionInfo(sid)
     if (!info?.isResumable || !info.claudeSessionId) return
 
+    observe('session.branch')
     const result = await window.api.forkSession(info.claudeSessionId, session.projectPath, autoModeForManualSessions)
     // No claudeSessionId yet — --fork-session mints a new one that arrives via
     // the SessionStart hook (pre-setting the original's id would dedupe the
@@ -591,7 +614,7 @@ export function App(): JSX.Element {
       st.enterSplitGroup(groupId)
       st.setFocusedSessionId(sid)
     }
-  }, [autoModeForManualSessions, addSession, updateSessionTitle, openBranchInSplit])
+  }, [autoModeForManualSessions, addSession, updateSessionTitle, openBranchInSplit, observe])
 
   // Handle spawning from file explorer
   const handleSpawnInDir = useCallback(
@@ -600,13 +623,14 @@ export function App(): JSX.Element {
       spawnSession(dir)
       setActivePanel(null)
     },
-    [spawnSession, setActivePanel]
+    [spawnSession, setActivePanel, observe]
   )
 
   // Spawn a new agent session (installed as slash command with --allowedTools)
   const handleSpawnAgent = useCallback(
     async (name: string, content: string, allowedTools?: string[]) => {
       const projectPath = await resolveProjectPath()
+      observe('agent.spawn', name)
       const commandName = await window.api.installSkill(name, content)
       const result = await window.api.spawnSession(
         projectPath,
@@ -618,12 +642,13 @@ export function App(): JSX.Element {
       window.api.writeWhenReady(result.id, `/${commandName}\r`)
       setActivePanel(null)
     },
-    [resolveProjectPath, addSession, setActivePanel]
+    [resolveProjectPath, addSession, setActivePanel, observe]
   )
 
   // Spawn a new session with a skill (installed as a Claude Code slash command)
   const handleSpawnWithSkill = useCallback(
     async (skillName: string, content: string) => {
+      observe('skill.spawnWith', skillName)
       const commandName = await window.api.installSkill(skillName, content)
       await spawnSession()
       const store = useStore.getState()
@@ -633,7 +658,7 @@ export function App(): JSX.Element {
       }
       setActivePanel(null)
     },
-    [spawnSession, setActivePanel]
+    [spawnSession, setActivePanel, observe]
   )
 
   // Inject a skill into the focused session by restarting Claude Code
@@ -647,6 +672,7 @@ export function App(): JSX.Element {
       if (!info) return
 
       // Install the skill before restarting so the new process discovers it
+      observe('skill.inject', skillName)
       const commandName = await window.api.installSkill(skillName, content)
 
       // Tear down the old session
@@ -670,7 +696,7 @@ export function App(): JSX.Element {
       window.api.writeWhenReady(result.id, `/${commandName}\r`)
       setActivePanel(null)
     },
-    [focusedSessionId, sessions, removeSession, addSession, updateSessionTitle, setFocusedSessionId, setActivePanel]
+    [focusedSessionId, sessions, removeSession, addSession, updateSessionTitle, setFocusedSessionId, setActivePanel, observe]
   )
 
   // Capture a single session's snapshot (reuses canvas to avoid GC churn)
@@ -847,6 +873,12 @@ export function App(): JSX.Element {
       const key = comboFromEvent(e)
       if (!key) return
 
+      // Observer: record WHICH app action a hotkey invoked, in one place
+      // rather than in each of the ~15 branches below (which would rot the
+      // moment a hotkey is added). Only the action name is recorded.
+      const firedAction = (Object.keys(hotkeys) as (keyof HotkeyMap)[]).find((a) => hotkeys[a] === key)
+      if (firedAction) observe(`hotkey.${firedAction}`)
+
       if (key === hotkeys.spawnSession) {
         e.preventDefault()
         if (activePanel === 'explorer' && explorerCurrentPath.current) {
@@ -887,6 +919,7 @@ export function App(): JSX.Element {
       // (closes the focused pane; dissolves the group if only one remains),
       // and graph view (closes selected).
       if (key === 'shift+w') {
+        observe('session.forceClose')
         if (viewMode === 'focused' && focusedSessionId) {
           e.preventDefault()
           forceCloseSession(focusedSessionId)
@@ -1086,7 +1119,7 @@ export function App(): JSX.Element {
     // Use capture phase so app hotkeys fire before native browser actions (e.g. Cmd+A select-all)
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
-  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, branchSession, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession, forceClosePaneInSplit, activeSplitGroupId, sessions, selectedIndex])
+  }, [viewMode, activePanel, hotkeys, spawnSession, spawnTerminal, branchSession, setViewMode, setActivePanel, setFocusedSessionId, autoFocusOnSpawn, captureAllSnapshots, markSessionSeen, focusedSessionId, forceCloseSession, forceClosePaneInSplit, activeSplitGroupId, sessions, selectedIndex, observe])
 
   // Blur terminal when a panel opens so keyboard input goes to the panel
   useEffect(() => {
@@ -1562,6 +1595,21 @@ export function App(): JSX.Element {
         visible={activePanel === 'scheduled'}
         onClose={() => setActivePanel(null)}
       />
+
+      {/* Pending-insights badge — a quiet pill, not a notification. Only on the
+          graph (nothing to interrupt there) and only when the observer has
+          something waiting. Clicking opens the overview it lives in. */}
+      {viewMode === 'graph' && !activePanel && (observerPendingCount > 0) && (
+        <button
+          onClick={() => setActivePanel('overview')}
+          className="absolute bottom-4 right-4 z-[26] flex items-center gap-1.5 rounded-full border border-fuchsia-700/50 bg-fuchsia-950/70 px-3 py-1.5 text-[11px] text-fuchsia-300 shadow-lg backdrop-blur transition-colors hover:border-fuchsia-400"
+          title={`${observerPendingCount} suggestion${observerPendingCount === 1 ? '' : 's'} waiting — ${formatHotkey(hotkeys.openOverview)}`}
+        >
+          <span>✦</span>
+          <span className="tabular-nums">{observerPendingCount}</span>
+          <span className="text-fuchsia-400/70">insight{observerPendingCount === 1 ? '' : 's'}</span>
+        </button>
+      )}
 
       {/* Sessions overview (Cmd+P) */}
       <OverviewPanel

@@ -18,6 +18,8 @@ import { validateCanvasArtifact, scaleAnnotationsToNatural, annotationBoundsErro
 import type { CanvasArtifact, CanvasArtifactPayload, CanvasArtifactSource } from './canvas-types'
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import * as registry from './session-registry'
+import * as observer from './observer/capture'
+import { ingestSuggestion } from './observer'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
 let server: Server | null = null
@@ -154,6 +156,12 @@ interface HookPayload {
   /** Path to the session's transcript JSONL — present on every hook event.
    *  Captured for the Share Turn feature (turn reconstruction). */
   transcript_path?: string
+  /** PreToolUse/PostToolUse: which tool is about to run / just ran. */
+  tool_name?: string
+  /** PreToolUse: the tool's arguments. For Bash this is the exact command —
+   *  the observer's highest-signal source. Normalised + secret-redacted by
+   *  observer/capture before anything is persisted. */
+  tool_input?: unknown
 }
 
 /** Last transcript path seen per app session — survives /resume id changes
@@ -247,6 +255,7 @@ const GUARDED = new Set([
   '/pipeline/merge-worktree', '/pipeline/put-artifact',
   '/schedules/create', '/schedules/update', '/schedules/set-enabled', '/schedules/delete',
   '/canvas/emit', '/canvas/focus', '/canvas/inspect',
+  '/observer/suggest', '/observer/event',
 ])
 
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
@@ -314,6 +323,11 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/canvas/focus')   { handleCanvasFocus(body, res); return }
         if (url.pathname === '/canvas/list')    { handleCanvasList(body, res); return }
         if (url.pathname === '/canvas/inspect') { handleCanvasInspect(body, res); return }
+
+        // ── Observer endpoints (called by the observer-suggest MCP tool and
+        //    the MCP server's fire-and-forget tool-usage beacon) ──
+        if (url.pathname === '/observer/suggest') { handleObserverSuggest(body, res); return }
+        if (url.pathname === '/observer/event')   { handleObserverEvent(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -2572,6 +2586,28 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
 
   const event = payload.hook_event_name
 
+  // ── Observer capture ──────────────────────────────────────────────────
+  // The installed hook commands already forward Claude's full stdin payload
+  // (`curl -d @-`), so PreToolUse carries tool_name + tool_input with no hook
+  // reinstall needed. Recording is best-effort and must never break status
+  // tracking, hence the try/catch around the whole block.
+  try {
+    const projectPath = getSession(appSessionId)?.projectPath ?? null
+    if (event === 'PreToolUse' && payload.tool_name) {
+      observer.recordToolUse({
+        sessionId: appSessionId,
+        projectPath,
+        tool: payload.tool_name,
+        toolInput: payload.tool_input,
+      })
+    } else if (event === 'UserPromptSubmit') {
+      // Length only — the prompt body never reaches the store.
+      observer.recordPrompt({ sessionId: appSessionId, projectPath, promptText: payload.prompt })
+    }
+  } catch (err) {
+    console.error('[observer] hook capture failed:', err)
+  }
+
   if (event === 'Notification') {
     switch (payload.notification_type) {
       case 'permission_prompt':
@@ -2611,6 +2647,40 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     registry.markActivity()
     win.webContents.send('claude:status', { id: appSessionId, status: 'working' })
   }
+}
+
+// ── Observer endpoint handlers ──────────────────────────────────────────────
+
+/** The curator's write path back into the insights inbox. Validation lives in
+ *  ingestSuggestion; a rejected payload returns 400 with the reason so the
+ *  curator can correct itself rather than silently producing nothing. */
+function handleObserverSuggest(body: string, res: import('http').ServerResponse): void {
+  try {
+    const payload = readJson<Parameters<typeof ingestSuggestion>[0]>(body)
+    const result = ingestSuggestion(payload)
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/** Fire-and-forget beacon from the out-of-process MCP server: which
+ *  session-manager tool an agent just used. Deliberately tolerant — a
+ *  malformed beacon is dropped, never surfaced as a tool error. */
+function handleObserverEvent(body: string, res: import('http').ServerResponse): void {
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end('{"ok":true}')
+  try {
+    const { tool, sessionId, projectPath } = readJson<{ tool?: string; sessionId?: string; projectPath?: string }>(body)
+    if (!tool) return
+    observer.recordMcpToolUse({
+      tool,
+      sessionId: sessionId ?? null,
+      projectPath: projectPath ?? (sessionId ? getSession(sessionId)?.projectPath ?? null : null),
+    })
+  } catch { /* a dropped beacon is not worth a log line */ }
 }
 
 // ── Settings.json hook management ──────────────────────────────────────

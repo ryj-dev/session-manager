@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useStore, type RegistryEntry, type RegistryStatus, type SessionKind } from '../../store'
+import { InsightsInbox } from './InsightsInbox'
 
 /**
  * Sessions Overview (Cmd+P)
@@ -158,6 +159,7 @@ export function OverviewPanel({ visible, onClose }: Props): JSX.Element | null {
   const killRegistrySession = useStore((s) => s.killRegistrySession)
   const pipelineTasks = useStore((s) => s.pipelineTasks)
   const scheduledTasks = useStore((s) => s.scheduledTasks)
+  const observerInbox = useStore((s) => s.observerInbox)
 
   const [confirmKillId, setConfirmKillId] = useState<string | null>(null)
   const [showEphemeral, setShowEphemeral] = useState(false)
@@ -268,11 +270,15 @@ export function OverviewPanel({ visible, onClose }: Props): JSX.Element | null {
             <SectionBlock
               key={section.key}
               section={section}
-              observerStatusLine={null}
+              observerStatusLine={section.key === 'observer' ? observerInbox?.statusLine ?? null : null}
               onOpen={focusInHomeUi}
               onRequestKill={setConfirmKillId}
             />
           ))}
+
+          {/* The observer's proposals live in the same panel — one place to see
+              everything the app is doing on your behalf. */}
+          <InsightsInbox />
         </div>
       </div>
 

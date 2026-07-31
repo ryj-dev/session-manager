@@ -52,6 +52,17 @@ import type { ScheduledTask } from './schedule-store'
 import * as canvasStore from './canvas-store'
 import { triggerScheduleNow } from './scheduler'
 import * as registry from './session-registry'
+import * as observerCapture from './observer/capture'
+import {
+  acceptSuggestion,
+  dismissSuggestion,
+  getInbox,
+  onObserverChanged,
+  runObserverJobNow,
+  setCuratorAttachListeners,
+  startObserver,
+  stopObserver,
+} from './observer'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -96,6 +107,9 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
 
   // Register the attach-listeners callback for hook-server spawned sessions
   setAttachListeners((id, session) => attachSessionListeners(id, session))
+  // Same wiring for the observer's headless curator run, so its PTY drains and
+  // its hook status flows even though it has no graph node.
+  setCuratorAttachListeners((id, session) => attachSessionListeners(id, session))
 
   // Broadcast Claude session ID changes to the renderer so the store can update.
   onClaudeSessionIdChange((id, claudeSessionId) => {
@@ -771,6 +785,27 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
 
   registry.onRegistryChanged(() => sendToRenderer('registry:changed', registry.listRegistry()))
 
+  // ── Observer / insights inbox ───────────────────────────────────────────
+  // The observer's state lives in its own SQLite store; the renderer reads the
+  // inbox on demand and mirrors the pending count via 'observer:changed'.
+  ipcMain.handle('observer:inbox', () => getInbox())
+  ipcMain.handle('observer:accept', (_e, id: string) => acceptSuggestion(id))
+  ipcMain.handle('observer:dismiss', (_e, id: string, forever: boolean) => dismissSuggestion(id, !!forever))
+  ipcMain.handle('observer:runJob', (_e, jobId: string) => runObserverJobNow(jobId))
+
+  // Renderer UI actions — the second event source (after hooks). The renderer
+  // calls this at the meaningful action sites; the payload is an action NAME
+  // plus an optional short detail, never user content.
+  ipcMain.on('observer:ui', (_e, action: string, detail?: string, projectPath?: string) => {
+    try {
+      observerCapture.recordUiAction({ action, detail, projectPath })
+    } catch (err) {
+      console.error('[observer] ui event failed:', err)
+    }
+  })
+
+  onObserverChanged(() => sendToRenderer('observer:changed'))
+
   // Send an inter-session message (used by notes dispatch + future hooks)
   ipcMain.handle(
     'session:sendMessage',
@@ -957,6 +992,7 @@ interface CleanupStatus {
   notes: { exists: boolean; bytes: number; files: number }
   sessions: { savedExists: boolean; messagesExists: boolean }
   appSettings: { exists: boolean }
+  observer: { exists: boolean; bytes: number }
 }
 
 function registerCleanupHandlers(
@@ -978,6 +1014,7 @@ function registerCleanupHandlers(
   const messagesDir = join(userData, 'messages')
   const pluginDir = join(userData, 'plugin')
   const settingsFile = join(userData, 'state', 'settings.json')
+  const observerDb = join(userData, 'observer.db')
 
   const HOOK_MARKER = 'session-manager-hook'
 
@@ -1036,6 +1073,7 @@ function registerCleanupHandlers(
       notes: { exists: existsSync(notesDir) && notesStats.files > 0, bytes: notesStats.bytes, files: notesStats.files },
       sessions: { savedExists: existsSync(sessionsFile), messagesExists: existsSync(messagesDir) },
       appSettings: { exists: existsSync(settingsFile) },
+      observer: { exists: existsSync(observerDb), bytes: fileSize(observerDb) },
     }
   }
 
@@ -1142,6 +1180,25 @@ function registerCleanupHandlers(
       try { rmSync(messagesDir, { recursive: true, force: true }) } catch { /* missing */ }
       clearSavedSessions()
       return { ok: true }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeObserver', () => {
+    try {
+      // Close the handle first — deleting an open SQLite file leaves the WAL
+      // sidecars behind and the next write recreates a half-empty DB.
+      stopObserver()
+      let bytes = 0
+      for (const suffix of ['', '-wal', '-shm']) {
+        const f = observerDb + suffix
+        if (existsSync(f)) {
+          bytes += fileSize(f)
+          try { unlinkSync(f) } catch { /* locked */ }
+        }
+      }
+      // Restart on a fresh store so observation resumes without a relaunch.
+      startObserver()
+      return { ok: true, bytes }
     } catch (err) { return { ok: false, error: String(err) } }
   })
 

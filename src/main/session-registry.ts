@@ -8,10 +8,10 @@
  * "everything alive right now, tagged by what owns it".
  *
  * Design constraints:
- *  - It imports ONLY pty-manager (the PTY table). Everything else pushes into
- *    it — hook-server writes origins + status, ipc.ts writes origins for
- *    user-initiated spawns. That keeps it free of import cycles (hook-server,
- *    pipeline-store and schedule-store all import each other already).
+ *  - It imports only pty-manager (the PTY table) and the observer's capture
+ *    funnel (a leaf module). Everything else pushes into it — hook-server
+ *    writes origins + status, ipc.ts writes origins for user-initiated spawns.
+ *    That keeps it free of the hook-server/pipeline/schedule import cycle.
  *  - It is derived state: pty-manager is the source of truth for liveness. An
  *    origin whose PTY is gone is reported as a 'zombie' once and then pruned,
  *    so a leaked origin can never masquerade as a live session.
@@ -21,6 +21,7 @@
  */
 
 import { getAllSessions, getSession, type PtySession } from './pty-manager'
+import { recordSessionLifecycle } from './observer/capture'
 
 /** What kind of thing owns a live session. */
 export type SessionKind =
@@ -116,6 +117,17 @@ function notify(): void {
 export function setOrigin(id: string, origin: SessionOrigin): void {
   const prev = origins.get(id)
   origins.set(id, prev ? { ...prev, ...origin } : origin)
+  // The registry is the one choke point every spawn path already goes through,
+  // so it is also where the observer learns a session began. Only the FIRST
+  // tag emits — later calls refine an existing origin, they aren't new sessions.
+  if (!prev) {
+    recordSessionLifecycle({
+      sessionId: id,
+      projectPath: getSession(id)?.projectPath ?? null,
+      action: 'spawn',
+      sessionKind: origin.kind,
+    })
+  }
   notify()
 }
 
@@ -143,9 +155,20 @@ export function setStatus(id: string, status: RegistryStatus): void {
 
 /** Drop all registry state for a session (call alongside PTY teardown). */
 export function forget(id: string): void {
-  const had = origins.delete(id)
+  const origin = origins.get(id)
+  origins.delete(id)
   statuses.delete(id)
-  if (had) notify()
+  if (origin) {
+    // Teardown usually kills the PTY first, so projectPath is often already
+    // gone — the session id is enough to close the pair in the event log.
+    recordSessionLifecycle({
+      sessionId: id,
+      projectPath: getSession(id)?.projectPath ?? null,
+      action: 'end',
+      sessionKind: origin.kind,
+    })
+    notify()
+  }
 }
 
 function projectNameFromPath(p: string): string {

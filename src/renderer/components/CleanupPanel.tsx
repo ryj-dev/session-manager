@@ -9,7 +9,7 @@ interface CleanupPanelProps {
 
 type RowKey =
   | 'mcp' | 'hooks' | 'statusline' | 'claudeMd' | 'plugin'
-  | 'memory' | 'embeddings' | 'notes' | 'sessions' | 'appSettings'
+  | 'memory' | 'embeddings' | 'notes' | 'observer' | 'sessions' | 'appSettings'
 
 interface RowDef {
   key: RowKey
@@ -152,6 +152,20 @@ const ROWS: RowDef[] = [
     confirmBody: (s) => `Permanently deletes ${s.notes.files} files (${fmtBytes(s.notes.bytes)}) including all project notes and agendas. This cannot be undone.`,
   },
   {
+    key: 'observer',
+    title: 'Observer activity log',
+    description: 'Usage events, mined patterns and suggestions in userData/observer.db',
+    destructive: true,
+    status: (s) => ({
+      label: s.observer.exists ? fmtBytes(s.observer.bytes) : 'Empty',
+      variant: s.observer.exists ? 'data' : 'empty',
+      isInstalled: s.observer.exists,
+    }),
+    remove: () => window.api.cleanupRemoveObserver(),
+    confirmTitle: 'Delete the observer activity log?',
+    confirmBody: (s) => `Permanently deletes ${fmtBytes(s.observer.bytes)} of recorded actions, mined patterns and suggestions (including your "never suggest this" mutes). Observation restarts from empty. This cannot be undone.`,
+  },
+  {
     key: 'sessions',
     title: 'Saved sessions',
     description: 'Resumable Claude Code sessions and inter-session message inboxes',
@@ -182,7 +196,7 @@ const ROWS: RowDef[] = [
 ]
 
 const INTEGRATION_KEYS: RowKey[] = ['mcp', 'hooks', 'statusline', 'claudeMd', 'plugin']
-const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'sessions', 'appSettings']
+const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'observer', 'sessions', 'appSettings']
 
 export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Element {
   const [status, setStatus] = useState<CleanupStatus | null>(null)

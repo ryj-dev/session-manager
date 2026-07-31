@@ -363,6 +363,24 @@ const api = {
     return (): void => { ipcRenderer.removeListener('registry:changed', handler) }
   },
 
+  // Observer / insights inbox. Main owns the SQLite store; the renderer pulls
+  // the inbox on demand and re-pulls on 'observer:changed'.
+  observerInbox: (): Promise<unknown> => ipcRenderer.invoke('observer:inbox'),
+  observerAccept: (id: string): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('observer:accept', id),
+  observerDismiss: (id: string, forever: boolean): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke('observer:dismiss', id, forever),
+  observerRunJob: (jobId: string): Promise<boolean> => ipcRenderer.invoke('observer:runJob', jobId),
+  onObserverChanged: (callback: () => void) => {
+    const handler = (): void => callback()
+    ipcRenderer.on('observer:changed', handler)
+    return (): void => { ipcRenderer.removeListener('observer:changed', handler) }
+  },
+  /** Record a renderer-side user action for the observer. Fire-and-forget;
+   *  action NAMES and short details only, never user content. */
+  observerUi: (action: string, detail?: string, projectPath?: string): void =>
+    ipcRenderer.send('observer:ui', action, detail, projectPath),
+
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('session:sendMessage', targetSessionId, message, fromSessionId),
@@ -398,6 +416,7 @@ const api = {
   cleanupRemoveEmbeddings: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeEmbeddings'),
   cleanupRemoveNotes: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeNotes'),
   cleanupRemoveSessions: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSessions'),
+  cleanupRemoveObserver: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeObserver'),
   cleanupResetAppSettings: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:resetAppSettings'),
 
   // App lifecycle — real quit via app.quit() so the full before-quit cleanup
@@ -418,6 +437,7 @@ export interface CleanupStatus {
   notes: { exists: boolean; bytes: number; files: number }
   sessions: { savedExists: boolean; messagesExists: boolean }
   appSettings: { exists: boolean }
+  observer: { exists: boolean; bytes: number }
 }
 
 contextBridge.exposeInMainWorld('api', api)

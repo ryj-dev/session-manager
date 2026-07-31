@@ -292,6 +292,47 @@ export interface RegistryEntry {
   command: string
 }
 
+// ---- Observer / insights inbox (bottom of the Cmd+P overview) ----
+// Types mirror src/main/observer/db.ts + observer/index.ts. The observer keeps
+// its own SQLite store; the renderer pulls the whole inbox on demand and
+// re-pulls on the 'observer:changed' broadcast.
+
+export type SuggestionKind = 'scheduled-task' | 'todo' | 'skill' | 'memory-link' | 'todo-cleanup'
+export type SuggestionStatus = 'pending' | 'accepted' | 'dismissed' | 'never'
+
+export interface Suggestion {
+  id: string
+  patternId: string | null
+  createdAt: number
+  title: string
+  rationale: string
+  kind: SuggestionKind
+  proposal: Record<string, unknown>
+  status: SuggestionStatus
+  resolvedAt: number | null
+  result: string | null
+}
+
+export interface ObserverJobStatus {
+  id: string
+  everyHours: number
+  running: boolean
+  lastRunAt: number | null
+  debtMs: number
+  remainingMs: number
+  blockedBy: 'debt' | 'busy' | 'quiet' | null
+}
+
+export interface ObserverInbox {
+  suggestions: Suggestion[]
+  pendingCount: number
+  statusLine: string
+  jobs: ObserverJobStatus[]
+  activeSessionId: string | null
+  eventCount: number
+  patternCount: number
+}
+
 // ---- Canvas (per-session UI artifacts) ----
 // Types mirror the main-process source of truth in src/main/canvas-types.ts.
 // The main process owns the authoritative state (canvas-store.ts); the renderer
@@ -599,6 +640,15 @@ export interface AppState {
   /** 'canvas:focus' from an agent: open the dock + select an existing artifact. */
   handleCanvasFocus: (sessionId: string, artifactId: string) => void
 
+  // Observer / insights inbox. Pulled on demand; refreshed on 'observer:changed'.
+  observerInbox: ObserverInbox | null
+  setObserverInbox: (inbox: ObserverInbox | null) => void
+  /** Pull the inbox from main. Safe to call repeatedly. */
+  refreshObserverInbox: () => Promise<void>
+  acceptSuggestion: (id: string) => Promise<{ ok: boolean; message: string }>
+  dismissSuggestion: (id: string, forever: boolean) => Promise<{ ok: boolean; message: string }>
+  runObserverJob: (jobId: string) => Promise<boolean>
+
   // Sessions overview (Cmd+P). Main owns the registry; the renderer mirrors it
   // via 'registry:changed' and a poll while the panel is open.
   registryEntries: RegistryEntry[]
@@ -698,7 +748,12 @@ export const useStore = create<AppState>((set, get) => ({
   viewMode: 'graph',
   setViewMode: (mode) => set({ viewMode: mode }),
   activePanel: null,
-  setActivePanel: (panel) => set({ activePanel: panel }),
+  setActivePanel: (panel) => {
+    // Observer: panel opens are one of the highest-signal UI actions (they
+    // punctuate what the user is doing). Name only — see observer/capture.ts.
+    if (panel) window.api.observerUi(`panel.open.${panel}`)
+    set({ activePanel: panel })
+  },
   focusedSessionId: null,
   setFocusedSessionId: (id) => set({ focusedSessionId: id }),
   selectedSessionIndex: 0,
@@ -891,6 +946,7 @@ export const useStore = create<AppState>((set, get) => ({
       projectPath = match?.projectPath ?? (state.baseProjectsDir ? `${state.baseProjectsDir}/${name}` : undefined)
     }
     if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
+    window.api.observerUi('pipeline.start', name ?? undefined, projectPath)
     void window.api.pipelineStart(todo, state.pipelineDefaultAutonomy, projectPath)
   },
   startPipelineReview: (todo, diffSource) => {
@@ -905,6 +961,7 @@ export const useStore = create<AppState>((set, get) => ({
       projectPath = match?.projectPath ?? (state.baseProjectsDir ? `${state.baseProjectsDir}/${name}` : undefined)
     }
     if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
+    window.api.observerUi('pipeline.startReview', name ?? undefined, projectPath)
     void window.api.pipelineStartReview(todo, state.pipelineDefaultAutonomy, diffSource, projectPath)
   },
   setPipelineStage: (id, stage) => window.api.pipelineSetStage(id, stage) as Promise<PipelineTask[]>,
@@ -919,11 +976,17 @@ export const useStore = create<AppState>((set, get) => ({
   // 'schedules:changed' broadcast (wired in App.tsx). Mirrors the pipeline block.
   scheduledTasks: [],
   setScheduledTasks: (tasks) => set({ scheduledTasks: tasks }),
-  createScheduledTask: (data) => window.api.schedulesCreate(data) as Promise<ScheduledTask>,
+  createScheduledTask: (data) => {
+    window.api.observerUi('schedule.create')
+    return window.api.schedulesCreate(data) as Promise<ScheduledTask>
+  },
   updateScheduledTask: (id, patch) => { void window.api.schedulesUpdate(id, patch) },
   deleteScheduledTask: (id) => { void window.api.schedulesDelete(id) },
   setScheduledTaskEnabled: (id, enabled) => { void window.api.schedulesSetEnabled(id, enabled) },
-  runScheduledTaskNow: (id) => window.api.schedulesRunNow(id),
+  runScheduledTaskNow: (id) => {
+    window.api.observerUi('schedule.runNow')
+    return window.api.schedulesRunNow(id)
+  },
 
   // Canvas
   canvasArtifacts: [],
@@ -980,6 +1043,25 @@ export const useStore = create<AppState>((set, get) => ({
         : [...state.openCanvasSessionIds, sessionId],
       canvasSelection: { ...state.canvasSelection, [sessionId]: artifactId },
     })),
+
+  // Observer / insights inbox
+  observerInbox: null,
+  setObserverInbox: (inbox) => set({ observerInbox: inbox }),
+  refreshObserverInbox: async () => {
+    const inbox = await window.api.observerInbox().catch(() => null)
+    if (inbox) set({ observerInbox: inbox as ObserverInbox })
+  },
+  acceptSuggestion: async (id) => {
+    const result = await window.api.observerAccept(id)
+    await get().refreshObserverInbox()
+    return result
+  },
+  dismissSuggestion: async (id, forever) => {
+    const result = await window.api.observerDismiss(id, forever)
+    await get().refreshObserverInbox()
+    return result
+  },
+  runObserverJob: (jobId) => window.api.observerRunJob(jobId),
 
   // Sessions overview
   registryEntries: [],

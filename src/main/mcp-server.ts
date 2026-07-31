@@ -354,6 +354,26 @@ function formatSuggestions(
   )
 }
 
+// ── Observer instrumentation ────────────────────────────────────────────────
+// Wrap server.tool once so every tool registration below is instrumented,
+// rather than sprinkling a beacon call through ~46 handlers (which would rot
+// the moment someone adds a tool). The beacon itself is fire-and-forget and
+// name-only — see observeToolUse near the bottom of this file.
+
+const registerTool = server.tool.bind(server)
+server.tool = ((...args: unknown[]) => {
+  const name = args[0] as string
+  const handlerIndex = args.length - 1
+  const handler = args[handlerIndex]
+  if (typeof handler === 'function') {
+    args[handlerIndex] = (...handlerArgs: unknown[]) => {
+      try { observeToolUse(name) } catch { /* never let observation break a tool */ }
+      return (handler as (...a: unknown[]) => unknown)(...handlerArgs)
+    }
+  }
+  return (registerTool as (...a: unknown[]) => unknown)(...args)
+}) as typeof server.tool
+
 // ── create-memory ───────────────────────────────────────────────────────────
 
 server.tool(
@@ -1783,6 +1803,73 @@ server.tool(
       .slice(0, 8)
       .map((a) => `- ${a.slug} — ${a.summary || a.title}`)
     return { content: [{ type: 'text', text: `Top matches:\n${lines.join('\n')}\n\nRead one with read-wiki-article(slug).` }] }
+  }
+)
+
+
+// ── Observer beacon ─────────────────────────────────────────────────────────
+// Fire-and-forget: tell the app which session-manager tool an agent just used,
+// so the observer can mine "you keep asking agents to do X". Deliberately NOT
+// awaited — observation must never add latency to, or fail, a tool call. Only
+// the tool NAME is sent: never arguments, note bodies or todo text.
+
+const OBSERVED_TOOLS = new Set([
+  'create-todo', 'update-todo', 'delete-todo', 'list-todos', 'read-todo',
+  'create-memory', 'edit-memory', 'delete-memory', 'search-memories', 'read-memory',
+  'search-wiki', 'read-wiki-article',
+  'spawn-session', 'spawn-agent', 'send-message',
+  'pipeline-start', 'pipeline-start-review',
+  'create-scheduled-task', 'update-scheduled-task',
+  'canvas-show',
+])
+
+function observeToolUse(tool: string): void {
+  if (!OBSERVED_TOOLS.has(tool)) return
+  const port = getHookServerPort()
+  if (!port) return
+  const secret = getHookSecret()
+  void fetch(`http://127.0.0.1:${port}/observer/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(secret ? { 'X-Hook-Secret': secret } : {}) },
+    body: JSON.stringify({
+      tool,
+      sessionId: process.env.APP_SESSION_ID || null,
+      projectPath: process.cwd(),
+    }),
+  }).catch(() => { /* the app may be closed — the beacon is optional */ })
+}
+
+// ── observer-suggest ────────────────────────────────────────────────────────
+// The curator's ONLY write path. It proposes; the user accepts or dismisses
+// from the insights inbox in the ⌘P overview. Restricted to curator sessions
+// by their --allowedTools list, not by anything here.
+
+server.tool(
+  'observer-suggest',
+  'Propose ONE automation or curation action to the user\'s insights inbox. You do not perform the action — the user accepts or dismisses it. Use this only when you can describe a concrete, genuinely useful change; rejecting a pattern is the expected outcome for most of them.',
+  {
+    title: z.string().describe('One line the user reads in their inbox, e.g. "Run the morning repo health check automatically".'),
+    kind: z.enum(['scheduled-task', 'todo', 'skill', 'memory-link', 'todo-cleanup'])
+      .describe('What kind of thing you are proposing. Determines the required shape of `proposal`.'),
+    proposal: z.record(z.string(), z.unknown()).describe('The concrete proposal. scheduled-task: { name, prompt, projectPath, recurrence:{kind,minutes?|hour?,minute?}, launch, model? }. skill: { name, description, body }. todo: { title, body, tags }. memory-link: { from, to }. todo-cleanup: { todoId, action:"close" }.'),
+    rationale: z.string().optional().describe('1-3 sentences: what you observed and why this helps. Cite the actual counts you were given.'),
+    patternId: z.string().optional().describe('The patternId this came from, when it came from a mined usage pattern. Omit for housekeeping proposals.'),
+  },
+  async ({ title, kind, proposal, rationale, patternId }) => {
+    try {
+      const result = await callHookServer('/observer/suggest', {
+        title, kind, proposal, rationale, patternId,
+      }) as { ok: boolean; id?: string; error?: string }
+      if (!result.ok) {
+        return { content: [{ type: 'text', text: `Suggestion rejected: ${result.error}` }], isError: true }
+      }
+      return { content: [{ type: 'text', text: `Suggestion "${title}" added to the user's inbox (${result.id}).` }] }
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error filing suggestion: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      }
+    }
   }
 )
 

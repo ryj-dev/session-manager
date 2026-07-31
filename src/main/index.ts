@@ -22,6 +22,7 @@ import { resolveAppWikiDir } from './wiki'
 import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from './mcp-launcher'
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 import { loadSettings } from './settings-store'
+import { startObserver, stopObserver } from './observer'
 
 // Register design:// + canvas:// as privileged schemes (must be done before app ready)
 protocol.registerSchemesAsPrivileged([
@@ -107,6 +108,7 @@ function saveAndCleanup(): void {
   killAllSessions()
   cleanupAllSkillCommands()
   stopScheduler()
+  stopObserver()
   stopHookServer()
   stopMemoryWatcher()
   stopEmbedServer()
@@ -328,6 +330,9 @@ app.whenReady().then(async () => {
   registerIpcHandlers({ reinstallMcp: doRegisterMcp })
   createWindow()
   startScheduler()
+  // The observer watches app usage and proposes automations. Debt-based and
+  // idle-gated (see observer/jobs.ts) — nothing fires while the user is busy.
+  startObserver()
 
   // Session journal: interval catches title/activity changes; the
   // claudeSessionId listener captures new sessions as soon as they get an id,
