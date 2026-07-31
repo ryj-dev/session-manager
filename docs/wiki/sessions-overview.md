@@ -20,10 +20,11 @@ Press `Cmd+P` (configurable as `openOverview`). Sessions are grouped by owner:
 - **Scheduled task runs** — in-flight runs, sub-grouped per schedule.
 - **Spawned agents & terminals** — agent-gallery sessions and raw shells.
 - **Background observer** — the curator when it is running, plus its status line and when it next plans to run (see `observer-agent`).
+- **Drawer previews** — throwaway PTYs a drawer spawned to *render* an existing conversation (the pipeline drawer's terminal, the `Cmd+J` run-history preview). Hidden unless you turn on **Show N preview sessions** in the header, since the drawer that opened them also closes them.
 
 Each row shows a **kind badge**, a **status dot**, the **project**, **uptime**, and a `↳` chip linking to the session that spawned it. Hovering a row reveals two actions:
 
-- **open** — jumps to wherever that session lives: focused view for graph sessions, agents and terminals; the `Cmd+L` board for pipeline sessions; the `Cmd+J` panel for scheduled runs.
+- **open** — jumps to wherever that session lives: focused view for graph sessions, agents and terminals; the `Cmd+L` board for pipeline sessions; the `Cmd+J` panel for scheduled runs. Disabled for observer runs (headless — there is no view; its status and proposals are further down the panel) and for drawer previews (they live in the drawer that opened them); hover the button for the reason.
 - **kill** — terminates the PTY, behind a confirmation that says what is lost (for a pipeline session: the in-flight turn only — the task stays on the board and its conversation is resumable).
 
 The **Insights** section at the bottom is the observer's inbox — see `observer-agent`.
@@ -41,6 +42,8 @@ The **Insights** section at the bottom is the observer's inbox — see `observer
 ## How it works
 
 A main-process **session registry** (`src/main/session-registry.ts`) joins the live PTY table with an *origin tag* written at every spawn path — `pty:spawn`/`resume`/`fork`, the hook server's `/spawn`, `runScheduledTask`, the pipeline orchestrator spawn (and its resume re-key), `spawn-agent`, and the observer's curator. Status comes from the hook server, which pushes each `working` / `idle` / `permission` transition into the registry as it fires.
+
+The registry is also where the observer learns that a session began or ended — and where two kinds are held back from it. A **drawer preview** is the app re-rendering a conversation, not the user starting one; the **observer's own curator run** is the observer, and mining its reads would hand it a flawless daily "habit" manufactured from the fact that it ran. Both are excluded from the event log at the source, so nothing downstream has to remember.
 
 The registry is **derived state**: pty-manager is the source of truth for liveness. A session with no recorded origin still appears, with its kind inferred from the spawn command, so a future spawn path that forgets to tag itself can never hide a live PTY. Conversely, an origin whose PTY has died is surfaced once as a red `zombie` row and then pruned — a leak is made visible rather than silently masquerading as a live session.
 

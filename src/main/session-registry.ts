@@ -107,8 +107,14 @@ const statuses = new Map<string, RegistryStatus>()
  * 'preview' — a drawer re-rendering an old conversation is not the user doing
  * something; counting it would make "opened the pipeline drawer" look like a
  * daily session habit.
+ *
+ * 'observer' — the curator's own run. Its reads (list-memories, read-todo,
+ * search-wiki, the Grep/Read it does to check evidence) went into the same log
+ * it is judging, so it observed itself: a perfectly regular once-a-day
+ * "habit", by construction present on every day the curator ran, feeding its
+ * own mining a pattern only it produces. The observer is not a user.
  */
-const UNOBSERVED_KINDS: ReadonlySet<SessionKind> = new Set<SessionKind>(['preview'])
+const UNOBSERVED_KINDS: ReadonlySet<SessionKind> = new Set<SessionKind>(['preview', 'observer'])
 
 /** True when this session's activity belongs in the observer's event log.
  *  Untagged sessions are observed — the default has to be "record it", or a

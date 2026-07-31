@@ -2591,18 +2591,25 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   // (`curl -d @-`), so PreToolUse carries tool_name + tool_input with no hook
   // reinstall needed. Recording is best-effort and must never break status
   // tracking, hence the try/catch around the whole block.
+  //
+  // Sessions the observer does not observe (its own curator run, drawer
+  // previews) are filtered here, at the source, so nothing downstream has to
+  // remember: an observer that mines its own reads manufactures a flawless
+  // daily "habit" out of the fact that it ran.
   try {
-    const projectPath = getSession(appSessionId)?.projectPath ?? null
-    if (event === 'PreToolUse' && payload.tool_name) {
-      observer.recordToolUse({
-        sessionId: appSessionId,
-        projectPath,
-        tool: payload.tool_name,
-        toolInput: payload.tool_input,
-      })
-    } else if (event === 'UserPromptSubmit') {
-      // Length only — the prompt body never reaches the store.
-      observer.recordPrompt({ sessionId: appSessionId, projectPath, promptText: payload.prompt })
+    if (registry.shouldObserveSession(appSessionId)) {
+      const projectPath = getSession(appSessionId)?.projectPath ?? null
+      if (event === 'PreToolUse' && payload.tool_name) {
+        observer.recordToolUse({
+          sessionId: appSessionId,
+          projectPath,
+          tool: payload.tool_name,
+          toolInput: payload.tool_input,
+        })
+      } else if (event === 'UserPromptSubmit') {
+        // Length only — the prompt body never reaches the store.
+        observer.recordPrompt({ sessionId: appSessionId, projectPath, promptText: payload.prompt })
+      }
     }
   } catch (err) {
     console.error('[observer] hook capture failed:', err)
@@ -2709,6 +2716,9 @@ function handleObserverEvent(body: string, res: import('http').ServerResponse): 
   try {
     const { tool, sessionId, projectPath } = readJson<{ tool?: string; sessionId?: string; projectPath?: string }>(body)
     if (!tool) return
+    // Same filter as the hook path: the curator's own MCP reads are not user
+    // activity, and mining them would hand it back a habit it invented.
+    if (sessionId && !registry.shouldObserveSession(sessionId)) return
     observer.recordMcpToolUse({
       tool,
       sessionId: sessionId ?? null,
