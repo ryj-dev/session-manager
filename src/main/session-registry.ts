@@ -163,6 +163,7 @@ export function setOrigin(id: string, origin: SessionOrigin): void {
       action: 'spawn',
       sessionKind: origin.kind,
       parentSessionId: origin.parentSessionId ?? null,
+      agentName: origin.agentName ?? null,
     })
   }
   notify()
@@ -207,6 +208,7 @@ export function forget(id: string): void {
       action: 'end',
       sessionKind: origin.kind,
       parentSessionId: origin.parentSessionId ?? null,
+      agentName: origin.agentName ?? null,
     })
   }
   notify()

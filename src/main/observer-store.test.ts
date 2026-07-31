@@ -294,6 +294,210 @@ test('days outside the window do not count toward promotion', () => {
   )
 })
 
+// ── The delegation miner ────────────────────────────────────────────────────
+// The one miner that is stateful rather than token-counting: it accumulates
+// the SHAPE of "one session drove several others" across passes. Everything
+// that can go wrong here only shows up over multiple passes.
+
+/** A delegated spawn: note the event's own sessionId is the CHILD. */
+function spawnEvent(child: string, parent: string, ts: number): void {
+  appendEvent({
+    kind: 'session', sessionId: child, project: 'proj', ts,
+    payload: { action: 'spawn', sessionKind: 'user', parentSessionId: parent },
+  })
+}
+
+/** The parent messaging one of its children. */
+function messageEvent(parent: string, ts: number): void {
+  appendEvent({
+    kind: 'mcp', sessionId: parent, project: 'proj', ts,
+    payload: { server: 'session-manager', tool: 'send-message' },
+  })
+}
+
+const delegations = (): ReturnType<typeof listPatterns> =>
+  listPatterns({ limit: 500 }).filter((p) => p.type === 'delegation')
+
+test('a spawn-and-drive workflow is recorded as one delegation', () => {
+  freshDb()
+  spawnEvent('impl', 'parent', BASE)
+  spawnEvent('review', 'parent', BASE + 1000)
+  for (let i = 0; i < 5; i++) messageEvent('parent', BASE + 2000 + i * 1000)
+
+  // Still in flight: the pass runs while the work is recent, so nothing emits.
+  runMiningPass({ now: BASE + 10_000 })
+  assert.equal(delegations().length, 0, 'an in-flight delegation must not emit')
+
+  // An hour later it has gone quiet, so the next pass settles it.
+  runMiningPass({ now: BASE + 3_600_000 })
+  const [pattern] = delegations()
+  assert.ok(pattern, 'a settled delegation should be recorded')
+  assert.equal(pattern.signature, 'delegation:fanout=2:rounds=4-9')
+  assert.match(pattern.label, /Spawns 2 child sessions.*exchanges 4-9 messages/)
+})
+
+test('a settled delegation is emitted exactly once', () => {
+  freshDb()
+  spawnEvent('child', 'parent', BASE)
+  messageEvent('parent', BASE + 1000)
+  runMiningPass({ now: BASE + 3_600_000 })
+  const id = delegations()[0].id
+  assert.equal(getPattern(id)?.support, 1)
+
+  // Later passes must not re-emit it from carried state.
+  runMiningPass({ now: BASE + 7_200_000 })
+  runMiningPass({ now: BASE + 10_800_000 })
+  assert.equal(getPattern(id)?.support, 1)
+})
+
+test('a delegation straddling several passes accumulates, not fragments', () => {
+  freshDb()
+  // Spawn in pass 1, messages in pass 2, more in pass 3 — all one workflow.
+  spawnEvent('impl', 'parent', BASE)
+  spawnEvent('review', 'parent', BASE + 1000)
+  runMiningPass({ now: BASE + 2000 })
+
+  for (let i = 0; i < 3; i++) messageEvent('parent', BASE + 60_000 + i * 1000)
+  runMiningPass({ now: BASE + 120_000 })
+
+  for (let i = 0; i < 4; i++) messageEvent('parent', BASE + 180_000 + i * 1000)
+  runMiningPass({ now: BASE + 240_000 })
+
+  assert.equal(delegations().length, 0, 'not settled while activity continues')
+
+  runMiningPass({ now: BASE + 3_600_000 })
+  const settled = delegations()
+  assert.equal(settled.length, 1, 'one workflow, not one per pass')
+  // 7 messages total, across three passes — the carry has to survive each one.
+  assert.equal(settled[0].signature, 'delegation:fanout=2:rounds=4-9')
+})
+
+test('concurrent delegations from different parents stay separate', () => {
+  freshDb()
+  spawnEvent('a1', 'parentA', BASE)
+  spawnEvent('b1', 'parentB', BASE + 500)
+  spawnEvent('b2', 'parentB', BASE + 600)
+  messageEvent('parentA', BASE + 1000)
+  runMiningPass({ now: BASE + 3_600_000 })
+
+  const sigs = delegations().map((p) => p.signature).sort()
+  assert.deepEqual(sigs, ['delegation:fanout=1:rounds=1', 'delegation:fanout=2:rounds=0'])
+})
+
+test('a hand-started session is not a delegation', () => {
+  freshDb()
+  // No parentSessionId: the user pressed the hotkey.
+  appendEvent({
+    kind: 'session', sessionId: 'solo', project: 'proj', ts: BASE,
+    payload: { action: 'spawn', sessionKind: 'user' },
+  })
+  messageEvent('solo', BASE + 1000)
+  runMiningPass({ now: BASE + 3_600_000 })
+  assert.equal(delegations().length, 0)
+})
+
+test('a once-per-pass agent spawn is kept, so it can accumulate days', () => {
+  freshDb()
+  // You spawn a given agent once in a two-hour window, not twice. At the
+  // default threshold of 2 this row is discarded on every pass and can never
+  // accumulate the distinct days it needs to promote.
+  appendEvent({
+    kind: 'session', sessionId: 'c1', project: 'proj', ts: BASE,
+    payload: { action: 'spawn', sessionKind: 'agent', agentName: 'code-reviewer', parentSessionId: 'p1' },
+  })
+  runMiningPass({ now: BASE + 1000 })
+
+  const spawned = listPatterns({ limit: 100 })
+    .find((p) => p.signature === 'session:spawn:agent:code-reviewer:delegated')
+  assert.ok(spawned, `agent spawn not stored; got ${listPatterns({ limit: 100 }).map((p) => p.signature).join(' | ')}`)
+  assert.equal(spawned.support, 1)
+})
+
+test('session patterns get prose labels, not raw tokens', () => {
+  freshDb()
+  // The curator judges a pattern from its LABEL, and its output quotes that
+  // label back at the user. `spawn:agent:code-reviewer:delegated` is precise
+  // and unreadable; both the decision and the proposal suffer.
+  appendEvent({
+    kind: 'session', sessionId: 'c1', project: 'proj', ts: BASE,
+    payload: { action: 'spawn', sessionKind: 'agent', agentName: 'code-reviewer', parentSessionId: 'p1' },
+  })
+  runMiningPass({ now: BASE + 1000 })
+  const labels = listPatterns({ limit: 100 }).map((p) => p.label)
+  assert.ok(
+    labels.some((l) => l === 'Starts the `code-reviewer` agent from another session'),
+    labels.join(' | '),
+  )
+  assert.ok(!labels.some((l) => l.includes('Repeatedly runs `spawn:')), labels.join(' | '))
+})
+
+test('a one-off shell command is still discarded as noise', () => {
+  freshDb()
+  // The relaxed threshold must NOT leak to the high-volume kinds, or the
+  // pattern table fills with every command ever run once.
+  toolEvent('Bash', 'some-one-off-command', BASE)
+  runMiningPass({ now: BASE + 1000 })
+  assert.equal(listPatterns({ limit: 100 }).length, 0)
+})
+
+test('a single delegation is kept — it does not need to repeat within a pass', () => {
+  freshDb()
+  // MIN_OCCURRENCES would discard this: delegations are rare and deliberate,
+  // so requiring two inside one ~2h window would throw away almost all of them.
+  spawnEvent('child', 'parent', BASE)
+  runMiningPass({ now: BASE + 3_600_000 })
+  assert.equal(delegations().length, 1)
+})
+
+test('a delegation that never goes quiet is emitted at the age cap', () => {
+  freshDb()
+  spawnEvent('child', 'parent', BASE)
+  // A trickle of messages every 20 minutes, each one resetting the 30-minute
+  // settle window, so quiescence never fires. 80 × 20min = ~27h, past the cap.
+  let t = BASE
+  for (let i = 0; i < 80; i++) {
+    t += 20 * 60_000
+    messageEvent('parent', t)
+    runMiningPass({ now: t + 1000 })
+  }
+  assert.equal(delegations().length, 1, 'the age cap must force it out eventually')
+  assert.equal(delegations()[0].signature, 'delegation:fanout=1:rounds=10+')
+})
+
+test('the same delegation shape on four days promotes', () => {
+  freshDb()
+  for (let d = 0; d < 4; d++) {
+    spawnEvent(`impl-${d}`, `parent-${d}`, dayAt(d))
+    spawnEvent(`review-${d}`, `parent-${d}`, dayAt(d) + 1000)
+    for (let i = 0; i < 5; i++) messageEvent(`parent-${d}`, dayAt(d) + 2000 + i * 1000)
+    runMiningPass({ now: dayAt(d) + 3_600_000 })
+  }
+  const promotable = findPromotablePatterns({ minDistinctDays: 4, windowDays: 14, limit: 10, now: dayAt(4) })
+    .filter((p) => p.type === 'delegation')
+  assert.equal(promotable.length, 1, 'a delegation habit should reach the curator')
+  assert.equal(promotable[0].distinctDays, 4)
+  // The label is prose, because this is the one pattern the curator has to
+  // reason about as a workflow rather than repeat as a command.
+  assert.match(promotable[0].label, /Spawns 2 child sessions/)
+})
+
+test('open delegations survive a restart', () => {
+  const path = freshDb()
+  spawnEvent('child', 'parent', BASE)
+  runMiningPass({ now: BASE + 1000 })     // in flight, carried in meta
+
+  reopen(path)
+  messageEvent('parent', BASE + 2000)
+  runMiningPass({ now: BASE + 3_600_000 })
+
+  const settled = delegations()
+  assert.equal(settled.length, 1)
+  // rounds=1 proves the carried record was reloaded rather than restarted:
+  // a fresh record would have seen the message with no open delegation to
+  // attribute it to, and dropped it.
+  assert.equal(settled[0].signature, 'delegation:fanout=1:rounds=1')
+})
+
 // ── The mining pass is atomic ───────────────────────────────────────────────
 
 test('a failure mid-pass leaves neither the counts nor the watermark behind', () => {

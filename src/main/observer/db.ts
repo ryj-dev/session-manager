@@ -58,9 +58,11 @@ export interface ObserverEvent {
 export interface PatternRow {
   id: string
   project: string | null
-  /** 'frequency' (a single recurring action), 'sequence' (an n-gram), or
-   *  'time-of-day' (an action clustered into a daily window). */
-  type: 'frequency' | 'sequence' | 'time-of-day'
+  /** 'frequency' (a single recurring action), 'sequence' (an n-gram),
+   *  'time-of-day' (an action clustered into a daily window), or 'delegation'
+   *  (one session spawning and driving several others — a workflow shape
+   *  rather than an action). */
+  type: 'frequency' | 'sequence' | 'time-of-day' | 'delegation'
   /** Stable identity of the thing that recurs, e.g. `bash:npm run build`. */
   signature: string
   /** Human-readable one-liner for the prompt + UI. */

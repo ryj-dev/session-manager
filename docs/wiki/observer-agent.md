@@ -19,12 +19,23 @@ It is built as three layers with very different costs, deliberately: cheap obser
 
 - **Tool use** from the `PreToolUse` hook — including the exact shell command, which is the single highest-signal thing about what you actually do repeatedly.
 - **UI actions** — hotkeys fired, panels opened, sessions and agents spawned, pipeline tasks started, schedules created or run.
-- **Session lifecycle**, tagged with the origin kind from the session registry (see `sessions-overview`), and with the **parent session** when one session spawned another. That parent link is what separates a session you opened with a hotkey from one an agent delegated to — the registry tags both `user`, so without it the two are indistinguishable and delegation cannot be mined at all.
+- **Session lifecycle**, tagged with the origin kind from the session registry (see `sessions-overview`), plus two qualifiers: the **parent session** when one session spawned another, and the **agent name** when it was launched from an agent definition. The parent link separates a session you opened with a hotkey from one an agent delegated to — the registry tags both `user`, so without it the two are indistinguishable. The agent name separates *which* agent you keep reaching for from the bare fact that you spawn agents. Both are structural metadata you already chose; neither is prompt text.
 - **MCP tool calls**, from any connected server — server and tool name, never arguments.
 
 What it does **not** capture is as deliberate as what it does: prompt bodies are recorded as a character count and the text is discarded, so the *content* of what you asked for is never in the log. The observer sees the shape of your work, not its substance.
 
-**2. Mining (every ~2h of app-open time, no LLM).** A cheap incremental pass counts three things per project: **frequency** (an action that recurs), **sequences** (2- and 3-grams of consecutive actions inside one session), and **time-of-day** clustering. It reads forward from a watermark, so an interrupted pass resumes exactly where it stopped and nothing is double-counted.
+**2. Mining (every ~2h of app-open time, no LLM).** A cheap incremental pass counts four things per project:
+
+- **frequency** — an action that recurs;
+- **sequences** — 2- and 3-grams of consecutive actions inside one session;
+- **time-of-day** clustering;
+- **delegation** — one session spawning several others and driving them with messages. This one is a *workflow shape* rather than an action, so it is recorded as a bucketed signature (`2 children, 4–9 messages`) instead of a token. Counts are bucketed because nobody exchanges exactly seven messages twice; without that, every delegation would be unique and none would ever recur.
+
+It reads forward from a watermark, so an interrupted pass resumes exactly where it stopped and nothing is double-counted; the whole pass is one transaction.
+
+A delegation is counted as finished when it goes **quiet** for 30 minutes, not when its children exit — a child that has done its work sits at its prompt until something kills it, so waiting for that would mean most delegations never counted at all. One that never goes quiet is recorded after 24 hours regardless.
+
+Most patterns must occur at least twice inside a single pass to be stored at all, which keeps one-off commands out of the table. Session spawns and delegations are exempt: you start a given agent once in a two-hour window, not twice, and the recurrence that matters for them is across *days*.
 
 **3. Reasoning (every ~24h of app-open time, Haiku).** When a pattern has recurred on **at least 4 distinct days within 14**, it is promoted and handed to a headless Claude session — same machinery as a scheduled task, tool-restricted and read-only, no graph presence, visible in `Cmd+P` as an `observer` session. Its job is to judge whether automating the pattern would genuinely help, and if so draft a concrete proposal. It is told explicitly that **rejecting is the expected outcome for most patterns**.
 

@@ -93,15 +93,13 @@ export function startObserver(): void {
     run: () => {
       // Drain a backlog across a few passes rather than waiting a full
       // interval per BATCH_LIMIT chunk (matters after a long busy stretch).
-      let processedAny = false
       for (let i = 0; i < 5; i++) {
         const result = runMiningPass()
-        processedAny ||= result.processed > 0
         if (result.processed === 0 || !hasMiningBacklog()) break
       }
-      // Nothing in the log to mine: report a no-op so the debt survives and the
-      // next batch of events is picked up promptly rather than in two hours.
-      return processedAny
+      // Always a real run, never a skip — even with no new events the pass
+      // settles finished delegations and prunes. Reporting a no-op here would
+      // hold the debt above the interval and re-fire mining every single tick.
     },
   })
 

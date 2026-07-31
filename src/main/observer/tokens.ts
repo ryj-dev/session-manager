@@ -60,11 +60,16 @@ export function actionToken(e: TokenisableEvent): string | null {
       return server ? `mcp:${server}:${tool}` : `mcp:${tool}`
     }
     case 'session': {
-      const base = `session:${String(e.payload.action ?? '')}:${String(e.payload.sessionKind ?? '')}`
+      let token = `session:${String(e.payload.action ?? '')}:${String(e.payload.sessionKind ?? '')}`
+      // Which agent, when it was one. Every agent spawn otherwise collapses to
+      // a single `session:spawn:agent` token, so "you keep reaching for the
+      // code-reviewer" is indistinguishable from "you spawn agents".
+      const agent = typeof e.payload.agentName === 'string' ? slugToken(e.payload.agentName) : ''
+      if (agent) token += `:${agent}`
       // A session an agent spawned is a different act from one the user
       // started by hand, even though both are tagged 'user'. Without this the
       // two collapse into one token and delegation is unminable.
-      return e.payload.parentSessionId ? `${base}:delegated` : base
+      return e.payload.parentSessionId ? `${token}:delegated` : token
     }
     case 'prompt':
       // A prompt is a turn boundary, not an action worth mining on its own —
@@ -185,6 +190,55 @@ export function normalizeToolArg(tool: string, input: unknown): string | null {
   if (typeof obj.pattern === 'string') return obj.pattern.slice(0, 120)
 
   return null
+}
+
+/** Reduce a free-form name to a token-safe fragment. `:` is the token
+ *  separator, so an unsanitised name could forge extra segments. */
+export function slugToken(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+}
+
+// ── Delegation signatures ───────────────────────────────────────────────────
+
+/**
+ * Buckets for a delegation's shape.
+ *
+ * Raw counts are useless as a recurrence key — nobody exchanges exactly seven
+ * messages twice — so each delegation would be its own unique pattern and
+ * nothing would ever cross the promotion threshold. Same reasoning as the
+ * 3-hour time-of-day windows: coarse enough to actually cluster.
+ */
+export function fanoutBucket(children: number): string {
+  return children >= 5 ? '5+' : String(children)
+}
+
+export function roundsBucket(messages: number): string {
+  if (messages <= 0) return '0'
+  if (messages === 1) return '1'
+  if (messages <= 3) return '2-3'
+  if (messages <= 9) return '4-9'
+  return '10+'
+}
+
+export function delegationSignature(children: number, messages: number): string {
+  return `delegation:fanout=${fanoutBucket(children)}:rounds=${roundsBucket(messages)}`
+}
+
+/**
+ * The parent of a delegated spawn, or null when the event is not one.
+ *
+ * Note the asymmetry: a spawn event's own `sessionId` is the CHILD, and the
+ * delegation belongs to the parent named in the payload.
+ */
+export function delegatedSpawnParent(e: TokenisableEvent): string | null {
+  if (e.kind !== 'session' || e.payload.action !== 'spawn') return null
+  const parent = e.payload.parentSessionId
+  return typeof parent === 'string' && parent ? parent : null
+}
+
+/** True when this event is the parent messaging one of its children. */
+export function isDelegationMessage(e: TokenisableEvent): boolean {
+  return e.kind === 'mcp' && e.payload.tool === 'send-message'
 }
 
 /**

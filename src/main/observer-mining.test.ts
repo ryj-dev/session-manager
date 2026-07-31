@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { commandShape, actionToken, redactSecrets, normalizeToolArg, parseMcpToolName, projectKey } from './observer/tokens.ts'
+import {
+  commandShape, actionToken, redactSecrets, normalizeToolArg, parseMcpToolName, projectKey,
+  slugToken, delegationSignature, delegatedSpawnParent, fanoutBucket, roundsBucket,
+} from './observer/tokens.ts'
 
 // The observer's value depends entirely on whether two runs of "the same
 // thing" collapse to the same token — too eager and unrelated work merges,
@@ -113,6 +116,59 @@ test('a delegated spawn tokenises differently from a hand-started one', () => {
     actionToken({ ...base, payload: { action: 'end', sessionKind: 'user', parentSessionId: 'parent-1' } }),
     'session:end:user:delegated',
   )
+})
+
+test('an agent spawn names the agent, so which one is minable', () => {
+  const base = { id: 1, ts: 0, sessionId: 'child', project: 'p', kind: 'session' } as const
+  // Without the name every agent spawn collapses into one token and "you keep
+  // reaching for the reviewer" is indistinguishable from "you spawn agents".
+  assert.equal(
+    actionToken({ ...base, payload: { action: 'spawn', sessionKind: 'agent', agentName: 'code-reviewer' } }),
+    'session:spawn:agent:code-reviewer',
+  )
+  assert.notEqual(
+    actionToken({ ...base, payload: { action: 'spawn', sessionKind: 'agent', agentName: 'code-reviewer' } }),
+    actionToken({ ...base, payload: { action: 'spawn', sessionKind: 'agent', agentName: 'implementer' } }),
+  )
+  // Both qualifiers together.
+  assert.equal(
+    actionToken({ ...base, payload: { action: 'spawn', sessionKind: 'agent', agentName: 'Code Reviewer', parentSessionId: 'p1' } }),
+    'session:spawn:agent:code-reviewer:delegated',
+  )
+})
+
+test('an agent name cannot forge extra token segments', () => {
+  // ':' separates token segments, so an unsanitised name could invent one.
+  assert.equal(slugToken('evil:delegated:name'), 'evil-delegated-name')
+  assert.equal(slugToken('  Spaces & Symbols!  '), 'spaces-symbols')
+  assert.equal(slugToken('x'.repeat(80)).length, 32)
+})
+
+// ── Delegation shape ────────────────────────────────────────────────────────
+
+test('delegation counts are bucketed, or nothing would ever recur', () => {
+  // Nobody exchanges exactly seven messages twice. Without buckets every
+  // delegation is a unique pattern and none reaches the promotion threshold.
+  assert.equal(delegationSignature(2, 7), delegationSignature(2, 5))
+  assert.notEqual(delegationSignature(2, 7), delegationSignature(2, 2))
+  assert.equal(roundsBucket(0), '0')
+  assert.equal(roundsBucket(1), '1')
+  assert.equal(roundsBucket(3), '2-3')
+  assert.equal(roundsBucket(9), '4-9')
+  assert.equal(roundsBucket(500), '10+')
+  assert.equal(fanoutBucket(2), '2')
+  assert.equal(fanoutBucket(12), '5+')
+  assert.equal(delegationSignature(2, 5), 'delegation:fanout=2:rounds=4-9')
+})
+
+test('delegatedSpawnParent picks the PARENT, not the spawned session', () => {
+  const ev = (payload: Record<string, unknown>): Parameters<typeof actionToken>[0] =>
+    ({ id: 1, ts: 0, sessionId: 'child', project: 'p', kind: 'session', payload })
+  assert.equal(delegatedSpawnParent(ev({ action: 'spawn', sessionKind: 'user', parentSessionId: 'parent-1' })), 'parent-1')
+  // A spawn with no parent is the user starting something by hand.
+  assert.equal(delegatedSpawnParent(ev({ action: 'spawn', sessionKind: 'user' })), null)
+  // An end is not a spawn.
+  assert.equal(delegatedSpawnParent(ev({ action: 'end', sessionKind: 'user', parentSessionId: 'parent-1' })), null)
 })
 
 // The command log would be a genuine hazard if it captured credentials, so the

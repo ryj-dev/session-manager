@@ -87,18 +87,25 @@ export function recordSessionLifecycle(opts: {
   /** The session that spawned this one, when it was spawned by another
    *  session rather than by the user. */
   parentSessionId?: string | null
+  /** Which agent definition this session was launched with, when it was one. */
+  agentName?: string | null
 }): void {
   appendEvent({
     kind: 'session',
     sessionId: opts.sessionId,
     project: projectKey(opts.projectPath),
-    // A session an agent delegated to is tagged 'user', exactly like one the
-    // user opened with a hotkey — the registry knows the difference (it draws
-    // the ↳ chip from it) but dropped it on the way in here, so the observer
-    // could not tell "I spawned a session" from "an agent spawned a session".
-    payload: opts.parentSessionId
-      ? { action: opts.action, sessionKind: opts.sessionKind, parentSessionId: opts.parentSessionId }
-      : { action: opts.action, sessionKind: opts.sessionKind },
+    // Both extras were already on the registry's origin and were dropped here.
+    // parentSessionId: a delegated session is tagged 'user' exactly like one
+    // the user opened with a hotkey, so without it the observer cannot tell
+    // the two apart. agentName: without it every agent spawn collapses into
+    // one token, so WHICH agent you keep reaching for is invisible.
+    // Both are structural metadata the user already chose — no prompt text.
+    payload: {
+      action: opts.action,
+      sessionKind: opts.sessionKind,
+      ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+      ...(opts.agentName ? { agentName: opts.agentName } : {}),
+    },
   })
 }
 
