@@ -19,7 +19,7 @@ import type { CanvasArtifact, CanvasArtifactPayload, CanvasArtifactSource } from
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import * as registry from './session-registry'
 import * as observer from './observer/capture'
-import { ingestSuggestion } from './observer'
+import { authorizeSuggestRequest, endCuratorRun, ingestSuggestion, isCuratorSession } from './observer'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
 let server: Server | null = null
@@ -326,7 +326,7 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
 
         // ── Observer endpoints (called by the observer-suggest MCP tool and
         //    the MCP server's fire-and-forget tool-usage beacon) ──
-        if (url.pathname === '/observer/suggest') { handleObserverSuggest(body, res); return }
+        if (url.pathname === '/observer/suggest') { handleObserverSuggest(req, body, res); return }
         if (url.pathname === '/observer/event')   { handleObserverEvent(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
@@ -2640,6 +2640,18 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
       broadcastSchedules()
       scheduleSessionTeardown(appSessionId)
     }
+
+    // Curator completion. The run is an interactive `claude` (no -p), so when
+    // it finishes it just sits at its prompt forever: without this it leaks one
+    // Haiku process per launch, and — worse — `activeSessionId` never clears,
+    // so every later curator run is skipped as "already in flight" AFTER its
+    // debt was zeroed. Same teardown path as a scheduled run; the run token and
+    // in-flight marker are burned here rather than waiting on process exit.
+    if (isCuratorSession(appSessionId)) {
+      endCuratorRun(appSessionId)
+      registry.forget(appSessionId)
+      scheduleSessionTeardown(appSessionId)
+    }
   } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'UserPromptSubmit') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'working')
@@ -2651,10 +2663,32 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
 
 // ── Observer endpoint handlers ──────────────────────────────────────────────
 
-/** The curator's write path back into the insights inbox. Validation lives in
- *  ingestSuggestion; a rejected payload returns 400 with the reason so the
- *  curator can correct itself rather than silently producing nothing. */
-function handleObserverSuggest(body: string, res: import('http').ServerResponse): void {
+/**
+ * The curator's write path back into the insights inbox.
+ *
+ * X-Hook-Secret (the GUARDED gate above) only proves the caller is one of the
+ * app's own sessions — every session gets the same secret, so on its own it
+ * would let any of them inject suggestions into the user's inbox. The
+ * per-run X-Curator-Token proves the caller is *the curator run currently in
+ * flight*: it is minted per run, delivered only through that PTY's env, and
+ * burned when the run ends, so a missing token, another session's curl, and a
+ * replay from a finished run all fail the same way.
+ *
+ * Payload validation lives in ingestSuggestion; a rejected payload returns 400
+ * with the reason so the curator can correct itself rather than silently
+ * producing nothing.
+ */
+function handleObserverSuggest(
+  req: IncomingMessage,
+  body: string,
+  res: import('http').ServerResponse,
+): void {
+  const auth = authorizeSuggestRequest(req.headers)
+  if (!auth.ok) {
+    res.writeHead(403, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(auth))
+    return
+  }
   try {
     const payload = readJson<Parameters<typeof ingestSuggestion>[0]>(body)
     const result = ingestSuggestion(payload)

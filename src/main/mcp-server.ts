@@ -36,6 +36,7 @@ import {
 } from './memory/embed-client'
 import * as notes from './notes-manager'
 import { listWikiArticles, readWikiArticle, scoreWikiKeyword, WIKI_KEY_PREFIX } from './wiki'
+import { isToolAllowedForRole } from './observer/role-gate'
 
 // ─── Storage ───────────────────────────────────────────────────────────────
 
@@ -354,15 +355,42 @@ function formatSuggestions(
   )
 }
 
-// ── Observer instrumentation ────────────────────────────────────────────────
-// Wrap server.tool once so every tool registration below is instrumented,
-// rather than sprinkling a beacon call through ~46 handlers (which would rot
-// the moment someone adds a tool). The beacon itself is fire-and-forget and
-// name-only — see observeToolUse near the bottom of this file.
+// ── Role gating + observer instrumentation ──────────────────────────────────
+// Both concerns wrap server.tool once, so every registration below is covered
+// rather than sprinkling checks through ~46 handlers (which would rot the
+// moment someone adds a tool).
+//
+// ROLE GATING is the real security boundary for the observer's curator run.
+// `--allowedTools` only PRE-APPROVES a list; it does not deny anything, and
+// `--permission-mode auto` auto-approves the rest. So instead of trusting a
+// prompt, the curator's session env carries SM_OBSERVER_ROLE=curator (the
+// stdio MCP server inherits it, the same way it inherits APP_SESSION_ID) and
+// we simply never register the tools it must not have. What is not registered
+// cannot be called, whatever the permission mode says.
+//
+// The gate is symmetric, and that second half matters as much as the first:
+//   role present → ONLY the curator's read tools + observer-suggest;
+//   role absent  → everything EXCEPT observer-suggest.
+// Without the second clause any ordinary session could file suggestions
+// straight into the user's inbox.
+//
+// The gate itself lives in observer/role-gate.ts (a leaf module, so the tests
+// can exercise it without connecting a stdio transport).
+//
+// The OBSERVER BEACON is fire-and-forget and name-only — see observeToolUse
+// near the bottom of this file.
+
+/** Non-empty when this MCP server belongs to a background observer run. */
+const OBSERVER_ROLE = process.env.SM_OBSERVER_ROLE || null
+
+/** Handed to the app on every observer-suggest call and checked there. Minted
+ *  per curator run, so it is worthless the moment that run ends. */
+const CURATOR_TOKEN = process.env.SM_CURATOR_TOKEN || null
 
 const registerTool = server.tool.bind(server)
 server.tool = ((...args: unknown[]) => {
   const name = args[0] as string
+  if (!isToolAllowedForRole(name, OBSERVER_ROLE)) return undefined
   const handlerIndex = args.length - 1
   const handler = args[handlerIndex]
   if (typeof handler === 'function') {
@@ -816,7 +844,11 @@ function getHookSecret(): string | null {
   }
 }
 
-async function callHookServer(endpoint: string, body: unknown): Promise<unknown> {
+async function callHookServer(
+  endpoint: string,
+  body: unknown,
+  extraHeaders: Record<string, string> = {},
+): Promise<unknown> {
   const port = getHookServerPort()
   if (!port) throw new Error('Session manager hook server is not running')
 
@@ -824,7 +856,11 @@ async function callHookServer(endpoint: string, body: unknown): Promise<unknown>
   const secret = getHookSecret()
   const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(secret ? { 'X-Hook-Secret': secret } : {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(secret ? { 'X-Hook-Secret': secret } : {}),
+      ...extraHeaders,
+    },
     body: payload,
   })
 
@@ -1841,8 +1877,13 @@ function observeToolUse(tool: string): void {
 
 // ── observer-suggest ────────────────────────────────────────────────────────
 // The curator's ONLY write path. It proposes; the user accepts or dismisses
-// from the insights inbox in the ⌘P overview. Restricted to curator sessions
-// by their --allowedTools list, not by anything here.
+// from the insights inbox in the ⌘P overview.
+//
+// Two things keep this away from ordinary sessions: it is not registered at
+// all unless SM_OBSERVER_ROLE says curator (see the gate above), and the app
+// re-checks the per-run token below before accepting anything — the endpoint
+// is localhost HTTP behind a secret every session shares, so registration
+// gating alone would be spoofable with a curl.
 
 server.tool(
   'observer-suggest',
@@ -1857,9 +1898,11 @@ server.tool(
   },
   async ({ title, kind, proposal, rationale, patternId }) => {
     try {
-      const result = await callHookServer('/observer/suggest', {
-        title, kind, proposal, rationale, patternId,
-      }) as { ok: boolean; id?: string; error?: string }
+      const result = await callHookServer(
+        '/observer/suggest',
+        { title, kind, proposal, rationale, patternId },
+        CURATOR_TOKEN ? { 'X-Curator-Token': CURATOR_TOKEN } : {},
+      ) as { ok: boolean; id?: string; error?: string }
       if (!result.ok) {
         return { content: [{ type: 'text', text: `Suggestion rejected: ${result.error}` }], isError: true }
       }

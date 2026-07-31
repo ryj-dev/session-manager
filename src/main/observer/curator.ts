@@ -22,6 +22,8 @@
 
 import { randomUUID } from 'crypto'
 import { spawnSession, type PtySession } from '../pty-manager'
+import { armCuratorToken, clearCuratorToken, mintCuratorToken } from './curator-token'
+import { CURATOR_MCP_TOOLS } from './role-gate'
 import { MODEL_IDS } from '../model-tiers'
 import * as registry from '../session-registry'
 import {
@@ -44,15 +46,17 @@ const MAX_CANDIDATES_PER_RUN = 8
 /** Don't pile up proposals the user hasn't looked at yet. */
 const MAX_PENDING_SUGGESTIONS = 12
 
-/** Read-only tools plus the single write path back into the inbox. */
+/**
+ * `--allowedTools` argv for the run: the curator's MCP allowlist plus the
+ * read-only built-ins.
+ *
+ * This is a HINT, not the boundary — `--allowedTools` pre-approves a list, it
+ * does not deny what is missing, and the run uses `--permission-mode auto`.
+ * Passing it still spares the run a round of permission prompts, but the
+ * enforcement is registration-time gating in the MCP server (role-gate.ts).
+ */
 const CURATOR_TOOLS = [
-  'mcp__session-manager__observer-suggest',
-  'mcp__session-manager__list-todos',
-  'mcp__session-manager__read-todo',
-  'mcp__session-manager__list-memories',
-  'mcp__session-manager__read-memory',
-  'mcp__session-manager__search-memories',
-  'mcp__session-manager__list-scheduled-tasks',
+  ...CURATOR_MCP_TOOLS.map((t) => `mcp__session-manager__${t}`),
   'Read', 'Grep', 'Glob',
 ]
 
@@ -67,6 +71,26 @@ export function setCuratorAttachListeners(fn: (id: string, session: PtySession) 
 let activeSessionId: string | null = null
 export function activeCuratorSessionId(): string | null {
   return activeSessionId
+}
+
+/**
+ * End the live run: clear the in-flight marker and burn the token.
+ *
+ * Called from BOTH the PTY exit handler and the Stop-hook teardown path. The
+ * Stop hook fires first (the interactive session sits at its prompt forever
+ * after finishing, so waiting for exit would leak a Haiku process per launch
+ * AND wedge `activeSessionId` so every later run is skipped as in-flight).
+ * Idempotent, and a no-op for a session that is not the live curator.
+ */
+export function endCuratorRun(sessionId: string): void {
+  if (activeSessionId !== sessionId) return
+  activeSessionId = null
+  clearCuratorToken()
+}
+
+/** True when this session is the curator run currently in flight. */
+export function isCuratorSession(sessionId: string): boolean {
+  return activeSessionId !== null && activeSessionId === sessionId
 }
 
 function describeCandidate(p: PatternRow, index: number): string {
@@ -105,8 +129,10 @@ where \`kind\` and \`proposal\` are one of:
   Use this when the work is a repeatable prompt that can run unattended.
 - kind:"skill" → proposal: { name, description, body }
   Use this when the pattern is a repeated *way of working* better captured as a reusable slash-command skill than as a timed job.
+  FIRST check the app's own feature docs with search-wiki (and read-wiki-article for anything that looks close). Session Manager already has a graph view, canvas, scheduled tasks, an agentic pipeline, memory, todos, messaging and more — a "skill" that reimplements a built-in feature is a bad suggestion, however often the pattern recurs.
 - kind:"todo" → proposal: { title, body, tags:["project:<name>"] }
   Use this when the right move is to remind the user to do something themselves.
+  Call list-tags first and reuse an EXISTING \`project:\` tag verbatim — the tags are case-sensitive, and an invented casing silently creates a second project.
 
 \`title\` is one line the user reads in their inbox. \`rationale\` is 1–3 sentences saying what you observed and why automating it helps — cite the actual counts.
 
@@ -173,6 +199,7 @@ export function runCurator(opts: { projectPath: string }): CuratorRunResult {
   for (const p of candidates) setPatternStatus(p.id, 'promoted')
 
   const id = randomUUID()
+  const token = mintCuratorToken()
   const args = [
     '--model', MODEL_IDS.haiku,
     '--permission-mode', 'auto',
@@ -182,7 +209,14 @@ export function runCurator(opts: { projectPath: string }): CuratorRunResult {
 
   let session: PtySession
   try {
-    session = spawnSession(id, opts.projectPath, 'claude', args)
+    // The stdio MCP server inherits this env (the same way it picks up
+    // APP_SESSION_ID), which is what lets it gate its own registration and
+    // forward the run token. Set BEFORE the token is armed, so a spawn failure
+    // cannot leave a live token with no session behind it.
+    session = spawnSession(id, opts.projectPath, 'claude', args, {
+      SM_OBSERVER_ROLE: 'curator',
+      SM_CURATOR_TOKEN: token,
+    })
   } catch (err) {
     // Un-promote so the next run can retry these candidates.
     for (const p of candidates) setPatternStatus(p.id, 'candidate')
@@ -191,6 +225,7 @@ export function runCurator(opts: { projectPath: string }): CuratorRunResult {
   }
 
   activeSessionId = id
+  armCuratorToken(token)
   attachListenersFn?.(id, session)
   registry.setOrigin(id, {
     kind: 'observer',
@@ -198,8 +233,10 @@ export function runCurator(opts: { projectPath: string }): CuratorRunResult {
     label: `Curator · judging ${candidates.length} pattern${candidates.length === 1 ? '' : 's'}`,
   })
 
+  // Backstop only — the Stop-hook teardown (hook-server) normally gets here
+  // first and kills the PTY. This still runs if the process dies on its own.
   session.process.onExit(() => {
-    if (activeSessionId === id) activeSessionId = null
+    endCuratorRun(id)
     registry.forget(id)
   })
 

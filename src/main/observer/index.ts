@@ -29,12 +29,23 @@ import {
 } from './db'
 import { hasMiningBacklog, lastMiningRunAt, runMiningPass } from './mining'
 import { jobStatuses, registerJob, startJobRunner, stopJobRunner, triggerJobNow, type JobStatus } from './jobs'
-import { activeCuratorSessionId, markPatternSuggested, runCurator, setCuratorAttachListeners } from './curator'
+import {
+  activeCuratorSessionId,
+  endCuratorRun,
+  isCuratorSession,
+  markPatternSuggested,
+  runCurator,
+  setCuratorAttachListeners,
+} from './curator'
+import { authorizeSuggestRequest } from './curator-token'
 import { applySuggestion, defaultProjectPathFrom, feedbackToPattern } from './apply'
 import { loadSettings } from '../settings-store'
 import type { PtySession } from '../pty-manager'
 
 export { setCuratorAttachListeners }
+// The curator-run boundary, consumed by the hook server: token validation for
+// /observer/suggest, and the Stop-hook teardown hand-off.
+export { authorizeSuggestRequest, endCuratorRun, isCuratorSession }
 
 const MINING_EVERY_HOURS = 2
 const CURATOR_EVERY_HOURS = 24
