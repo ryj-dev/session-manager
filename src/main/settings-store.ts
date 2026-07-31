@@ -17,6 +17,7 @@ export interface HotkeyMap {
   toggleNotesGlobal: string
   shareTurn: string
   branchSession: string
+  openOverview: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -33,6 +34,7 @@ export const defaultHotkeys: HotkeyMap = {
   toggleNotesGlobal: 'shift+n',
   shareTurn: 'shift+s',
   branchSession: 'b',
+  openOverview: 'p',
 }
 
 /** Default layer selection + tool-activity level for the Share Turn modal. */

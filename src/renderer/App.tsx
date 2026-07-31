@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults } from './store'
+import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type RegistryEntry } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -25,6 +25,7 @@ import MemoryPanel from './components/memory/MemoryPanel'
 import { NotesPanel } from './components/notes/NotesPanel'
 import { PipelineView } from './components/pipeline/PipelineView'
 import { ScheduledTasksView } from './components/scheduled/ScheduledTasksView'
+import { OverviewPanel } from './components/overview/OverviewPanel'
 import { MessagePopup } from './components/MessagePopup'
 import { AttachedTerminalOverlay, PINNED_WIDTH_PCT } from './components/AttachedTerminalOverlay'
 import { CanvasDock, CANVAS_WIDTH_PCT } from './components/canvas/CanvasDock'
@@ -240,6 +241,15 @@ export function App(): JSX.Element {
   useEffect(() => {
     window.api.schedulesList().then((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
     const unsub = window.api.onSchedulesChanged((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
+    return unsub
+  }, [])
+
+  // Session registry mirror. Main broadcasts 'registry:changed' on every
+  // spawn / teardown / status transition; the overview panel additionally
+  // polls while open (uptime + zombie detection are computed on read).
+  useEffect(() => {
+    window.api.registryList().then((list) => useStore.getState().setRegistryEntries(list as RegistryEntry[]))
+    const unsub = window.api.onRegistryChanged((list) => useStore.getState().setRegistryEntries(list as RegistryEntry[]))
     return unsub
   }, [])
 
@@ -998,6 +1008,19 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.openOverview) {
+        e.preventDefault()
+        // Full-panel overview of every live session, whatever spawned it.
+        // Refresh the mirror on open so the first paint isn't a stale list;
+        // the panel then polls + listens for 'registry:changed' itself.
+        if (activePanel === 'overview') { setActivePanel(null); return }
+        window.api.registryList()
+          .then((list) => useStore.getState().setRegistryEntries(list as RegistryEntry[]))
+          .catch(() => { /* main is shutting down */ })
+        setActivePanel('overview')
+        return
+      }
+
       if (key === hotkeys.toggleCanvas) {
         e.preventDefault()
         // Toggles the FOCUSED session's canvas dock (focused/split views only).
@@ -1537,6 +1560,12 @@ export function App(): JSX.Element {
       {/* Scheduled tasks (Cmd+J) */}
       <ScheduledTasksView
         visible={activePanel === 'scheduled'}
+        onClose={() => setActivePanel(null)}
+      />
+
+      {/* Sessions overview (Cmd+P) */}
+      <OverviewPanel
+        visible={activePanel === 'overview'}
         onClose={() => setActivePanel(null)}
       />
 

@@ -36,6 +36,7 @@ export interface HotkeyMap {
   toggleCanvas: string
   shareTurn: string
   branchSession: string
+  openOverview: string
 }
 
 export const defaultHotkeys: HotkeyMap = {
@@ -58,6 +59,7 @@ export const defaultHotkeys: HotkeyMap = {
   toggleCanvas: 'k',
   shareTurn: 'shift+s',
   branchSession: 'b',
+  openOverview: 'p',
 }
 
 export type TurnToolLevel = 'summary' | 'commands' | 'full'
@@ -77,7 +79,7 @@ export const defaultTurnShareDefaults: TurnShareDefaults = {
   toolLevel: 'commands',
 }
 
-export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | null
+export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | 'overview' | null
 
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
@@ -250,6 +252,44 @@ export interface ScheduledTask {
   lastRunAt?: string
   /** Run history, capped to the most-recent runs in the main store. */
   runs: ScheduleRun[]
+}
+
+// ---- Unified session registry (Cmd+P overview) ----
+// Types mirror the main-process source of truth in src/main/session-registry.ts.
+// Derived state: main joins the live PTY table with per-session origin tags and
+// hook status. The renderer keeps a mirror refreshed by 'registry:changed' plus
+// a slow poll while the overview is open (so uptime ticks and zombies surface).
+
+export type SessionKind = 'user' | 'terminal' | 'scheduled' | 'pipeline' | 'agent' | 'observer'
+export type RegistryStatus = 'working' | 'idle' | 'permission' | 'zombie' | 'unknown'
+
+export interface SessionOrigin {
+  kind: SessionKind
+  scheduleId?: string
+  scheduleName?: string
+  scheduleRunId?: string
+  pipelineTaskId?: string
+  pipelineRole?: string
+  pipelineLabel?: string
+  agentName?: string
+  observerJob?: string
+  parentSessionId?: string
+  label?: string
+}
+
+export interface RegistryEntry {
+  id: string
+  origin: SessionOrigin
+  projectPath: string
+  projectName: string
+  claudeSessionId: string | null
+  terminalTitle: string | null
+  displayName: string
+  status: RegistryStatus
+  startedAt: number
+  uptimeMs: number
+  ephemeral: boolean
+  command: string
 }
 
 // ---- Canvas (per-session UI artifacts) ----
@@ -558,6 +598,13 @@ export interface AppState {
   handleCanvasEmitted: (artifact: CanvasArtifact) => void
   /** 'canvas:focus' from an agent: open the dock + select an existing artifact. */
   handleCanvasFocus: (sessionId: string, artifactId: string) => void
+
+  // Sessions overview (Cmd+P). Main owns the registry; the renderer mirrors it
+  // via 'registry:changed' and a poll while the panel is open.
+  registryEntries: RegistryEntry[]
+  setRegistryEntries: (entries: RegistryEntry[]) => void
+  /** Kill a live session from the overview. Resolves once main has torn it down. */
+  killRegistrySession: (id: string) => Promise<{ ok: boolean; error?: string }>
 
   // Message notifications
   pendingMessages: MessageNotification[]
@@ -933,6 +980,11 @@ export const useStore = create<AppState>((set, get) => ({
         : [...state.openCanvasSessionIds, sessionId],
       canvasSelection: { ...state.canvasSelection, [sessionId]: artifactId },
     })),
+
+  // Sessions overview
+  registryEntries: [],
+  setRegistryEntries: (entries) => set({ registryEntries: entries }),
+  killRegistrySession: (id) => window.api.registryKill(id),
 
   // Message notifications
   pendingMessages: [],
