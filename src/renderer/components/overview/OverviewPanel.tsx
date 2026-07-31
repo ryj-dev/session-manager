@@ -41,6 +41,28 @@ const STATUS_DOT: Record<RegistryStatus, { className: string; pulse: boolean; la
   unknown:    { className: 'bg-zinc-600',   pulse: false, label: 'starting' },
 }
 
+/**
+ * Where "open" takes each kind of session — or why it cannot.
+ *
+ * Only kinds with a real home UI are openable. Observer runs are headless and
+ * were never added to the renderer's session store, so focusing one used to
+ * put the app into focused-view on an id nothing knows about: a blank screen
+ * with no way back except Escape. Drawer previews are owned and reaped by the
+ * drawer that spawned them; focusing one from here would fight that owner.
+ */
+const OPEN_TARGET: Partial<Record<SessionKind, string>> = {
+  user:      'Focus this session on the graph',
+  terminal:  'Focus this terminal on the graph',
+  agent:     'Focus this agent session on the graph',
+  pipeline:  'Open the pipeline board (⌘L)',
+  scheduled: 'Open the scheduled-tasks panel (⌘J)',
+}
+
+const NO_OPEN_TARGET: Partial<Record<SessionKind, string>> = {
+  observer: 'The observer runs headless — it has no view. Its status and proposals are below.',
+  preview:  'A drawer preview — it lives in the drawer that opened it.',
+}
+
 /** Compact uptime: 42s / 7m / 3h 12m / 2d 4h. */
 function fmtUptime(ms: number): string {
   const s = Math.floor(ms / 1000)
@@ -236,6 +258,13 @@ export function OverviewPanel({ visible, onClose }: Props): JSX.Element | null {
       case 'scheduled':
         store.setActivePanel('scheduled')
         return
+      case 'observer':
+      case 'preview':
+        // No home UI — the button is disabled for these (see OPEN_TARGET), so
+        // this is only reachable if that ever drifts. Do nothing rather than
+        // focus an id the renderer store has never heard of, which lands the
+        // app on a blank focused view.
+        return
       default:
         // Graph sessions, agents and terminals are real graph/focus targets.
         store.setActivePanel(null)
@@ -379,6 +408,7 @@ function Row({
   const badge = KIND_BADGE[entry.origin.kind]
   const status = STATUS_DOT[entry.status]
   const isZombie = entry.status === 'zombie'
+  const openTarget = OPEN_TARGET[entry.origin.kind]
 
   return (
     <div className="group flex items-center gap-2.5 rounded border border-zinc-800/70 bg-zinc-900/40 px-3 py-2 hover:border-zinc-700">
@@ -416,10 +446,10 @@ function Row({
 
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
         <button
-          disabled={isZombie}
+          disabled={isZombie || !openTarget}
           onClick={() => onOpen(entry)}
           className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-30"
-          title="Open where this session lives"
+          title={openTarget ?? NO_OPEN_TARGET[entry.origin.kind]}
         >open</button>
         <button
           disabled={isZombie}

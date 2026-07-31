@@ -54,6 +54,22 @@ function proposalJson(s: Suggestion): string {
   try { return JSON.stringify(s.proposal, null, 2) } catch { return '{}' }
 }
 
+/**
+ * The body of a proposed skill.
+ *
+ * Accepting a `skill` suggestion writes a slash command into
+ * `~/.claude/commands/` that persists across restarts, and its body is
+ * instructions an LLM wrote and every future session will follow. That is the
+ * one proposal kind where the thing being installed IS prose the user must
+ * read, so it is shown in full up front rather than behind "Show details" —
+ * a one-line `/name — description` preview is not informed consent.
+ */
+function skillBody(s: Suggestion): string | null {
+  if (s.kind !== 'skill') return null
+  const body = s.proposal.body
+  return typeof body === 'string' && body.trim() ? body.trim() : null
+}
+
 export function InsightsInbox(): JSX.Element {
   const inbox = useStore((s) => s.observerInbox)
   const refresh = useStore((s) => s.refreshObserverInbox)
@@ -113,6 +129,7 @@ export function InsightsInbox(): JSX.Element {
           {pending.map((s) => {
             const kind = KIND_LABEL[s.kind] ?? { text: s.kind, className: 'bg-zinc-500/15 text-zinc-300', verb: 'Accept' }
             const preview = describeProposal(s)
+            const body = skillBody(s)
             const isBusy = busyId === s.id
             const msg = flash?.id === s.id ? flash : null
             return (
@@ -132,6 +149,19 @@ export function InsightsInbox(): JSX.Element {
                     {new Date(s.createdAt).toLocaleDateString()}
                   </span>
                 </div>
+
+                {body && (
+                  <div className="mt-2">
+                    <p className="mb-1 text-[10px] text-zinc-500">
+                      Accepting installs this as <span className="font-mono text-zinc-400">/sm-…</span> in{' '}
+                      <span className="font-mono">~/.claude/commands</span> and keeps it across restarts.
+                      Every session that runs it will follow these instructions — read them first:
+                    </p>
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border border-zinc-800 bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-zinc-300">
+                      {body}
+                    </pre>
+                  </div>
+                )}
 
                 {expandedId === s.id && (
                   <pre className="mt-2 max-h-56 overflow-auto rounded bg-black/40 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">
