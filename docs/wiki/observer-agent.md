@@ -19,8 +19,10 @@ It is built as three layers with very different costs, deliberately: cheap obser
 
 - **Tool use** from the `PreToolUse` hook — including the exact shell command, which is the single highest-signal thing about what you actually do repeatedly.
 - **UI actions** — hotkeys fired, panels opened, sessions and agents spawned, pipeline tasks started, schedules created or run.
-- **Session lifecycle**, tagged with the origin kind from the session registry (see `sessions-overview`).
-- **session-manager MCP tool calls** — which todo/memory tools your agents reach for.
+- **Session lifecycle**, tagged with the origin kind from the session registry (see `sessions-overview`), and with the **parent session** when one session spawned another. That parent link is what separates a session you opened with a hotkey from one an agent delegated to — the registry tags both `user`, so without it the two are indistinguishable and delegation cannot be mined at all.
+- **MCP tool calls**, from any connected server — server and tool name, never arguments.
+
+What it does **not** capture is as deliberate as what it does: prompt bodies are recorded as a character count and the text is discarded, so the *content* of what you asked for is never in the log. The observer sees the shape of your work, not its substance.
 
 **2. Mining (every ~2h of app-open time, no LLM).** A cheap incremental pass counts three things per project: **frequency** (an action that recurs), **sequences** (2- and 3-grams of consecutive actions inside one session), and **time-of-day** clustering. It reads forward from a watermark, so an interrupted pass resumes exactly where it stopped and nothing is double-counted.
 
@@ -66,7 +68,7 @@ The log records **what was done, never what was said**.
   - known key shapes anywhere in the line: `sk-…`, `ghp_…`, `AKIA…`, JWTs.
 
   This is a **best-effort net, not a guarantee.** It is pattern-matching over a flattened command string, so a secret in a shape it does not know — an unrecognised flag name, a bare high-entropy argument, a credential read from a heredoc — can still land in the log. Treat the store as sensitive, and wipe it (below) if you know something slipped through. Every shape listed above has a regression test in `src/main/observer-mining.test.ts`.
-- MCP beacons send the tool **name** only, never arguments or note/todo content.
+- MCP tool calls record the **server and tool name** only (`mcp:session-manager:list-todos`), never arguments or note/todo content. This covers every connected MCP server, and each call is recorded exactly once, from the same `PreToolUse` hook as any other tool.
 - The observer does **not** record its own curator run, or the throwaway PTYs a drawer spawns to display an old conversation. Neither is you doing something, and mining the curator's own reads would hand it a daily "habit" manufactured out of the fact that it ran.
 - Raw events are pruned after 60 days; the derived patterns and suggestions are aggregates and are kept.
 - The whole store is deletable from **Settings → Cleanup → Observer activity log**, which also wipes your "never suggest this" mutes.

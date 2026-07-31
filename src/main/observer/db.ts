@@ -35,11 +35,15 @@ export type ObserverEventKind =
   | 'tool'
   /** A user prompt was submitted. payload: { chars } — never the text. */
   | 'prompt'
-  /** Session lifecycle. payload: { action: 'spawn' | 'end', sessionKind } */
+  /** Session lifecycle. payload: { action: 'spawn' | 'end', sessionKind,
+   *  parentSessionId? } — the parent is present only when another session
+   *  spawned this one, which is what distinguishes delegation from a session
+   *  the user opened by hand. */
   | 'session'
   /** A renderer UI action. payload: { action, detail? } */
   | 'ui'
-  /** A session-manager MCP tool call. payload: { tool } */
+  /** A call into any MCP server. payload: { server, tool } — the name only,
+   *  never arguments. */
   | 'mcp'
 
 export interface ObserverEvent {

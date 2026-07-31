@@ -51,10 +51,21 @@ export function actionToken(e: TokenisableEvent): string | null {
     }
     case 'ui':
       return `ui:${String(e.payload.action ?? 'unknown')}`
-    case 'mcp':
-      return `mcp:${String(e.payload.tool ?? 'unknown')}`
-    case 'session':
-      return `session:${String(e.payload.action ?? '')}:${String(e.payload.sessionKind ?? '')}`
+    case 'mcp': {
+      // Server-qualified: two servers can expose the same tool name (obsidian
+      // and tc-sql-atlas both have a search), and collapsing them would merge
+      // unrelated work into one "habit".
+      const tool = String(e.payload.tool ?? 'unknown')
+      const server = typeof e.payload.server === 'string' ? e.payload.server : null
+      return server ? `mcp:${server}:${tool}` : `mcp:${tool}`
+    }
+    case 'session': {
+      const base = `session:${String(e.payload.action ?? '')}:${String(e.payload.sessionKind ?? '')}`
+      // A session an agent spawned is a different act from one the user
+      // started by hand, even though both are tagged 'user'. Without this the
+      // two collapse into one token and delegation is unminable.
+      return e.payload.parentSessionId ? `${base}:delegated` : base
+    }
     case 'prompt':
       // A prompt is a turn boundary, not an action worth mining on its own —
       // but it IS useful punctuation inside sequences.
@@ -174,6 +185,22 @@ export function normalizeToolArg(tool: string, input: unknown): string | null {
   if (typeof obj.pattern === 'string') return obj.pattern.slice(0, 120)
 
   return null
+}
+
+/**
+ * Split `mcp__<server>__<tool>` — how a hook reports a tool call into an MCP
+ * server — into its parts. Returns null for an ordinary built-in tool.
+ *
+ * Server names never contain `__` (it is the separator the protocol reserves),
+ * so the first occurrence after the prefix is an unambiguous split point;
+ * tool names may contain `-` and `_` freely.
+ */
+export function parseMcpToolName(tool: string): { server: string; name: string } | null {
+  if (!tool.startsWith('mcp__')) return null
+  const rest = tool.slice('mcp__'.length)
+  const sep = rest.indexOf('__')
+  if (sep <= 0 || sep + 2 >= rest.length) return null
+  return { server: rest.slice(0, sep), name: rest.slice(sep + 2) }
 }
 
 /** Basename of a project directory — the grouping key for per-project mining. */

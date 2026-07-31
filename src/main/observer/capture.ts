@@ -21,11 +21,11 @@
  */
 
 import { appendEvent, type ObserverEventKind } from './db'
-import { normalizeToolArg, projectKey } from './tokens'
+import { normalizeToolArg, parseMcpToolName, projectKey } from './tokens'
 
 // The pure normalisation/redaction helpers live in ./tokens (a leaf module
 // with no imports) so they can be unit-tested without pulling in SQLite.
-export { normalizeToolArg, projectKey, redactSecrets } from './tokens'
+export { normalizeToolArg, parseMcpToolName, projectKey, redactSecrets } from './tokens'
 
 // ── Public recorders ────────────────────────────────────────────────────────
 
@@ -35,6 +35,27 @@ export function recordToolUse(opts: {
   tool: string
   toolInput: unknown
 }): void {
+  // A call into an MCP server is recorded as `mcp`, not `tool`. The hook
+  // reports these as `mcp__<server>__<tool>`, and they used to be stored under
+  // that raw name AND, for 22 allowlisted session-manager tools, a second time
+  // by a beacon the MCP server fired itself — two events under two different
+  // tokens for one call, so the pattern was split as well as double-counted.
+  // The hook sees every server, so it is the single writer now.
+  //
+  // Arguments are deliberately dropped here. The privacy contract has always
+  // said MCP calls record the NAME only; routing through the generic path was
+  // quietly storing search patterns for tools like `mcp__fff__grep`.
+  const mcp = parseMcpToolName(opts.tool)
+  if (mcp) {
+    appendEvent({
+      kind: 'mcp',
+      sessionId: opts.sessionId,
+      project: projectKey(opts.projectPath),
+      payload: { server: mcp.server, tool: mcp.name },
+    })
+    return
+  }
+
   const arg = normalizeToolArg(opts.tool, opts.toolInput)
   appendEvent({
     kind: 'tool',
@@ -63,12 +84,21 @@ export function recordSessionLifecycle(opts: {
   projectPath: string | null
   action: 'spawn' | 'end'
   sessionKind: string
+  /** The session that spawned this one, when it was spawned by another
+   *  session rather than by the user. */
+  parentSessionId?: string | null
 }): void {
   appendEvent({
     kind: 'session',
     sessionId: opts.sessionId,
     project: projectKey(opts.projectPath),
-    payload: { action: opts.action, sessionKind: opts.sessionKind },
+    // A session an agent delegated to is tagged 'user', exactly like one the
+    // user opened with a hotkey — the registry knows the difference (it draws
+    // the ↳ chip from it) but dropped it on the way in here, so the observer
+    // could not tell "I spawned a session" from "an agent spawned a session".
+    payload: opts.parentSessionId
+      ? { action: opts.action, sessionKind: opts.sessionKind, parentSessionId: opts.parentSessionId }
+      : { action: opts.action, sessionKind: opts.sessionKind },
   })
 }
 
@@ -84,20 +114,6 @@ export function recordUiAction(opts: {
     sessionId: opts.sessionId ?? null,
     project: projectKey(opts.projectPath),
     payload: opts.detail ? { action: opts.action, detail: opts.detail.slice(0, 200) } : { action: opts.action },
-  })
-}
-
-/** A session-manager MCP tool call (todo/memory work an agent did for you). */
-export function recordMcpToolUse(opts: {
-  sessionId: string | null
-  projectPath: string | null
-  tool: string
-}): void {
-  appendEvent({
-    kind: 'mcp',
-    sessionId: opts.sessionId,
-    project: projectKey(opts.projectPath),
-    payload: { tool: opts.tool },
   })
 }
 

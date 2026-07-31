@@ -255,7 +255,7 @@ const GUARDED = new Set([
   '/pipeline/merge-worktree', '/pipeline/put-artifact',
   '/schedules/create', '/schedules/update', '/schedules/set-enabled', '/schedules/delete',
   '/canvas/emit', '/canvas/focus', '/canvas/inspect',
-  '/observer/suggest', '/observer/event',
+  '/observer/suggest',
 ])
 
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
@@ -324,10 +324,10 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/canvas/list')    { handleCanvasList(body, res); return }
         if (url.pathname === '/canvas/inspect') { handleCanvasInspect(body, res); return }
 
-        // ── Observer endpoints (called by the observer-suggest MCP tool and
-        //    the MCP server's fire-and-forget tool-usage beacon) ──
+        // ── Observer endpoint (called by the observer-suggest MCP tool) ──
+        // There is no tool-usage endpoint: MCP calls are captured from the
+        // PreToolUse hook like every other tool, in one place.
         if (url.pathname === '/observer/suggest') { handleObserverSuggest(req, body, res); return }
-        if (url.pathname === '/observer/event')   { handleObserverEvent(body, res); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -2705,26 +2705,6 @@ function handleObserverSuggest(
     res.writeHead(500, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ error: String(err) }))
   }
-}
-
-/** Fire-and-forget beacon from the out-of-process MCP server: which
- *  session-manager tool an agent just used. Deliberately tolerant — a
- *  malformed beacon is dropped, never surfaced as a tool error. */
-function handleObserverEvent(body: string, res: import('http').ServerResponse): void {
-  res.writeHead(200, { 'Content-Type': 'application/json' })
-  res.end('{"ok":true}')
-  try {
-    const { tool, sessionId, projectPath } = readJson<{ tool?: string; sessionId?: string; projectPath?: string }>(body)
-    if (!tool) return
-    // Same filter as the hook path: the curator's own MCP reads are not user
-    // activity, and mining them would hand it back a habit it invented.
-    if (sessionId && !registry.shouldObserveSession(sessionId)) return
-    observer.recordMcpToolUse({
-      tool,
-      sessionId: sessionId ?? null,
-      projectPath: projectPath ?? (sessionId ? getSession(sessionId)?.projectPath ?? null : null),
-    })
-  } catch { /* a dropped beacon is not worth a log line */ }
 }
 
 // ── Settings.json hook management ──────────────────────────────────────

@@ -162,6 +162,7 @@ export function setOrigin(id: string, origin: SessionOrigin): void {
       projectPath: getSession(id)?.projectPath ?? null,
       action: 'spawn',
       sessionKind: origin.kind,
+      parentSessionId: origin.parentSessionId ?? null,
     })
   }
   notify()
@@ -205,6 +206,7 @@ export function forget(id: string): void {
       projectPath: getSession(id)?.projectPath ?? null,
       action: 'end',
       sessionKind: origin.kind,
+      parentSessionId: origin.parentSessionId ?? null,
     })
   }
   notify()

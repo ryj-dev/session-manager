@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { commandShape, actionToken, redactSecrets, normalizeToolArg, projectKey } from './observer/tokens.ts'
+import { commandShape, actionToken, redactSecrets, normalizeToolArg, parseMcpToolName, projectKey } from './observer/tokens.ts'
 
 // The observer's value depends entirely on whether two runs of "the same
 // thing" collapse to the same token — too eager and unrelated work merges,
@@ -58,6 +58,60 @@ test('actionToken returns null for a tool event with no tool name', () => {
   assert.equal(
     actionToken({ id: 1, ts: 0, sessionId: null, project: null, kind: 'tool', payload: {} }),
     null,
+  )
+})
+
+// ── MCP calls: one event, one token, server-qualified ───────────────────────
+
+test('parseMcpToolName splits the server from the tool', () => {
+  assert.deepEqual(parseMcpToolName('mcp__session-manager__list-todos'),
+    { server: 'session-manager', name: 'list-todos' })
+  // Hyphens and underscores are legal in a tool name; `__` is the separator.
+  assert.deepEqual(parseMcpToolName('mcp__tc__tc_sql_query'),
+    { server: 'tc', name: 'tc_sql_query' })
+  assert.deepEqual(parseMcpToolName('mcp__claude-in-chrome__tabs_create_mcp'),
+    { server: 'claude-in-chrome', name: 'tabs_create_mcp' })
+})
+
+test('parseMcpToolName returns null for anything that is not an MCP tool', () => {
+  for (const name of ['Bash', 'Read', 'mcp__', 'mcp__server', 'mcp____tool', 'mcp__server__', 'notmcp__a__b']) {
+    assert.equal(parseMcpToolName(name), null, name)
+  }
+})
+
+test('MCP tokens are server-qualified so two servers do not collide', () => {
+  const base = { id: 1, ts: 0, sessionId: 's', project: 'p', kind: 'mcp' } as const
+  // Two servers can expose the same tool name; collapsing them would merge
+  // unrelated work into one "habit".
+  assert.equal(actionToken({ ...base, payload: { server: 'obsidian', tool: 'search-vault' } }),
+    'mcp:obsidian:search-vault')
+  assert.equal(actionToken({ ...base, payload: { server: 'tc-sql-atlas', tool: 'search-notes' } }),
+    'mcp:tc-sql-atlas:search-notes')
+  assert.notEqual(
+    actionToken({ ...base, payload: { server: 'a', tool: 'search' } }),
+    actionToken({ ...base, payload: { server: 'b', tool: 'search' } }),
+  )
+  // Rows written before the server was recorded still tokenise.
+  assert.equal(actionToken({ ...base, payload: { tool: 'create-todo' } }), 'mcp:create-todo')
+})
+
+// ── Delegation: an agent-spawned session is not a user-spawned one ──────────
+
+test('a delegated spawn tokenises differently from a hand-started one', () => {
+  const base = { id: 1, ts: 0, sessionId: 'child', project: 'p', kind: 'session' } as const
+  // Both are tagged kind 'user' by the registry — the parent link is the only
+  // thing separating "I pressed the hotkey" from "an agent spawned this".
+  assert.equal(
+    actionToken({ ...base, payload: { action: 'spawn', sessionKind: 'user' } }),
+    'session:spawn:user',
+  )
+  assert.equal(
+    actionToken({ ...base, payload: { action: 'spawn', sessionKind: 'user', parentSessionId: 'parent-1' } }),
+    'session:spawn:user:delegated',
+  )
+  assert.equal(
+    actionToken({ ...base, payload: { action: 'end', sessionKind: 'user', parentSessionId: 'parent-1' } }),
+    'session:end:user:delegated',
   )
 })
 

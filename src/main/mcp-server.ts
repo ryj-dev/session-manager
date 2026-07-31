@@ -355,12 +355,12 @@ function formatSuggestions(
   )
 }
 
-// ── Role gating + observer instrumentation ──────────────────────────────────
-// Both concerns wrap server.tool once, so every registration below is covered
-// rather than sprinkling checks through ~46 handlers (which would rot the
-// moment someone adds a tool).
+// ── Role gating ─────────────────────────────────────────────────────────────
+// Wraps server.tool once, so every registration below is covered rather than
+// sprinkling checks through ~46 handlers (which would rot the moment someone
+// adds a tool).
 //
-// ROLE GATING is the real security boundary for the observer's curator run.
+// This is the real security boundary for the observer's curator run.
 // `--allowedTools` only PRE-APPROVES a list; it does not deny anything, and
 // `--permission-mode auto` auto-approves the rest. So instead of trusting a
 // prompt, the curator's session env carries SM_OBSERVER_ROLE=curator (the
@@ -377,8 +377,11 @@ function formatSuggestions(
 // The gate itself lives in observer/role-gate.ts (a leaf module, so the tests
 // can exercise it without connecting a stdio transport).
 //
-// The OBSERVER BEACON is fire-and-forget and name-only — see observeToolUse
-// near the bottom of this file.
+// This server does NOT report tool usage to the observer. It used to, via a
+// fire-and-forget beacon over an allowlist of 22 tool names — but the app's
+// PreToolUse hook already sees every tool call from every MCP server, so the
+// beacon only ever produced a duplicate event under a second, different token.
+// Capture happens once, in observer/capture.ts.
 
 /** Non-empty when this MCP server belongs to a background observer run. */
 const OBSERVER_ROLE = process.env.SM_OBSERVER_ROLE || null
@@ -391,14 +394,6 @@ const registerTool = server.tool.bind(server)
 server.tool = ((...args: unknown[]) => {
   const name = args[0] as string
   if (!isToolAllowedForRole(name, OBSERVER_ROLE)) return undefined
-  const handlerIndex = args.length - 1
-  const handler = args[handlerIndex]
-  if (typeof handler === 'function') {
-    args[handlerIndex] = (...handlerArgs: unknown[]) => {
-      try { observeToolUse(name) } catch { /* never let observation break a tool */ }
-      return (handler as (...a: unknown[]) => unknown)(...handlerArgs)
-    }
-  }
   return (registerTool as (...a: unknown[]) => unknown)(...args)
 }) as typeof server.tool
 
@@ -1842,38 +1837,6 @@ server.tool(
   }
 )
 
-
-// ── Observer beacon ─────────────────────────────────────────────────────────
-// Fire-and-forget: tell the app which session-manager tool an agent just used,
-// so the observer can mine "you keep asking agents to do X". Deliberately NOT
-// awaited — observation must never add latency to, or fail, a tool call. Only
-// the tool NAME is sent: never arguments, note bodies or todo text.
-
-const OBSERVED_TOOLS = new Set([
-  'create-todo', 'update-todo', 'delete-todo', 'list-todos', 'read-todo',
-  'create-memory', 'edit-memory', 'delete-memory', 'search-memories', 'read-memory',
-  'search-wiki', 'read-wiki-article',
-  'spawn-session', 'spawn-agent', 'send-message',
-  'pipeline-start', 'pipeline-start-review',
-  'create-scheduled-task', 'update-scheduled-task',
-  'canvas-show',
-])
-
-function observeToolUse(tool: string): void {
-  if (!OBSERVED_TOOLS.has(tool)) return
-  const port = getHookServerPort()
-  if (!port) return
-  const secret = getHookSecret()
-  void fetch(`http://127.0.0.1:${port}/observer/event`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...(secret ? { 'X-Hook-Secret': secret } : {}) },
-    body: JSON.stringify({
-      tool,
-      sessionId: process.env.APP_SESSION_ID || null,
-      projectPath: process.cwd(),
-    }),
-  }).catch(() => { /* the app may be closed — the beacon is optional */ })
-}
 
 // ── observer-suggest ────────────────────────────────────────────────────────
 // The curator's ONLY write path. It proposes; the user accepts or dismisses
