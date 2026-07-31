@@ -65,6 +65,11 @@ export interface PtySession {
   /** Best-effort view-resume (e.g. pipeline drawer). Never persisted on quit — the
    *  renderer owns its lifecycle and kills it on unmount. */
   ephemeral?: boolean
+  /** ms epoch the PTY was spawned. Drives uptime in the sessions overview. */
+  createdAt: number
+  /** Argv the PTY was spawned with (minus the prompt positional, which can be
+   *  huge). Used by the overview to tell `claude` from a raw shell. */
+  command: string
 }
 
 const sessions = new Map<string, PtySession>()
@@ -106,6 +111,7 @@ export function spawnSession(
   mkdirSync(dirname(inboxPath), { recursive: true })
   writeFileSync(inboxPath, '', { flag: 'a' }) // create if missing, don't truncate
 
+  const rawCommand = command
   command = resolveCommand(command)
 
   const ptyProcess = pty.spawn(command, args, {
@@ -122,7 +128,9 @@ export function spawnSession(
     projectPath: resolvedCwd,
     claudeSessionId,
     hasActivity: false,
-    terminalTitle: null
+    terminalTitle: null,
+    createdAt: Date.now(),
+    command: rawCommand,
   }
 
   sessions.set(id, session)

@@ -51,6 +51,7 @@ import * as scheduleStore from './schedule-store'
 import type { ScheduledTask } from './schedule-store'
 import * as canvasStore from './canvas-store'
 import { triggerScheduleNow } from './scheduler'
+import * as registry from './session-registry'
 
 function sendToRenderer(channel: string, ...args: unknown[]): void {
   const win = BrowserWindow.getAllWindows()[0]
@@ -136,6 +137,8 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
         const session = spawnSession(id, cwd, command, finalArgs)
         console.log('[main] session spawned:', id)
         attachSessionListeners(id, session)
+        // A user-driven spawn: Cmd+T (claude) or Cmd+Shift+T / pairing (shell).
+        registry.setOrigin(id, { kind: isClaude ? 'user' : 'terminal' })
         return { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null }
       } catch (err) {
         console.error('[main] spawn failed:', err)
@@ -158,6 +161,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
       // the renderer kills it on unmount.
       session.ephemeral = ephemeral === true
       attachSessionListeners(id, session)
+      // A resume re-enters an existing conversation. Ephemeral resumes are
+      // drawer previews (pipeline board / schedule run history) — tag them by
+      // the panel that owns them so the overview doesn't show them as user
+      // sessions; a non-ephemeral resume IS a restored graph session.
+      registry.setOrigin(id, { kind: 'user' })
       return { id, projectPath, claudeSessionId }
     }
   )
@@ -179,6 +187,7 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
       // hook delivers the real id, the same way fresh spawns reconcile theirs.
       session.claudeSessionId = null
       attachSessionListeners(id, session)
+      registry.setOrigin(id, { kind: 'user' })
       return { id, projectPath, claudeSessionId: null }
     }
   )
@@ -740,6 +749,27 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   ipcMain.handle('canvas:stashClipboardImage', (_e, sessionId: string) =>
     stashClipboardImage(sessionId),
   )
+
+  // ── Unified session registry (Cmd+P overview) ───────────────────────────
+  // The registry joins pty-manager's live PTY table with the origin tags each
+  // spawn path writes and the hook-derived status. It is derived state, so
+  // there is no create/update — only reads, a kill action, and a change
+  // broadcast the panel mirrors.
+  ipcMain.handle('registry:list', () => registry.listRegistry())
+
+  ipcMain.handle('registry:kill', (_e, id: string) => {
+    const entry = registry.getEntry(id)
+    if (!entry) return { ok: false, error: 'Session is no longer running' }
+    try {
+      killSession(id)
+      hookCleanupSession(id)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  registry.onRegistryChanged(() => sendToRenderer('registry:changed', registry.listRegistry()))
 
   // Send an inter-session message (used by notes dispatch + future hooks)
   ipcMain.handle(

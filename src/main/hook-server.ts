@@ -17,6 +17,7 @@ import * as canvasStore from './canvas-store'
 import { validateCanvasArtifact, scaleAnnotationsToNatural, annotationBoundsError } from './canvas-validate'
 import type { CanvasArtifact, CanvasArtifactPayload, CanvasArtifactSource } from './canvas-types'
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
+import * as registry from './session-registry'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 
 let server: Server | null = null
@@ -109,6 +110,7 @@ const lastPtyActivity = new Map<string, number>()
 
 /** Clean up all hook-server state for a session (call on PTY exit/kill). */
 export function cleanupSession(appSessionId: string): void {
+  registry.forget(appSessionId)
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
   sessionTranscriptPath.delete(appSessionId)
@@ -553,6 +555,19 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
       attachListenersFn(id, session)
     }
 
+    // Origin tag. Pipeline-linked spawns carry their task/role; a plain
+    // spawn-session child is an ordinary graph session owned by its spawner.
+    registry.setOrigin(id, payload.pipelineTaskId
+      ? {
+          kind: 'pipeline',
+          pipelineTaskId: payload.pipelineTaskId,
+          pipelineRole: payload.pipelineRole,
+          pipelineLabel: payload.pipelineLabel ?? payload.pipelineRole,
+          label: payload.pipelineLabel ?? payload.pipelineRole,
+          parentSessionId: payload.parentSessionId,
+        }
+      : { kind: 'user', parentSessionId: payload.parentSessionId })
+
     // Notify the renderer to add this session to the UI. Pipeline-linked spawns
     // are flagged so the graph view excludes them (they live in the board).
     const win = BrowserWindow.getAllWindows()[0]
@@ -661,6 +676,7 @@ export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string 
   if (attachListenersFn) attachListenersFn(id, session)
 
   // Notify the renderer; isScheduled routes it to the Scheduled Tasks panel and
+  // (see below) the origin tag routes it to the overview's schedules section.
   // (like isPipeline) keeps it out of the graph view.
   const win = BrowserWindow.getAllWindows()[0]
   if (win && !win.isDestroyed()) {
@@ -682,6 +698,13 @@ export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string 
     status: 'working',
   }
   scheduleStore.recordRunStarted(schedule.id, run)
+  registry.setOrigin(id, {
+    kind: 'scheduled',
+    scheduleId: schedule.id,
+    scheduleName: schedule.name,
+    scheduleRunId: run.id,
+    label: schedule.name,
+  })
   broadcastSchedules()
 
   // Failure detection. A logged-out run never reaches a Claude session, so the
@@ -943,6 +966,14 @@ export function spawnPipelineOrchestrator(
 
   if (attachListenersFn) attachListenersFn(id, session)
 
+  registry.setOrigin(id, {
+    kind: 'pipeline',
+    pipelineTaskId: task.id,
+    pipelineRole: 'orchestrator',
+    pipelineLabel: 'Orchestrator',
+    label: `Orchestrator · ${task.title}`,
+  })
+
   pipelineStore.upsertPipelineSession(task.id, {
     id,
     role: 'orchestrator',
@@ -1052,6 +1083,7 @@ export function resumePipelineOrchestrator(
   // so emitMilestone/upsertPipelineSession (keyed by id) hit the existing node
   // instead of forking a duplicate root/child.
   const oldId = node.id
+  registry.rekeyOrigin(oldId, id)
   pipelineStore.rekeyPipelineSession(task.id, oldId, {
     id,
     claudeSessionId: session.claudeSessionId ?? cid,
@@ -2419,6 +2451,13 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
       attachListenersFn(id, session)
     }
 
+    registry.setOrigin(id, {
+      kind: 'agent',
+      agentName: agent.name,
+      label: agent.name,
+      parentSessionId: process.env.APP_SESSION_ID || undefined,
+    })
+
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) {
       win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null })
@@ -2538,12 +2577,14 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
       case 'permission_prompt':
         awaitingPermission.add(appSessionId)
         sessionStatus.set(appSessionId, 'idle')
+        registry.setStatus(appSessionId, 'permission')
         win.webContents.send('claude:status', { id: appSessionId, status: 'permission' })
         break
     }
   } else if (event === 'Stop') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'idle')
+    registry.setStatus(appSessionId, 'idle')
     win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
 
     // Scheduled-task completion: if this session is an in-flight scheduled run,
@@ -2566,6 +2607,8 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'UserPromptSubmit') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'working')
+    registry.setStatus(appSessionId, 'working')
+    registry.markActivity()
     win.webContents.send('claude:status', { id: appSessionId, status: 'working' })
   }
 }

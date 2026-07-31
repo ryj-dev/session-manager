@@ -351,6 +351,18 @@ const api = {
   canvasStashClipboardImage: (sessionId: string): Promise<{ stashed: boolean }> =>
     ipcRenderer.invoke('canvas:stashClipboardImage', sessionId),
 
+  // Unified session registry (Cmd+P overview). Derived state owned by main
+  // (session-registry.ts); the renderer mirrors it via 'registry:changed' and
+  // re-polls while the panel is open so uptime ticks.
+  registryList: (): Promise<unknown[]> => ipcRenderer.invoke('registry:list'),
+  registryKill: (id: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('registry:kill', id),
+  onRegistryChanged: (callback: (entries: unknown[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, entries: unknown[]) => callback(entries)
+    ipcRenderer.on('registry:changed', handler)
+    return (): void => { ipcRenderer.removeListener('registry:changed', handler) }
+  },
+
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('session:sendMessage', targetSessionId, message, fromSessionId),
