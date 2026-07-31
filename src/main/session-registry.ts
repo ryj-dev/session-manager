@@ -37,6 +37,18 @@ export type SessionKind =
   | 'agent'
   /** A headless background run owned by the observer/curator. */
   | 'observer'
+  /**
+   * A throwaway PTY a panel spawned to SHOW an existing conversation — the
+   * pipeline drawer's terminal, the ⌘J run-history preview. The renderer owns
+   * it and kills it when the drawer closes.
+   *
+   * Deliberately not 'user': these are not sessions the user started, they are
+   * a rendering of one that already happened. Tagging them 'user' put them in
+   * the graph-sessions list of the ⌘P overview (a list the graph itself does
+   * not contain), and fed a spawn/end pair per drawer-open into the observer's
+   * event log, where they read as real session activity and skewed mining.
+   */
+  | 'preview'
 
 export type RegistryStatus = 'working' | 'idle' | 'permission' | 'zombie' | 'unknown'
 
@@ -89,6 +101,23 @@ export interface RegistryEntry {
 const origins = new Map<string, SessionOrigin>()
 const statuses = new Map<string, RegistryStatus>()
 
+/**
+ * Session kinds the observer does NOT record activity for.
+ *
+ * 'preview' — a drawer re-rendering an old conversation is not the user doing
+ * something; counting it would make "opened the pipeline drawer" look like a
+ * daily session habit.
+ */
+const UNOBSERVED_KINDS: ReadonlySet<SessionKind> = new Set<SessionKind>(['preview'])
+
+/** True when this session's activity belongs in the observer's event log.
+ *  Untagged sessions are observed — the default has to be "record it", or a
+ *  future spawn path that forgets to tag itself would go silently unmined. */
+export function shouldObserveSession(id: string): boolean {
+  const kind = origins.get(id)?.kind
+  return kind === undefined || !UNOBSERVED_KINDS.has(kind)
+}
+
 /** Listeners notified whenever the registry's observable content changes. */
 type ChangeListener = () => void
 const listeners = new Set<ChangeListener>()
@@ -119,8 +148,9 @@ export function setOrigin(id: string, origin: SessionOrigin): void {
   origins.set(id, prev ? { ...prev, ...origin } : origin)
   // The registry is the one choke point every spawn path already goes through,
   // so it is also where the observer learns a session began. Only the FIRST
-  // tag emits — later calls refine an existing origin, they aren't new sessions.
-  if (!prev) {
+  // tag emits — later calls refine an existing origin, they aren't new sessions
+  // — and only for kinds whose activity is the user's own (see UNOBSERVED_KINDS).
+  if (!prev && !UNOBSERVED_KINDS.has(origin.kind)) {
     recordSessionLifecycle({
       sessionId: id,
       projectPath: getSession(id)?.projectPath ?? null,
@@ -158,7 +188,10 @@ export function forget(id: string): void {
   const origin = origins.get(id)
   origins.delete(id)
   statuses.delete(id)
-  if (origin) {
+  if (!origin) return
+  // Close the pair in the event log — but only for the kinds whose 'spawn' we
+  // recorded in the first place, or the log accumulates unmatched ends.
+  if (!UNOBSERVED_KINDS.has(origin.kind)) {
     // Teardown usually kills the PTY first, so projectPath is often already
     // gone — the session id is enough to close the pair in the event log.
     recordSessionLifecycle({
@@ -167,8 +200,8 @@ export function forget(id: string): void {
       action: 'end',
       sessionKind: origin.kind,
     })
-    notify()
   }
+  notify()
 }
 
 function projectNameFromPath(p: string): string {

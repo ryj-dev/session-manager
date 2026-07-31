@@ -260,7 +260,12 @@ export interface ScheduledTask {
 // hook status. The renderer keeps a mirror refreshed by 'registry:changed' plus
 // a slow poll while the overview is open (so uptime ticks and zombies surface).
 
-export type SessionKind = 'user' | 'terminal' | 'scheduled' | 'pipeline' | 'agent' | 'observer'
+/** Mirrors SessionKind in src/main/session-registry.ts. */
+export type SessionKind =
+  | 'user' | 'terminal' | 'scheduled' | 'pipeline' | 'agent' | 'observer'
+  /** A drawer/preview PTY rendering an existing conversation — not a session
+   *  the user started, and never shown on the graph. */
+  | 'preview'
 export type RegistryStatus = 'working' | 'idle' | 'permission' | 'zombie' | 'unknown'
 
 export interface SessionOrigin {

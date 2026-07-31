@@ -30,6 +30,7 @@ const KIND_BADGE: Record<SessionKind, { label: string; className: string }> = {
   pipeline:  { label: 'pipeline',  className: 'bg-violet-500/15 text-violet-300' },
   agent:     { label: 'agent',     className: 'bg-emerald-500/15 text-emerald-300' },
   observer:  { label: 'observer',  className: 'bg-fuchsia-500/15 text-fuchsia-300' },
+  preview:   { label: 'preview',   className: 'bg-zinc-500/15 text-zinc-400' },
 }
 
 const STATUS_DOT: Record<RegistryStatus, { className: string; pulse: boolean; label: string }> = {
@@ -141,6 +142,17 @@ function buildSections(
       hint: 'The curator agent — mines your usage and proposes automations',
       entries: by('observer'),
     },
+    // Previews are ephemeral and the ephemeral filter runs before grouping, so
+    // this section only ever appears with "Show N preview sessions" on. Omitted
+    // entirely when empty rather than showing a permanent "Nothing running".
+    ...(by('preview').length > 0
+      ? [{
+          key: 'preview',
+          title: 'Drawer previews',
+          hint: 'Throwaway PTYs rendering an existing conversation — closed with the drawer',
+          entries: by('preview'),
+        }]
+      : []),
   ]
 }
 

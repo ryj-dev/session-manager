@@ -176,10 +176,13 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
       session.ephemeral = ephemeral === true
       attachSessionListeners(id, session)
       // A resume re-enters an existing conversation. Ephemeral resumes are
-      // drawer previews (pipeline board / schedule run history) — tag them by
-      // the panel that owns them so the overview doesn't show them as user
-      // sessions; a non-ephemeral resume IS a restored graph session.
-      registry.setOrigin(id, { kind: 'user' })
+      // drawer previews (pipeline board / schedule run history): the renderer
+      // spawned them to RENDER a conversation and kills them when the drawer
+      // closes, so they are not graph sessions and their spawn/end is not user
+      // activity worth mining. A non-ephemeral resume IS a restored graph
+      // session. The comment here used to claim this distinction; the code
+      // tagged both 'user'.
+      registry.setOrigin(id, { kind: session.ephemeral ? 'preview' : 'user' })
       return { id, projectPath, claudeSessionId }
     }
   )
