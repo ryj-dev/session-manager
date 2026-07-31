@@ -1,8 +1,8 @@
 ---
 slug: hotkeys-settings
 title: Hotkeys & Settings
-summary: All 17 configurable Cmd-hotkeys with defaults, plus the full Settings panel — spawn behavior, pairing, popups, autonomy, cleanup.
-related: [graph-view, file-explorer, split-view, hook-integration-status]
+summary: All 18 configurable Cmd-hotkeys with defaults, plus the full Settings panel — spawn behavior, pairing, popups, autonomy, cleanup.
+related: [graph-view, file-explorer, split-view, hook-integration-status, sessions-overview]
 ---
 
 # Hotkeys & Settings
@@ -25,6 +25,7 @@ All bindings use the Cmd modifier on macOS (Alt on Windows) and are configurable
 | toggleNotesGlobal | `Cmd+Shift+N` | Todos/notes, global view |
 | togglePipeline | `Cmd+L` | Agentic pipeline board |
 | toggleScheduled | `Cmd+J` | Scheduled tasks panel |
+| openOverview | `Cmd+P` | Sessions overview — every live session, grouped by owner |
 | toggleCanvas | `Cmd+K` | Canvas dock for the focused session |
 | shareTurn | `Cmd+Shift+S` | Share Turn modal for the focused session |
 | branchSession | `Cmd+B` | Branch (fork) the focused session — both stay alive |

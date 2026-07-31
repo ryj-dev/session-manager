@@ -2,7 +2,7 @@
 slug: scheduled-tasks
 title: Scheduled Tasks
 summary: Cmd+J fires saved prompts into fresh unattended sessions on launch / first-of-day / interval / daily triggers, with resumable run history.
-related: [agentic-pipeline, spawned-sessions, hook-integration-status, mcp-server-overview]
+related: [agentic-pipeline, spawned-sessions, hook-integration-status, mcp-server-overview, sessions-overview]
 ---
 
 # Scheduled Tasks

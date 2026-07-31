@@ -2,7 +2,7 @@
 slug: agentic-pipeline
 title: Agentic Pipeline
 summary: Cmd+L hands a todo to an autonomous orchestrator that plans → implements → review-loops it, fanning out into isolated git worktrees.
-related: [todos-project-notes, spawned-sessions, scheduled-tasks, mcp-server-overview]
+related: [todos-project-notes, spawned-sessions, scheduled-tasks, mcp-server-overview, sessions-overview]
 ---
 
 # Agentic Pipeline

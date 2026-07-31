@@ -1,8 +1,8 @@
 ---
 slug: mcp-server-overview
 title: MCP Server Overview
-summary: The session-manager stdio MCP server — how it's registered, and the full 46-tool surface grouped by area.
-related: [memory-knowledge-base, todos-project-notes, spawned-sessions, agentic-pipeline, scheduled-tasks, hook-integration-status]
+summary: The session-manager stdio MCP server — how it's registered, and the full 47-tool surface grouped by area.
+related: [memory-knowledge-base, todos-project-notes, spawned-sessions, agentic-pipeline, scheduled-tasks, hook-integration-status, observer-agent]
 ---
 
 # MCP Server Overview
@@ -15,7 +15,7 @@ Session Manager ships a stdio MCP server named `session-manager` that gives ever
 
 The MCP server runs **out of process** (spawned per-session by Claude Code over stdio). Memory notes and todos it reads/writes directly on disk (shared app data dir, with a file watcher keeping the app UI live). Anything involving the *running app* — spawning, messaging, pipeline, schedules — goes over HTTP to the app's [hook server](hook-integration-status.md), using the port and per-launch secret files in the app data dir. If the app isn't running, those tools fail with "hook server is not running"; the disk-backed memory/todo tools keep working.
 
-## Tool surface (46 tools)
+## Tool surface (47 tools)
 
 **Memory knowledge base (10)** — `create-memory`, `read-memory`, `edit-memory`, `batch-section-edit`, `delete-memory`, `search-memories`, `list-memories`, `add-tags`, `remove-tags`, `repair-related`. See [memory-knowledge-base](memory-knowledge-base.md).
 
@@ -29,9 +29,13 @@ The MCP server runs **out of process** (spawned per-session by Claude Code over 
 
 **Canvas (4)** — `canvas-show`, `canvas-inspect-image`, `canvas-list-artifacts`, `canvas-focus`. See [canvas](canvas.md).
 
+**Observer (1)** — `observer-suggest`. The curator's only write path: files ONE proposed automation into the user's insights inbox for accept/dismiss. Restricted to observer sessions by their `--allowedTools`; a normal session has no reason to call it. See [observer-agent](observer-agent.md).
+
 **Feature wiki (3)** — `list-wiki-articles`, `read-wiki-article`, `search-wiki`. Read-only access to this wiki: articles ship with the app (`docs/wiki` in the repo, `resources/wiki` packaged) and are indexed into the same embedding DB as memories/todos under a `wiki:` namespace, so `search-wiki` is hybrid keyword + semantic. The wiki is authoritative, versioned product documentation — distinct from the per-user memory KB.
 
 Tool names are invoked as `mcp__session-manager__<tool>` from a session.
+
+Every tool call also emits a **name-only beacon** to the app's hook server so the observer can mine which tools you reach for — the tool name, never its arguments. It is fire-and-forget and adds no latency to (and cannot fail) the call.
 
 ## Identity: how tools know who's calling
 

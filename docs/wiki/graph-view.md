@@ -2,7 +2,7 @@
 slug: graph-view
 title: Graph View
 summary: Force-directed star/hub graph of all running sessions grouped by project, with keyboard navigation and momentum zoom.
-related: [terminal-management, split-view, hotkeys-settings, session-persistence]
+related: [terminal-management, split-view, hotkeys-settings, session-persistence, sessions-overview]
 ---
 
 # Graph View
