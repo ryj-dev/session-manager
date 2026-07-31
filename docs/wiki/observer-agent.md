@@ -69,6 +69,7 @@ The log records **what was done, never what was said**.
 ## Gotchas & tips
 
 - **Nothing happens for the first few days.** A pattern needs 4 distinct days inside a 14-day window before it is even eligible, and single occurrences are never written down at all. This is intentional — day-based support means one frantic afternoon cannot manufacture a "habit".
+- **Accepted skills are permanent.** Unlike the skills gallery's installs — which are wiped at app exit because they exist only to serve the session you just spawned — a skill you accept from the inbox stays in `~/.claude/commands/` across restarts. Delete that file to remove it.
 - **Accepted scheduled tasks are created disabled.** A one-click accept should not silently start firing Claude sessions on a timer — read the prompt in `Cmd+J` and enable it yourself.
 - Proposed interval recurrences are floored at 15 minutes regardless of what the curator asks for.
 - The curator will not run for housekeeping alone; it needs at least one promoted pattern. It also skips entirely when 12+ suggestions are already pending — the goal is a trickle of good proposals, not a queue.

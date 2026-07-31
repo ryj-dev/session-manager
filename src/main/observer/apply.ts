@@ -117,8 +117,12 @@ function applySkill(s: SuggestionRow): ApplyResult {
   const description = str(p.description) ?? s.rationale
   // Same on-disk format the skills gallery installs: frontmatter + markdown.
   const content = `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}\n`
-  const commandName = installSkillCommand(name, content)
-  return { ok: true, message: `Installed skill as /${commandName}` }
+  // PERSISTENT, unlike a gallery install. The gallery's commands are wiped at
+  // app exit because they exist to serve the session you just spawned; this
+  // one the user deliberately accepted, and the inbox goes on reporting it as
+  // "Installed" — a slash command that vanished on quit made that a lie.
+  const commandName = installSkillCommand(name, content, { persistent: true })
+  return { ok: true, message: `Installed skill as /${commandName} (kept across restarts; delete ~/.claude/commands/${commandName}.md to remove it)` }
 }
 
 function applyMemoryLink(s: SuggestionRow): ApplyResult {
