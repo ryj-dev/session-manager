@@ -316,7 +316,11 @@ function Empty(): JSX.Element {
       marginTop: 40,
     }}>
       <div style={{ fontSize: 14, color: 'var(--todos-text-dim)' }}>Nothing here</div>
-      <div style={{ fontSize: 12 }}>Press ⌘N or click New to create a todo.</div>
+      {/* Deliberately names no hotkey: the notes hotkey is the global panel
+          toggle and is explicitly NOT bound inside the panel (it would close
+          it, not create anything), so the old "Press ⌘N" was both hardcoded
+          and untrue. */}
+      <div style={{ fontSize: 12 }}>Click New to create a todo.</div>
     </div>
   )
 }

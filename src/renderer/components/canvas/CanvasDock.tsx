@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { useStore, artifactsForSession, type Session } from '../../store'
+import { useHotkeyDisplay } from '../../lib/hotkeys'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { titleFor, summaryFor } from './summary'
 
@@ -35,6 +36,8 @@ export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand, onM
   const selectCanvasArtifact = useStore((s) => s.selectCanvasArtifact)
   const dismissCanvas = useStore((s) => s.dismissCanvas)
   const markCanvasSeen = useStore((s) => s.markCanvasSeen)
+  // Rebindable in Settings — never spell this out as a literal.
+  const canvasKey = useHotkeyDisplay('toggleCanvas')
 
   const artifacts = useMemo(
     () => artifactsForSession(canvasArtifacts, session),
@@ -122,7 +125,7 @@ export function CanvasDock({ session, variant, rightOffsetPct = 0, onExpand, onM
             <button
               onClick={() => dismissCanvas(session.id)}
               className="px-1 text-zinc-500 hover:text-zinc-200"
-              title="Close canvas (reopen with ⌘K or the ▣ badge)"
+              title={`Close canvas (reopen with ${canvasKey} or the ▣ badge)`}
             >
               ✕
             </button>

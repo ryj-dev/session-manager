@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useStore, type RegistryEntry, type RegistryStatus, type SessionKind } from '../../store'
+import { useHotkeyDisplay } from '../../lib/hotkeys'
 import { InsightsInbox } from './InsightsInbox'
 
 /**
@@ -49,13 +50,21 @@ const STATUS_DOT: Record<RegistryStatus, { className: string; pulse: boolean; la
  * put the app into focused-view on an id nothing knows about: a blank screen
  * with no way back except Escape. Drawer previews are owned and reaped by the
  * drawer that spawned them; focusing one from here would fight that owner.
+ *
+ * A hook, not a constant, because two of these name a hotkey and every hotkey
+ * in this app is user-rebindable — a hardcoded "⌘L" is simply wrong for anyone
+ * who changed it in Settings.
  */
-const OPEN_TARGET: Partial<Record<SessionKind, string>> = {
-  user:      'Focus this session on the graph',
-  terminal:  'Focus this terminal on the graph',
-  agent:     'Focus this agent session on the graph',
-  pipeline:  'Open the pipeline board (⌘L)',
-  scheduled: 'Open the scheduled-tasks panel (⌘J)',
+function useOpenTargets(): Partial<Record<SessionKind, string>> {
+  const pipelineKey = useHotkeyDisplay('togglePipeline')
+  const scheduledKey = useHotkeyDisplay('toggleScheduled')
+  return useMemo(() => ({
+    user:      'Focus this session on the graph',
+    terminal:  'Focus this terminal on the graph',
+    agent:     'Focus this agent session on the graph',
+    pipeline:  `Open the pipeline board (${pipelineKey})`,
+    scheduled: `Open the scheduled-tasks panel (${scheduledKey})`,
+  }), [pipelineKey, scheduledKey])
 }
 
 const NO_OPEN_TARGET: Partial<Record<SessionKind, string>> = {
@@ -97,6 +106,8 @@ function buildSections(
   entries: RegistryEntry[],
   pipelineTitles: Map<string, string>,
   scheduleNames: Map<string, string>,
+  /** Formatted, live hotkey labels — never hardcode these, they are rebindable. */
+  keys: { pipeline: string; scheduled: string },
 ): Section[] {
   const by = (kind: SessionKind): RegistryEntry[] => entries.filter((e) => e.origin.kind === kind)
 
@@ -128,7 +139,7 @@ function buildSections(
     {
       key: 'pipeline',
       title: 'Pipeline sessions',
-      hint: 'Orchestrators and workers, grouped by task (⌘L board)',
+      hint: `Orchestrators and workers, grouped by task (${keys.pipeline} board)`,
       entries: pipeline,
       subGroups: [...pipelineTasks.entries()].map(([taskId, list]) => ({
         key: taskId,
@@ -144,7 +155,7 @@ function buildSections(
     {
       key: 'scheduled',
       title: 'Scheduled task runs',
-      hint: 'In-flight runs of your saved schedules (⌘J panel)',
+      hint: `In-flight runs of your saved schedules (${keys.scheduled} panel)`,
       entries: scheduled,
       subGroups: [...scheduleGroups.entries()].map(([scheduleId, list]) => ({
         key: scheduleId,
@@ -240,9 +251,14 @@ export function OverviewPanel({ visible, onClose }: Props): JSX.Element | null {
     () => (showEphemeral ? entries : entries.filter((e) => !e.ephemeral)),
     [entries, showEphemeral],
   )
+  const pipelineKey = useHotkeyDisplay('togglePipeline')
+  const scheduledKey = useHotkeyDisplay('toggleScheduled')
   const sections = useMemo(
-    () => buildSections(visibleEntries, pipelineTitles, scheduleNames),
-    [visibleEntries, pipelineTitles, scheduleNames],
+    () => buildSections(visibleEntries, pipelineTitles, scheduleNames, {
+      pipeline: pipelineKey,
+      scheduled: scheduledKey,
+    }),
+    [visibleEntries, pipelineTitles, scheduleNames, pipelineKey, scheduledKey],
   )
 
   const ephemeralCount = entries.length - entries.filter((e) => !e.ephemeral).length
@@ -408,7 +424,7 @@ function Row({
   const badge = KIND_BADGE[entry.origin.kind]
   const status = STATUS_DOT[entry.status]
   const isZombie = entry.status === 'zombie'
-  const openTarget = OPEN_TARGET[entry.origin.kind]
+  const openTarget = useOpenTargets()[entry.origin.kind]
 
   return (
     <div className="group flex items-center gap-2.5 rounded border border-zinc-800/70 bg-zinc-900/40 px-3 py-2 hover:border-zinc-700">

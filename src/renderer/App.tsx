@@ -1426,7 +1426,10 @@ export function App(): JSX.Element {
               <button
                 onClick={() => forceCloseSession(focusedSessionId!)}
                 className="text-zinc-600 hover:text-zinc-400 transition-colors"
-                title={`Close session (⌘⇧W)`}
+                // Not user-configurable (the handler tests 'shift+w' directly),
+                // but still formatted: the base modifier is Cmd on Mac and Alt
+                // on Windows, so a literal ⌘⇧W was wrong on Windows.
+                title={`Close session (${formatHotkey('shift+w')})`}
               >
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                   <path d="M3.5 3.5l7 7M10.5 3.5l-7 7" />
