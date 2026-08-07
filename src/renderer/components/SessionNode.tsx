@@ -44,20 +44,20 @@ export function SessionNode({
   )
   const hasUnseenArtifacts = useStore((s) => s.unseenCanvasSessionIds.includes(session.id))
 
-  // Draw snapshot onto the thumbnail canvas
-  // Uses the same 3x multiplier as the snapshot capture so this is a 1:1 copy — no downscale.
+  // Draw snapshot onto the thumbnail canvas.
+  // Sized from the snapshot itself so it's always a 1:1 copy — no downscale
+  // here regardless of the capture-side SNAPSHOT_SCALE.
   useEffect(() => {
     if (!session.snapshot || !canvasRef.current) return
     const canvas = canvasRef.current
 
-    // Match the snapshot backing resolution exactly (192×3 = 576, 120×3 = 360)
-    canvas.width = THUMB_WIDTH * 3
-    canvas.height = THUMB_HEIGHT * 3
+    canvas.width = session.snapshot.width
+    canvas.height = session.snapshot.height
 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    ctx.drawImage(session.snapshot, 0, 0, canvas.width, canvas.height)
+    ctx.drawImage(session.snapshot, 0, 0)
   }, [session.snapshot, session.snapshotVersion])
 
   return (

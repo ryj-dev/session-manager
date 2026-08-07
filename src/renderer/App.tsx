@@ -84,9 +84,9 @@ const POST_FINISH_PAINT_DELAY_MS = 220
 const THUMB_W = 192
 const THUMB_H = 120
 // Snapshot quality multiplier — higher than dpr for extra sharpness at viewport zoom.
-// 3x gives crisp text at up to 1.5x viewport zoom on Retina displays.
-// Memory per snapshot: 576×360×4 ≈ 830KB (vs ~1.5MB before).
-const SNAPSHOT_SCALE = 3
+// 4x gives crisp text at up to 2x viewport zoom on Retina displays (incl. the
+// 1.05x hover scale). Memory per snapshot: 768×480×4 ≈ 1.5MB.
+const SNAPSHOT_SCALE = 4
 
 
 
@@ -176,6 +176,10 @@ export function App(): JSX.Element {
   const snapshotCanvases = useRef<Map<string, HTMLCanvasElement>>(new Map())
   // Pending post-finished re-capture timers, keyed by session id
   const postFinishTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // Ping-pong scratch canvases for progressive snapshot downscaling (shared
+  // across sessions — captures run sequentially on the main thread)
+  const snapshotScratchA = useRef<HTMLCanvasElement | null>(null)
+  const snapshotScratchB = useRef<HTMLCanvasElement | null>(null)
 
   // Panel state
   const activePanel = useStore((s) => s.activePanel)
@@ -724,7 +728,7 @@ export function App(): JSX.Element {
   // Capture a single session's snapshot (reuses canvas to avoid GC churn)
   const captureSnapshot = useCallback((sessionId: string): void => {
     const canvas = getTerminalCanvas(sessionId)
-    if (!canvas) return
+    if (!canvas || canvas.width === 0 || canvas.height === 0) return
     let thumb = snapshotCanvases.current.get(sessionId)
     if (!thumb) {
       thumb = document.createElement('canvas')
@@ -736,7 +740,39 @@ export function App(): JSX.Element {
     if (!ctx) return
     ctx.imageSmoothingEnabled = true
     ctx.imageSmoothingQuality = 'high'
-    ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height)
+
+    // Progressive halving. The source is a full-window xterm canvas (often
+    // 3000+ device px wide); collapsing that to the thumb in ONE drawImage is
+    // a 4-6x downscale that turns terminal text to mush even with
+    // smoothingQuality 'high'. Halve step-by-step (ping-pong between two
+    // reusable scratch canvases) until the final step is under 2x, which
+    // keeps glyph edges intact.
+    let src: HTMLCanvasElement = canvas
+    let sw = canvas.width
+    let sh = canvas.height
+    let useA = true
+    while (sw > thumb.width * 2 && sh > thumb.height * 2) {
+      const ref = useA ? snapshotScratchA : snapshotScratchB
+      if (!ref.current) ref.current = document.createElement('canvas')
+      const scratch = ref.current
+      const nw = Math.max(1, Math.floor(sw / 2))
+      const nh = Math.max(1, Math.floor(sh / 2))
+      if (scratch.width !== nw || scratch.height !== nh) {
+        scratch.width = nw
+        scratch.height = nh
+      }
+      const sctx = scratch.getContext('2d')
+      if (!sctx) break
+      sctx.imageSmoothingEnabled = true
+      sctx.imageSmoothingQuality = 'high'
+      sctx.clearRect(0, 0, nw, nh)
+      sctx.drawImage(src, 0, 0, sw, sh, 0, 0, nw, nh)
+      src = scratch
+      sw = nw
+      sh = nh
+      useA = !useA
+    }
+    ctx.drawImage(src, 0, 0, sw, sh, 0, 0, thumb.width, thumb.height)
     updateSessionSnapshot(sessionId, thumb)
   }, [updateSessionSnapshot])
 
