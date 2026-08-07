@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type RegistryEntry } from './store'
+import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type RegistryEntry, type InjectedMemory } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -27,6 +27,7 @@ import { PipelineView } from './components/pipeline/PipelineView'
 import { ScheduledTasksView } from './components/scheduled/ScheduledTasksView'
 import { OverviewPanel } from './components/overview/OverviewPanel'
 import { MessagePopup } from './components/MessagePopup'
+import { MemoryExpansionOverlay } from './components/MemoryExpansionOverlay'
 import { AttachedTerminalOverlay, PINNED_WIDTH_PCT } from './components/AttachedTerminalOverlay'
 import { CanvasDock, CANVAS_WIDTH_PCT } from './components/canvas/CanvasDock'
 import { getTerminalCanvas, disposeTerminal, focusTerminal, onTerminalReady, clearTerminalReady } from './components/Terminal'
@@ -131,6 +132,14 @@ export function App(): JSX.Element {
   const setAutoModeForRestoredSessions = useStore((s) => s.setAutoModeForRestoredSessions)
   const ambientTodoNudge = useStore((s) => s.ambientTodoNudge)
   const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
+  const injectSpinnerTips = useStore((s) => s.injectSpinnerTips)
+  const setInjectSpinnerTips = useStore((s) => s.setInjectSpinnerTips)
+  const memoryInjectionMode = useStore((s) => s.memoryInjectionMode)
+  const setMemoryInjectionMode = useStore((s) => s.setMemoryInjectionMode)
+  const memoryInjectionSessionCap = useStore((s) => s.memoryInjectionSessionCap)
+  const setMemoryInjectionSessionCap = useStore((s) => s.setMemoryInjectionSessionCap)
+  const memoryInjectionThreshold = useStore((s) => s.memoryInjectionThreshold)
+  const setMemoryInjectionThreshold = useStore((s) => s.setMemoryInjectionThreshold)
   const canvasAutoShowUserImages = useStore((s) => s.canvasAutoShowUserImages)
   const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
@@ -206,6 +215,10 @@ export function App(): JSX.Element {
       if (typeof settings.autoModeForManualSessions === 'boolean') setAutoModeForManualSessions(settings.autoModeForManualSessions)
       if (typeof settings.autoModeForRestoredSessions === 'boolean') setAutoModeForRestoredSessions(settings.autoModeForRestoredSessions)
       if (typeof settings.ambientTodoNudge === 'boolean') setAmbientTodoNudge(settings.ambientTodoNudge)
+      if (typeof settings.injectSpinnerTips === 'boolean') setInjectSpinnerTips(settings.injectSpinnerTips)
+      if (settings.memoryInjectionMode === 'off' || settings.memoryInjectionMode === 'first' || settings.memoryInjectionMode === 'every') setMemoryInjectionMode(settings.memoryInjectionMode)
+      if (typeof settings.memoryInjectionSessionCap === 'number' || settings.memoryInjectionSessionCap === null) setMemoryInjectionSessionCap(settings.memoryInjectionSessionCap as number | null)
+      if (settings.memoryInjectionThreshold === 'super-strict' || settings.memoryInjectionThreshold === 'strict' || settings.memoryInjectionThreshold === 'balanced' || settings.memoryInjectionThreshold === 'lenient') setMemoryInjectionThreshold(settings.memoryInjectionThreshold)
       if (typeof settings.canvasAutoShowUserImages === 'boolean') useStore.getState().setCanvasAutoShowUserImages(settings.canvasAutoShowUserImages)
       if (typeof settings.spawnIntoCurrentSplit === 'boolean') setSpawnIntoCurrentSplit(settings.spawnIntoCurrentSplit)
       if (typeof settings.openBranchInSplit === 'boolean') setOpenBranchInSplit(settings.openBranchInSplit)
@@ -245,6 +258,15 @@ export function App(): JSX.Element {
     return unsub
   }, [])
 
+  // Prompt-time memory injection: record which notes landed in each session so
+  // the transcript's "[title]" tokens can be linkified (Terminal link provider).
+  useEffect(() => {
+    const unsub = window.api.onMemoryInjected(({ sessionId, entries }) =>
+      useStore.getState().handleMemoryInjected(sessionId, entries as InjectedMemory[])
+    )
+    return unsub
+  }, [])
+
   // Observer inbox mirror. Pulled at startup so the pending-suggestions badge
   // is right on first paint, then re-pulled whenever main says it changed.
   useEffect(() => {
@@ -276,8 +298,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -1486,6 +1508,11 @@ export function App(): JSX.Element {
           </div>
         </div>
       )}
+
+      {/* Injected-memory expansion — opened by clicking a "[title]" token on a
+          transcript "Relevant memories injected" line (xterm link provider).
+          Fixed-position, so it works in focused and split views alike. */}
+      <MemoryExpansionOverlay />
 
 
       {/* Click-away backdrop — closes sidebar panels when clicking outside */}

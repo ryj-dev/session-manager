@@ -40,6 +40,16 @@ A persistent knowledge base of markdown notes shared between the user and every 
 
 `search-memories` fuses a keyword pass with local semantic embeddings (bge-small via a local index) using reciprocal-rank fusion, falling back to keyword-only if the embedding index isn't available. Search before creating: **update an existing note rather than writing a duplicate.**
 
+## Prompt-time memory injection (opt-in)
+
+Settings → *Memory injection* (default **off**) makes sessions receive relevant notes automatically: on each user prompt, the prompt is embedded locally and matched against the note index; the top hits are injected into Claude's context as excerpts.
+
+- **Modes**: *First prompt only* (one lookup when the session's first prompt is sent) or *Search on every prompt*. In every-prompt mode the query blends the current prompt with the previous couple, so a terse follow-up ("yes do that") still carries the conversation's topic.
+- **Bounded**: max 3 notes per prompt, excerpt-only (~700 chars each), similarity-gated (nothing injects when nothing is genuinely relevant; the *Match strictness* preset — super strict / strict / balanced / lenient — sets how close a match must be), and each note injects **at most once per session** — repeat prompts on the same topic add nothing. The dedupe survives app restarts (persisted per Claude session id, since a resumed conversation already carries its earlier injections in context). An optional per-session cap adds a hard ceiling.
+- **Visible**: every injection is announced in the transcript as `Relevant memories injected: [title] [title]`. Each `[title]` is clickable — it expands the full note in an overlay (Esc/click-away/scroll collapses). The announcement only appears when something actually landed.
+- **Fast-path safe**: the lookup runs on the synchronous prompt hook under a hard 1.2 s budget (warm cost is ~tens of ms); if the model is cold or slow, that prompt simply gets no injection. The model is pre-warmed at startup when the feature is on.
+- Injected excerpts point Claude at `read-memory` for full notes; the curator (observer) run is excluded.
+
 ## Use cases
 
 - Record a root-cause analysis once; every future session finds it via `search-memories`.

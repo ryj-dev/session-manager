@@ -9,7 +9,7 @@ interface CleanupPanelProps {
 
 type RowKey =
   | 'mcp' | 'hooks' | 'statusline' | 'claudeMd' | 'plugin'
-  | 'memory' | 'embeddings' | 'notes' | 'observer' | 'sessions' | 'appSettings'
+  | 'memory' | 'embeddings' | 'notes' | 'observer' | 'memoryInjection' | 'sessions' | 'appSettings'
 
 interface RowDef {
   key: RowKey
@@ -166,6 +166,22 @@ const ROWS: RowDef[] = [
     confirmBody: (s) => `Permanently deletes ${fmtBytes(s.observer.bytes)} of recorded actions, mined patterns and suggestions (including your "never suggest this" mutes). Observation restarts from empty. This cannot be undone.`,
   },
   {
+    key: 'memoryInjection',
+    title: 'Memory injection dedupe',
+    description: 'Which memory notes each conversation has already received (state/memory-injection.json) — prevents re-injection after restarts',
+    destructive: true,
+    status: (s) => ({
+      label: s.memoryInjection.exists
+        ? `${s.memoryInjection.sessions} session${s.memoryInjection.sessions === 1 ? '' : 's'} · ${fmtBytes(s.memoryInjection.bytes)}`
+        : 'Empty',
+      variant: s.memoryInjection.exists ? 'data' : 'empty',
+      isInstalled: s.memoryInjection.exists,
+    }),
+    remove: () => window.api.cleanupRemoveMemoryInjection(),
+    confirmTitle: 'Clear memory-injection dedupe?',
+    confirmBody: (s) => `Forgets which notes were injected into ${s.memoryInjection.sessions} conversation${s.memoryInjection.sessions === 1 ? '' : 's'}. Resumed sessions may re-receive notes their transcripts already contain. Session caps reset too.`,
+  },
+  {
     key: 'sessions',
     title: 'Saved sessions',
     description: 'Resumable Claude Code sessions and inter-session message inboxes',
@@ -196,7 +212,7 @@ const ROWS: RowDef[] = [
 ]
 
 const INTEGRATION_KEYS: RowKey[] = ['mcp', 'hooks', 'statusline', 'claudeMd', 'plugin']
-const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'observer', 'sessions', 'appSettings']
+const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'observer', 'memoryInjection', 'sessions', 'appSettings']
 
 export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Element {
   const [status, setStatus] = useState<CleanupStatus | null>(null)

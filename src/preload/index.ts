@@ -126,10 +126,10 @@ const api = {
     ipcRenderer.send('splitGroups:save', groups),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // Share Turn
@@ -351,6 +351,14 @@ const api = {
   canvasStashClipboardImage: (sessionId: string): Promise<{ stashed: boolean }> =>
     ipcRenderer.invoke('canvas:stashClipboardImage', sessionId),
 
+  // Prompt-time memory injection: main announces which notes were injected
+  // into a session so the transcript's "[title]" tokens can be linkified.
+  onMemoryInjected: (callback: (data: { sessionId: string; entries: unknown[] }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { sessionId: string; entries: unknown[] }) => callback(data)
+    ipcRenderer.on('memory:injected', handler)
+    return (): void => { ipcRenderer.removeListener('memory:injected', handler) }
+  },
+
   // Unified session registry (Cmd+P overview). Derived state owned by main
   // (session-registry.ts); the renderer mirrors it via 'registry:changed' and
   // re-polls while the panel is open so uptime ticks.
@@ -417,6 +425,7 @@ const api = {
   cleanupRemoveNotes: (): Promise<CleanupResult & { bytes?: number; files?: number }> => ipcRenderer.invoke('cleanup:removeNotes'),
   cleanupRemoveSessions: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSessions'),
   cleanupRemoveObserver: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeObserver'),
+  cleanupRemoveMemoryInjection: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeMemoryInjection'),
   cleanupResetAppSettings: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:resetAppSettings'),
 
   // App lifecycle — real quit via app.quit() so the full before-quit cleanup
@@ -438,6 +447,7 @@ export interface CleanupStatus {
   sessions: { savedExists: boolean; messagesExists: boolean }
   appSettings: { exists: boolean }
   observer: { exists: boolean; bytes: number }
+  memoryInjection: { exists: boolean; bytes: number; sessions: number }
 }
 
 contextBridge.exposeInMainWorld('api', api)

@@ -78,6 +78,16 @@ export interface AppSettings {
   autoModeForManualSessions: boolean
   autoModeForRestoredSessions: boolean
   ambientTodoNudge: boolean
+  /** Mix Session Manager feature tips into Claude Code's spinner tips
+   *  (injected per-spawn via `claude --settings`). Opt-in, default false. */
+  injectSpinnerTips: boolean
+  /** Prompt-time memory injection: semantically match memory notes against
+   *  submitted prompts and inject the top hits as context. Opt-in. */
+  memoryInjectionMode: 'off' | 'first' | 'every'
+  /** Max notes injected across one session; null = unlimited. */
+  memoryInjectionSessionCap: number | null
+  /** How similar a note must be to inject (strictness preset). */
+  memoryInjectionThreshold: 'super-strict' | 'strict' | 'balanced' | 'lenient'
   /** Auto-display image paths from the user's submitted prompts on the
    *  session's canvas (drag-dropped / typed paths). Default true. */
   canvasAutoShowUserImages: boolean
@@ -118,6 +128,10 @@ const defaults: AppSettings = {
   autoModeForManualSessions: false,
   autoModeForRestoredSessions: false,
   ambientTodoNudge: false,
+  injectSpinnerTips: false,
+  memoryInjectionMode: 'off',
+  memoryInjectionSessionCap: null,
+  memoryInjectionThreshold: 'balanced',
   canvasAutoShowUserImages: true,
   spawnIntoCurrentSplit: false,
   terminalPairingMode: 'off',

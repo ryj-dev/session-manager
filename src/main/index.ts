@@ -23,6 +23,7 @@ import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from '
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 import { loadSettings } from './settings-store'
 import { startObserver, stopObserver } from './observer'
+import { warmMemoryInjection } from './memory-injection'
 
 // Register design:// + canvas:// as privileged schemes (must be done before app ready)
 protocol.registerSchemesAsPrivileged([
@@ -304,6 +305,9 @@ app.whenReady().then(async () => {
     try { await reindexAllTodos() } catch (err) { console.error('[todos:embed] bootstrap reindex failed:', err) }
     // Feature wiki is read-only product docs — one reindex at startup, no watcher.
     try { await reindexAllWiki(wikiDir) } catch (err) { console.error('[wiki:embed] bootstrap reindex failed:', err) }
+    // Prompt-time memory injection races a hard time budget on the sync hook
+    // path — pre-load the model so the first prompt doesn't lose that race.
+    if (loadSettings().memoryInjectionMode !== 'off') warmMemoryInjection()
   })
   startMemoryWatcher()
   setEmbedHooks({

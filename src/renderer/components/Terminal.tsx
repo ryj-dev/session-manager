@@ -3,7 +3,7 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
-import { useStore } from '../store'
+import { useStore, type InjectedMemory } from '../store'
 import { comboFromEvent } from '../lib/hotkeys'
 
 interface TerminalProps {
@@ -419,6 +419,91 @@ export function Terminal({ sessionId, visible, onTitleChange, autoFocus = true }
       term.onTitleChange((title) => {
         onTitleChangeRef.current?.(title)
       })
+
+      // Injected-memory links: on transcript lines announcing "Relevant
+      // memories injected: [title] [title]" (hook systemMessage), each [title]
+      // token whose label matches a note actually injected into this session
+      // becomes a clickable link that expands the full note in an overlay.
+      //
+      // The link provider supplies only hover feedback (underline + pointer).
+      // Activation deliberately does NOT use xterm's activate callback: xterm
+      // requires mousedown and mouseup in the exact same character cell, so a
+      // physical trackpad press that drifts the pointer a pixel fails it
+      // (while a zero-movement tap works). The DOM click handler below has the
+      // browser's forgiving drag tolerance instead, plus ±1 column of slack.
+      const tokenAt = (
+        text: string,
+        col: number | null
+      ): { entry: InjectedMemory; start: number; end: number } | null => {
+        if (!text.includes('Relevant memories injected')) return null
+        const entries = useStore.getState().memoryInjections[sessionId] ?? []
+        for (const entry of entries) {
+          const token = `[${entry.label}]`
+          let idx = text.indexOf(token)
+          while (idx !== -1) {
+            if (col === null || (col >= idx - 1 && col <= idx + token.length)) {
+              return { entry, start: idx, end: idx + token.length }
+            }
+            idx = text.indexOf(token, idx + token.length)
+          }
+        }
+        return null
+      }
+
+      term.registerLinkProvider({
+        provideLinks(bufferLineNumber, callback) {
+          const line = term.buffer.active.getLine(bufferLineNumber - 1)
+          const text = line?.translateToString(true) ?? ''
+          if (!text.includes('Relevant memories injected')) {
+            callback(undefined)
+            return
+          }
+          const entries = useStore.getState().memoryInjections[sessionId] ?? []
+          const links: import('@xterm/xterm').ILink[] = []
+          for (const entry of entries) {
+            const token = `[${entry.label}]`
+            let idx = text.indexOf(token)
+            while (idx !== -1) {
+              links.push({
+                // xterm link ranges are 1-based and end-inclusive
+                range: {
+                  start: { x: idx + 1, y: bufferLineNumber },
+                  end: { x: idx + token.length, y: bufferLineNumber },
+                },
+                text: token,
+                decorations: { pointerCursor: true, underline: true },
+                // No-op: activation is handled by the DOM click listener.
+                activate: () => {},
+              })
+              idx = text.indexOf(token, idx + token.length)
+            }
+          }
+          callback(links.length > 0 ? links : undefined)
+        },
+      })
+
+      const onMemoryTokenClick = (e: MouseEvent): void => {
+        if (term.hasSelection()) return
+        const screen = term.element?.querySelector('.xterm-screen') as HTMLElement | null
+        if (!screen) return
+        const rect = screen.getBoundingClientRect()
+        if (rect.width <= 0 || rect.height <= 0) return
+        const col = Math.floor((e.clientX - rect.left) / (rect.width / term.cols))
+        const row = Math.floor((e.clientY - rect.top) / (rect.height / term.rows))
+        if (col < 0 || row < 0 || col >= term.cols || row >= term.rows) return
+        const line = term.buffer.active.getLine(term.buffer.active.viewportY + row)
+        const text = line?.translateToString(true) ?? ''
+        const hit = tokenAt(text, col)
+        if (hit) {
+          useStore.getState().openMemoryExpansion(sessionId, hit.entry.filename, e.clientX, e.clientY)
+        }
+      }
+      termEl?.addEventListener('click', onMemoryTokenClick)
+      const prevCleanup = instance.cleanup
+      instance.cleanup = () => {
+        prevCleanup?.()
+        termEl?.removeEventListener('click', onMemoryTokenClick)
+      }
 
 
 

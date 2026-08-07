@@ -40,6 +40,14 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const canvasAutoShowUserImages = useStore((s) => s.canvasAutoShowUserImages)
   const setCanvasAutoShowUserImages = useStore((s) => s.setCanvasAutoShowUserImages)
   const setAmbientTodoNudge = useStore((s) => s.setAmbientTodoNudge)
+  const injectSpinnerTips = useStore((s) => s.injectSpinnerTips)
+  const setInjectSpinnerTips = useStore((s) => s.setInjectSpinnerTips)
+  const memoryInjectionMode = useStore((s) => s.memoryInjectionMode)
+  const setMemoryInjectionMode = useStore((s) => s.setMemoryInjectionMode)
+  const memoryInjectionSessionCap = useStore((s) => s.memoryInjectionSessionCap)
+  const setMemoryInjectionSessionCap = useStore((s) => s.setMemoryInjectionSessionCap)
+  const memoryInjectionThreshold = useStore((s) => s.memoryInjectionThreshold)
+  const setMemoryInjectionThreshold = useStore((s) => s.setMemoryInjectionThreshold)
   const spawnIntoCurrentSplit = useStore((s) => s.spawnIntoCurrentSplit)
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
   const openBranchInSplit = useStore((s) => s.openBranchInSplit)
@@ -364,6 +372,98 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 Periodically reminds Claude to surface open todos at natural stopping points (throttled to ~once every 8 turns)
+              </p>
+            </div>
+
+            {/* Spinner tips */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Spinner tips</div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={injectSpinnerTips}
+                  onChange={(e) => setInjectSpinnerTips(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Show Session Manager tips in Claude Code&apos;s spinner</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                Mixes tips about Session Manager features (the wiki, hotkeys, pipeline, canvas…) in with Claude Code&apos;s own spinner tips. Only affects sessions spawned from this app; applies to newly spawned sessions.
+              </p>
+            </div>
+
+            {/* Memory injection */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Memory injection</div>
+              <select
+                value={memoryInjectionMode}
+                onChange={(e) => setMemoryInjectionMode(e.target.value as 'off' | 'first' | 'every')}
+                className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 cursor-pointer"
+              >
+                <option value="off">No injection</option>
+                <option value="first">First prompt only</option>
+                <option value="every">Search on every prompt</option>
+              </select>
+              <p className="text-[10px] text-zinc-600 mt-1">
+                {memoryInjectionMode === 'off' && 'Prompts are never matched against memory notes'}
+                {memoryInjectionMode === 'first' && 'Inject matching notes once, when the session’s first prompt is sent'}
+                {memoryInjectionMode === 'every' && 'Match every prompt (blended with recent ones for context); each note injects at most once per session'}
+              </p>
+              {memoryInjectionMode !== 'off' && (
+                <div className="mt-2 ml-5">
+                  <div className="text-[11px] text-zinc-400 mb-1">Match strictness</div>
+                  <div className="flex rounded-lg border border-zinc-700 overflow-hidden w-fit mb-1">
+                    {([
+                      ['super-strict', 'Super strict'],
+                      ['strict', 'Strict'],
+                      ['balanced', 'Balanced'],
+                      ['lenient', 'Lenient'],
+                    ] as const).map(([value, title]) => (
+                      <button
+                        key={value}
+                        onClick={() => setMemoryInjectionThreshold(value)}
+                        className={`px-2.5 py-1 text-[11px] transition-colors ${
+                          memoryInjectionThreshold === value
+                            ? 'bg-blue-600/80 text-white'
+                            : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        {title}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-zinc-600 mb-2">
+                    How similar a note must be to your prompt before it injects. Super strict = only near-certain matches; lenient = casts wider, may include marginal notes
+                  </p>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={memoryInjectionSessionCap !== null}
+                      onChange={(e) => setMemoryInjectionSessionCap(e.target.checked ? 10 : null)}
+                      className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                    />
+                    <span className="text-xs text-zinc-300">Limit notes per session</span>
+                    {memoryInjectionSessionCap !== null && (
+                      <input
+                        type="number"
+                        min={1}
+                        max={99}
+                        value={memoryInjectionSessionCap}
+                        onChange={(e) => {
+                          const n = parseInt(e.target.value, 10)
+                          if (Number.isFinite(n) && n >= 1) setMemoryInjectionSessionCap(Math.min(n, 99))
+                        }}
+                        className="w-14 px-2 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+                      />
+                    )}
+                  </label>
+                  <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                    Hard ceiling on how many notes one session can accumulate
+                  </p>
+                </div>
+              )}
+              <p className="text-[10px] text-zinc-600 mt-1">
+                Semantically matches your memory notes against submitted prompts and injects the top matches (max 3 per prompt, excerpt only) as context. A &quot;Relevant memories injected&quot; line appears in the transcript — click a title to expand the full note.
               </p>
             </div>
 

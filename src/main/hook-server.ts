@@ -21,6 +21,7 @@ import * as registry from './session-registry'
 import * as observer from './observer/capture'
 import { authorizeSuggestRequest, endCuratorRun, ingestSuggestion, isCuratorSession } from './observer'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
+import { buildMemoryInjection } from './memory-injection'
 
 let server: Server | null = null
 let serverPort = 0
@@ -345,8 +346,19 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
               })
             }
             const reply = buildSyncHookResponse(appSessionId, payload)
-            res.writeHead(200, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify(reply))
+            // Memory injection is async (embeds the prompt, hard time budget);
+            // Claude blocks on this reply, so the response is sent after the
+            // race resolves — never later than SEARCH_BUDGET_MS.
+            void (async () => {
+              let merged = reply
+              try {
+                merged = await mergeMemoryInjection(appSessionId, payload, reply)
+              } catch {
+                /* injection must never break the sync reply */
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(merged))
+            })()
           } catch {
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end('{}')
@@ -2505,6 +2517,55 @@ interface SyncHookReply {
   hookSpecificOutput?: {
     hookEventName: string
     additionalContext?: string
+  }
+  /** Shown to the user in the session transcript by Claude Code. */
+  systemMessage?: string
+}
+
+/**
+ * Prompt-time memory injection (opt-in, Settings → Memory injection).
+ * Merges matched memory notes into the sync reply's additionalContext and
+ * announces them in the transcript via systemMessage; the renderer is told
+ * which notes landed so the announcement titles become clickable in xterm.
+ */
+async function mergeMemoryInjection(
+  appSessionId: string | null,
+  payload: HookPayload,
+  reply: SyncHookReply
+): Promise<SyncHookReply> {
+  if (!appSessionId || payload.hook_event_name !== 'UserPromptSubmit' || !payload.prompt) return reply
+  const settings = loadSettings()
+  if (settings.memoryInjectionMode === 'off') return reply
+  // The curator run is tool-restricted housekeeping — injecting user memory
+  // into it would only skew its judgements.
+  if (isCuratorSession(appSessionId)) return reply
+
+  const trackKey = payload.session_id || appSessionId
+  const injection = await buildMemoryInjection(trackKey, payload.prompt, {
+    mode: settings.memoryInjectionMode,
+    sessionCap: settings.memoryInjectionSessionCap,
+    threshold: settings.memoryInjectionThreshold,
+  })
+  if (!injection) return reply
+
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('memory:injected', {
+      sessionId: appSessionId,
+      entries: injection.entries,
+    })
+  }
+
+  const existing = reply.hookSpecificOutput?.additionalContext
+  return {
+    ...reply,
+    hookSpecificOutput: {
+      hookEventName: 'UserPromptSubmit',
+      additionalContext: existing
+        ? `${existing}\n\n${injection.additionalContext}`
+        : injection.additionalContext,
+    },
+    systemMessage: injection.systemMessage,
   }
 }
 

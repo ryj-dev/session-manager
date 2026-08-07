@@ -18,6 +18,21 @@ export interface SplitGroup {
   orderedSessionIds: string[]
 }
 
+/** Mirrors MemoryInjectionThreshold in src/main/memory-injection.ts. */
+export type MemoryInjectionThreshold = 'super-strict' | 'strict' | 'balanced' | 'lenient'
+
+/** A memory note injected into a session's context at prompt time.
+ *  Mirrors InjectedMemory in src/main/memory-injection.ts. */
+export interface InjectedMemory {
+  filename: string
+  title: string
+  /** Exact token (without brackets) shown in the transcript announcement. */
+  label: string
+  type: string
+  excerpt: string
+  body: string
+}
+
 export interface HotkeyMap {
   spawnSession: string
   spawnTerminal: string
@@ -530,6 +545,27 @@ export interface AppState {
   setAutoModeForRestoredSessions: (value: boolean) => void
   ambientTodoNudge: boolean
   setAmbientTodoNudge: (value: boolean) => void
+  /** Mix Session Manager feature tips into Claude Code's spinner tips. */
+  injectSpinnerTips: boolean
+  setInjectSpinnerTips: (value: boolean) => void
+  /** Prompt-time memory injection mode (off / first prompt only / every prompt). */
+  memoryInjectionMode: 'off' | 'first' | 'every'
+  setMemoryInjectionMode: (value: 'off' | 'first' | 'every') => void
+  /** Max notes injected across one session; null = unlimited. */
+  memoryInjectionSessionCap: number | null
+  setMemoryInjectionSessionCap: (value: number | null) => void
+  /** How similar a note must be to inject (strictness preset). */
+  memoryInjectionThreshold: MemoryInjectionThreshold
+  setMemoryInjectionThreshold: (value: MemoryInjectionThreshold) => void
+  /** Notes injected per session (union across the session's prompts), so the
+   *  transcript's "[title]" tokens can be linkified and expanded on click. */
+  memoryInjections: Record<string, InjectedMemory[]>
+  handleMemoryInjected: (sessionId: string, entries: InjectedMemory[]) => void
+  /** Open expansion for a clicked injected-memory token, anchored at the
+   *  click's viewport coordinates. Null when closed. */
+  memoryExpansion: { sessionId: string; filename: string; x: number; y: number } | null
+  openMemoryExpansion: (sessionId: string, filename: string, x: number, y: number) => void
+  closeMemoryExpansion: () => void
   /** Auto-display image paths from user prompts on the session's canvas. */
   canvasAutoShowUserImages: boolean
   setCanvasAutoShowUserImages: (value: boolean) => void
@@ -885,6 +921,26 @@ export const useStore = create<AppState>((set, get) => ({
   setAutoModeForRestoredSessions: (value) => set({ autoModeForRestoredSessions: value }),
   ambientTodoNudge: false,
   setAmbientTodoNudge: (value) => set({ ambientTodoNudge: value }),
+  injectSpinnerTips: false,
+  setInjectSpinnerTips: (value) => set({ injectSpinnerTips: value }),
+  memoryInjectionMode: 'off',
+  setMemoryInjectionMode: (value) => set({ memoryInjectionMode: value }),
+  memoryInjectionSessionCap: null,
+  setMemoryInjectionSessionCap: (value) => set({ memoryInjectionSessionCap: value }),
+  memoryInjectionThreshold: 'balanced',
+  setMemoryInjectionThreshold: (value) => set({ memoryInjectionThreshold: value }),
+  memoryInjections: {},
+  handleMemoryInjected: (sessionId, entries) =>
+    set((state) => {
+      const existing = state.memoryInjections[sessionId] ?? []
+      const known = new Set(existing.map((e) => e.filename))
+      const merged = [...existing, ...entries.filter((e) => !known.has(e.filename))]
+      return { memoryInjections: { ...state.memoryInjections, [sessionId]: merged } }
+    }),
+  memoryExpansion: null,
+  openMemoryExpansion: (sessionId, filename, x, y) =>
+    set({ memoryExpansion: { sessionId, filename, x, y } }),
+  closeMemoryExpansion: () => set({ memoryExpansion: null }),
   canvasAutoShowUserImages: true,
   setCanvasAutoShowUserImages: (value) => set({ canvasAutoShowUserImages: value }),
   spawnIntoCurrentSplit: false,

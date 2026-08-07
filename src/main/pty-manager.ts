@@ -5,6 +5,7 @@ import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { mkdirSync, writeFileSync } from 'fs'
 import { app } from 'electron'
+import { ensureTipsSettingsFile } from './claude-tips'
 
 /** On Windows, node-pty requires a fully-qualified path or an extension to find executables.
  *  Use `where` to resolve bare command names to their actual path. */
@@ -93,6 +94,14 @@ export function spawnSession(
   if (command === 'claude' && !args.includes('--session-id') && !args.includes('--resume')) {
     claudeSessionId = randomUUID()
     args = ['--session-id', claudeSessionId, ...args]
+  }
+
+  // Opt-in Session Manager spinner tips: mixed into Claude Code's own tips via
+  // a per-spawn `--settings` fragment, so the user's global settings stay
+  // untouched and sessions outside this app are unaffected.
+  if (command === 'claude' && !args.includes('--settings')) {
+    const tipsPath = ensureTipsSettingsFile()
+    if (tipsPath) args = ['--settings', tipsPath, ...args]
   }
 
   // If resuming, the claude session ID is the resume arg

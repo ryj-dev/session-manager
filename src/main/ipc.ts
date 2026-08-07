@@ -22,6 +22,7 @@ import { parseTranscriptTurns, deriveTranscriptPath, type ShareableTurn } from '
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
+import { resetMemoryInjectionState } from './memory-injection'
 import { unregisterMcpServer } from './mcp-launcher'
 import { uninstallPlugin, installPlugin } from './plugin-manager'
 import {
@@ -996,6 +997,7 @@ interface CleanupStatus {
   sessions: { savedExists: boolean; messagesExists: boolean }
   appSettings: { exists: boolean }
   observer: { exists: boolean; bytes: number }
+  memoryInjection: { exists: boolean; bytes: number; sessions: number }
 }
 
 function registerCleanupHandlers(
@@ -1018,6 +1020,7 @@ function registerCleanupHandlers(
   const pluginDir = join(userData, 'plugin')
   const settingsFile = join(userData, 'state', 'settings.json')
   const observerDb = join(userData, 'observer.db')
+  const memoryInjectionFile = join(userData, 'state', 'memory-injection.json')
 
   const HOOK_MARKER = 'session-manager-hook'
 
@@ -1077,6 +1080,15 @@ function registerCleanupHandlers(
       sessions: { savedExists: existsSync(sessionsFile), messagesExists: existsSync(messagesDir) },
       appSettings: { exists: existsSync(settingsFile) },
       observer: { exists: existsSync(observerDb), bytes: fileSize(observerDb) },
+      memoryInjection: (() => {
+        const exists = existsSync(memoryInjectionFile)
+        let count = 0
+        if (exists) {
+          const parsed = readJsonSafe(memoryInjectionFile)
+          count = Object.keys((parsed?.sessions as Record<string, unknown>) ?? {}).length
+        }
+        return { exists, bytes: fileSize(memoryInjectionFile), sessions: count }
+      })(),
     }
   }
 
@@ -1201,6 +1213,16 @@ function registerCleanupHandlers(
       }
       // Restart on a fresh store so observation resumes without a relaunch.
       startObserver()
+      return { ok: true, bytes }
+    } catch (err) { return { ok: false, error: String(err) } }
+  })
+
+  ipcMain.handle('cleanup:removeMemoryInjection', () => {
+    try {
+      const bytes = fileSize(memoryInjectionFile)
+      try { unlinkSync(memoryInjectionFile) } catch { /* missing */ }
+      // Clear the in-memory copy too, or the next injection resurrects it.
+      resetMemoryInjectionState()
       return { ok: true, bytes }
     } catch (err) { return { ok: false, error: String(err) } }
   })
