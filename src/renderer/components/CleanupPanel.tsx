@@ -10,6 +10,7 @@ interface CleanupPanelProps {
 type RowKey =
   | 'mcp' | 'hooks' | 'statusline' | 'claudeMd' | 'plugin'
   | 'memory' | 'embeddings' | 'notes' | 'observer' | 'memoryInjection' | 'sessions' | 'appSettings'
+  | 'codeIndex'
 
 interface RowDef {
   key: RowKey
@@ -182,6 +183,25 @@ const ROWS: RowDef[] = [
     confirmBody: (s) => `Forgets which notes were injected into ${s.memoryInjection.sessions} conversation${s.memoryInjection.sessions === 1 ? '' : 's'}. Resumed sessions may re-receive notes their transcripts already contain. Session caps reset too.`,
   },
   {
+    key: 'codeIndex',
+    title: 'Code index (experimental)',
+    description: 'Cross-project code search index (symbols, keywords, embeddings) in userData/code-index.db',
+    destructive: true,
+    status: (s) => ({
+      label: s.codeIndex.exists
+        ? `${s.codeIndex.repos} repo${s.codeIndex.repos === 1 ? '' : 's'} · ${s.codeIndex.chunks} chunks · ${fmtBytes(s.codeIndex.bytes)}`
+        : s.codeIndex.enabled ? 'Empty' : 'Disabled',
+      variant: s.codeIndex.exists ? 'data' : 'empty',
+      detail: s.codeIndex.exists
+        ? `Embeddings ${s.codeIndex.chunks === 0 ? 0 : Math.round((s.codeIndex.embedded / s.codeIndex.chunks) * 100)}% backfilled${s.codeIndex.indexing ? ' · indexing now' : ''}`
+        : undefined,
+      isInstalled: s.codeIndex.exists,
+    }),
+    remove: () => window.api.cleanupRemoveCodeIndex(),
+    confirmTitle: 'Delete the code index?',
+    confirmBody: (s) => `Deletes ${fmtBytes(s.codeIndex.bytes)} of code-search index. Your repos are untouched; the index rebuilds automatically while the feature is enabled.`,
+  },
+  {
     key: 'sessions',
     title: 'Saved sessions',
     description: 'Resumable Claude Code sessions and inter-session message inboxes',
@@ -212,7 +232,7 @@ const ROWS: RowDef[] = [
 ]
 
 const INTEGRATION_KEYS: RowKey[] = ['mcp', 'hooks', 'statusline', 'claudeMd', 'plugin']
-const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'observer', 'memoryInjection', 'sessions', 'appSettings']
+const DATA_KEYS: RowKey[] = ['memory', 'embeddings', 'notes', 'observer', 'memoryInjection', 'codeIndex', 'sessions', 'appSettings']
 
 export function CleanupPanel({ visible, onClose }: CleanupPanelProps): JSX.Element {
   const [status, setStatus] = useState<CleanupStatus | null>(null)

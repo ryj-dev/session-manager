@@ -426,6 +426,8 @@ const api = {
   cleanupRemoveSessions: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:removeSessions'),
   cleanupRemoveObserver: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeObserver'),
   cleanupRemoveMemoryInjection: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeMemoryInjection'),
+  cleanupRemoveCodeIndex: (): Promise<CleanupResult & { bytes?: number }> => ipcRenderer.invoke('cleanup:removeCodeIndex'),
+  codeIndexReindex: (): Promise<CleanupResult> => ipcRenderer.invoke('codeIndex:reindex'),
   cleanupResetAppSettings: (): Promise<CleanupResult> => ipcRenderer.invoke('cleanup:resetAppSettings'),
 
   // App lifecycle — real quit via app.quit() so the full before-quit cleanup
@@ -448,6 +450,7 @@ export interface CleanupStatus {
   appSettings: { exists: boolean }
   observer: { exists: boolean; bytes: number }
   memoryInjection: { exists: boolean; bytes: number; sessions: number }
+  codeIndex: { exists: boolean; bytes: number; repos: number; chunks: number; embedded: number; enabled: boolean; indexing: boolean }
 }
 
 contextBridge.exposeInMainWorld('api', api)

@@ -58,6 +58,8 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setTurnExportFolder = useStore((s) => s.setTurnExportFolder)
   const turnShareDefaults = useStore((s) => s.turnShareDefaults)
   const setTurnShareDefaults = useStore((s) => s.setTurnShareDefaults)
+  const codeIndexSettings = useStore((s) => s.codeIndexSettings)
+  const setCodeIndexSettings = useStore((s) => s.setCodeIndexSettings)
   const shareTurnKey = useHotkeyDisplay('shareTurn')
   const branchSessionKey = useHotkeyDisplay('branchSession')
   const notesProjectKey = useHotkeyDisplay('toggleNotesProject')
@@ -307,6 +309,23 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </select>
               <p className="text-[10px] text-zinc-600 mt-1">
                 The orchestrator&apos;s default decision-making freedom. Per-task autonomy can still be changed inside the pipeline ({pipelineKey}) when you open a task.
+              </p>
+            </div>
+
+            {/* Code index (experimental) */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Code index (experimental)</div>
+              <label className="flex items-center gap-2 cursor-pointer mb-1.5">
+                <input
+                  type="checkbox"
+                  checked={codeIndexSettings.enabled}
+                  onChange={(e) => setCodeIndexSettings({ ...codeIndexSettings, enabled: e.target.checked })}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-zinc-500"
+                />
+                <span className="text-xs text-zinc-300">Index code across your repos for session search tools</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1">
+                Gives every session <span className="text-zinc-500">search-code</span>, <span className="text-zinc-500">find-symbol</span>, <span className="text-zinc-500">find-usages</span> and <span className="text-zinc-500">code-index-status</span> MCP tools — scoped to the session&apos;s own repo by default, widenable to all indexed repos with <span className="text-zinc-500">fleet</span> scope. Repos are discovered from the projects directory and live sessions; gitignored files are never indexed. Symbols are indexed immediately; semantic embeddings backfill during idle time. Index size and deletion live in Cleanup.
               </p>
             </div>
 
