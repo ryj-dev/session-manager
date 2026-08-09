@@ -1300,6 +1300,19 @@ Typical flow: \`search-wiki("how do worktree workers merge back")\` → \`read-w
 
 Before investigating any topic — project, bug, tool, architecture — run \`search-memories\` first. Useful context almost certainly already exists. Only fall back to code / filesystem / web search after memory comes up empty.
 
+## Code index (experimental) — search code before crawling it
+
+When enabled in Settings, every session gets four code-search tools backed by a persistent index spanning **all** repos the app knows (not just your cwd):
+
+| Tool | Reach for it when |
+|------|-------------------|
+| \`find-symbol\` | You know (part of) a name and want its definition — faster and more precise than grep |
+| \`search-code\` | Concept-shaped queries with no greppable literal ("retry with backoff", "where sessions get restored") — hybrid symbol + keyword + semantic ranking |
+| \`find-usages\` | Every reference to an identifier (text-match, definitions labelled) — refactor blast radius |
+| \`code-index-status\` | A search returned nothing — distinguish "no results" from "not indexed yet" before concluding code doesn't exist |
+
+**Prefer these over grep/fff for symbol lookups and concept queries; keep grep/fff for literal strings and filenames.** Default scope is your own repo. Pass \`scope: "fleet"\` to search every indexed repo — the answer to *"have I written this before?"* usually lives in another checkout, and this is the only tool that can see it. Cross-repo hits are marked; cite them to the user with their repo name. If the tools report the feature disabled, drop back to grep — don't ask the user to enable it mid-task.
+
 ## Memory knowledge base
 
 ### When to write notes
