@@ -23,6 +23,7 @@ import { registerMcpServer, unregisterMcpServer, getMcpServerScriptPath } from '
 import { installPlugin, uninstallPlugin } from './plugin-manager'
 import { loadSettings } from './settings-store'
 import { startObserver, stopObserver } from './observer'
+import { initCodeIndex, shutdownCodeIndex } from './code-index'
 import { warmMemoryInjection } from './memory-injection'
 
 // Register design:// + canvas:// as privileged schemes (must be done before app ready)
@@ -113,6 +114,7 @@ function saveAndCleanup(): void {
   stopHookServer()
   stopMemoryWatcher()
   stopEmbedServer()
+  shutdownCodeIndex()
   stopNotesWatcher()
   unregisterMcpServer()
   uninstallPlugin()
@@ -337,6 +339,10 @@ app.whenReady().then(async () => {
   // The observer watches app usage and proposes automations. Debt-based and
   // idle-gated (see observer/jobs.ts) — nothing fires while the user is busy.
   startObserver()
+  // Experimental cross-project code index: symbols+FTS index at startup,
+  // embeddings drained by the observer's quiet-time backfill job. No-op
+  // unless enabled in Settings.
+  initCodeIndex()
 
   // Session journal: interval catches title/activity changes; the
   // claudeSessionId listener captures new sessions as soon as they get an id,

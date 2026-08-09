@@ -177,7 +177,7 @@ async function getEmbedder(): Promise<any> {
 // throughput cost (~0.6s per 21-chunk note).
 const EMBED_BATCH_SIZE = 4
 
-async function embedTexts(texts: string[]): Promise<Float32Array[]> {
+export async function embedTexts(texts: string[]): Promise<Float32Array[]> {
   const embedder = await getEmbedder()
   const result: Float32Array[] = []
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
