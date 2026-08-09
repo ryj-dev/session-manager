@@ -12,9 +12,25 @@ import { join } from 'node:path'
 import { loadSettings } from '../settings-store'
 import { listRegistry } from '../session-registry'
 import { registerJob } from '../observer/jobs'
-import { initCodeIndexDb, closeCodeIndexDb, deleteCodeIndexDb, dbStats } from './db'
+import { initCodeIndexDb, closeCodeIndexDb, deleteCodeIndexDb, dbStats, getDb, isCodeIndexDbAvailable } from './db'
 import { configureSegmenter } from './segment'
-import { runDiscoveryAndIndex, embedBackfillBatch, isIndexing, type DiscoveryOpts } from './indexer'
+import {
+  runDiscoveryAndIndex,
+  indexRepo,
+  embedBackfillBatch,
+  isIndexing,
+  type DiscoveryOpts
+} from './indexer'
+import {
+  searchCode,
+  findSymbol,
+  findUsages,
+  codeIndexStatus,
+  resolveCallerRepo,
+  type CodeScope,
+  type SearchCodeParams,
+  type QueryPolicy
+} from './query'
 
 export { dbStats as codeIndexDbStats } from './db'
 export { isIndexing } from './indexer'
@@ -100,4 +116,87 @@ export function codeIndexStatusSummary(): {
   stats: ReturnType<typeof dbStats>
 } {
   return { enabled: isCodeIndexEnabled(), indexing: isIndexing(), stats: dbStats() }
+}
+
+// ─── Embed-server ops ───────────────────────────────────────────────────────
+// Thin, enabled-gated entry points the embed socket dispatches to. Policy
+// (excluded repos) is read from settings HERE, in the main process — the MCP
+// child only ever sends a request, so it cannot widen its own scope.
+
+function queryPolicy(): QueryPolicy {
+  return { excludedRepos: loadSettings().codeIndex.excludedRepos }
+}
+
+/**
+ * A session may be working in a repo discovered after the startup pass
+ * (fresh clone, new project). First query from such a repo enqueues its
+ * index build; the caller sees `indexing: true` in the same response so it
+ * can distinguish "not indexed yet" from "no results".
+ */
+function ensureCallerRepoIndexed(callerCwd: string): void {
+  if (!started || !isCodeIndexDbAvailable() || isIndexing()) return
+  const root = resolveCallerRepo(callerCwd)
+  if (!root) return
+  const s = loadSettings()
+  if (s.codeIndex.excludedRepos.includes(root)) return
+  const known = getDb().prepare(`SELECT 1 FROM repos WHERE root = ?`).get(root)
+  if (known) return
+  void indexRepo(root, {
+    maxFileBytes: s.codeIndex.maxFileKb * 1024,
+    maxFiles: s.codeIndex.maxFilesPerRepo
+  }).catch((err) => console.warn('[code-index] on-demand index failed:', err))
+}
+
+interface OpEnvelope {
+  enabled: boolean
+  indexing: boolean
+}
+
+function envelope(): OpEnvelope {
+  return { enabled: isCodeIndexEnabled(), indexing: isIndexing() }
+}
+
+export async function opCodeSearch(params: SearchCodeParams): Promise<
+  OpEnvelope & { hits: unknown[]; callerRepo: string | null }
+> {
+  if (!isCodeIndexEnabled()) return { ...envelope(), hits: [], callerRepo: null }
+  initCodeIndex()
+  ensureCallerRepoIndexed(params.callerCwd)
+  const { hits, callerRepo } = await searchCode(params, queryPolicy())
+  return { ...envelope(), hits, callerRepo }
+}
+
+export async function opCodeFindSymbol(params: {
+  name: string
+  callerCwd: string
+  scope: CodeScope
+  limit?: number
+}): Promise<OpEnvelope & { hits: unknown[]; callerRepo: string | null }> {
+  if (!isCodeIndexEnabled()) return { ...envelope(), hits: [], callerRepo: null }
+  initCodeIndex()
+  ensureCallerRepoIndexed(params.callerCwd)
+  const { hits, callerRepo } = findSymbol(params, queryPolicy())
+  return { ...envelope(), hits, callerRepo }
+}
+
+export async function opCodeFindUsages(params: {
+  name: string
+  callerCwd: string
+  scope: CodeScope
+  limit?: number
+}): Promise<OpEnvelope & { hits: unknown[]; callerRepo: string | null }> {
+  if (!isCodeIndexEnabled()) return { ...envelope(), hits: [], callerRepo: null }
+  initCodeIndex()
+  ensureCallerRepoIndexed(params.callerCwd)
+  const { hits, callerRepo } = findUsages(params, queryPolicy())
+  return { ...envelope(), hits, callerRepo }
+}
+
+export async function opCodeStatus(params: { callerCwd: string }): Promise<
+  OpEnvelope & { report: unknown }
+> {
+  if (!isCodeIndexEnabled()) return { ...envelope(), report: null }
+  initCodeIndex()
+  ensureCallerRepoIndexed(params.callerCwd)
+  return { ...envelope(), report: codeIndexStatus(params.callerCwd, queryPolicy()) }
 }

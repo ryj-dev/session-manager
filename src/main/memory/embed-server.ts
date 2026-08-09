@@ -22,6 +22,7 @@ import fs from 'node:fs'
 import { app } from 'electron'
 import { searchSemantic, isEmbeddingsAvailable } from './embeddings'
 import { getIndex } from './index'
+import { opCodeSearch, opCodeFindSymbol, opCodeFindUsages, opCodeStatus } from '../code-index'
 
 export interface EmbedServerHandle {
   socketPath: string
@@ -30,11 +31,25 @@ export interface EmbedServerHandle {
 
 interface Request {
   id: string
-  op: 'ping' | 'search' | 'searchKeyword' | 'listIndexed'
+  op:
+    | 'ping'
+    | 'search'
+    | 'searchKeyword'
+    | 'listIndexed'
+    | 'codeSearch'
+    | 'codeFindSymbol'
+    | 'codeFindUsages'
+    | 'codeStatus'
   query?: string
   tokens?: string[]
   limit?: number
   bodyChars?: number
+  // code-index ops
+  callerCwd?: string
+  scope?: 'project' | 'fleet'
+  name?: string
+  kind?: string
+  pathFilter?: string
 }
 
 const KEYWORD_STOPWORDS = new Set([
@@ -210,6 +225,37 @@ async function handleLine(socket: net.Socket, line: string): Promise<void> {
         wikilinks: n.wikilinks,
       }))
       respond(socket, { id, ok: true, notes })
+      return
+    }
+    // ── Code index ops — thin dispatch; scope policy is enforced inside
+    // code-index (main process), never trusted from the socket peer.
+    if (op === 'codeSearch') {
+      const result = await opCodeSearch({
+        query: req.query ?? '',
+        callerCwd: req.callerCwd ?? '',
+        scope: req.scope === 'fleet' ? 'fleet' : 'project',
+        limit: req.limit,
+        kind: req.kind,
+        pathFilter: req.pathFilter
+      })
+      respond(socket, { id, ok: true, ...result })
+      return
+    }
+    if (op === 'codeFindSymbol' || op === 'codeFindUsages') {
+      const params = {
+        name: req.name ?? '',
+        callerCwd: req.callerCwd ?? '',
+        scope: req.scope === 'fleet' ? ('fleet' as const) : ('project' as const),
+        limit: req.limit
+      }
+      const result =
+        op === 'codeFindSymbol' ? await opCodeFindSymbol(params) : await opCodeFindUsages(params)
+      respond(socket, { id, ok: true, ...result })
+      return
+    }
+    if (op === 'codeStatus') {
+      const result = await opCodeStatus({ callerCwd: req.callerCwd ?? '' })
+      respond(socket, { id, ok: true, ...result })
       return
     }
     respond(socket, { id, ok: false, error: `unknown op: ${op}` })
