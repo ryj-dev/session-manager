@@ -97,6 +97,7 @@
     "remark-gfm": "^4.0.1",
     "sigma": "^3.0.2",
     "sqlite-vec": "^0.1.6",
+    "web-tree-sitter": "^0.26.12",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
