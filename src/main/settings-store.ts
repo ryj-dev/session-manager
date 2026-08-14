@@ -54,24 +54,6 @@ export const defaultTurnShareDefaults: TurnShareDefaults = {
 
 export type MessagePopupMode = 'manual' | 'timed' | 'disabled'
 
-/** Experimental cross-project code index (MCP tools: search-code etc.). */
-export interface CodeIndexSettings {
-  enabled: boolean
-  /** Files larger than this are skipped (counted, surfaced in status). */
-  maxFileKb: number
-  /** Over this cap a repo indexes the newest N files and reports truncation. */
-  maxFilesPerRepo: number
-  /** Canonical repo roots never indexed and never visible at fleet scope. */
-  excludedRepos: string[]
-}
-
-export const defaultCodeIndexSettings: CodeIndexSettings = {
-  enabled: false,
-  maxFileKb: 512,
-  maxFilesPerRepo: 20000,
-  excludedRepos: [],
-}
-
 export interface DisabledIntegrations {
   mcp?: boolean
   hooks?: boolean
@@ -126,8 +108,6 @@ export interface AppSettings {
   turnShareDefaults: TurnShareDefaults
   /** Cmd+B branch: open the fork beside the original in a split group. */
   openBranchInSplit: boolean
-  /** Experimental cross-project code index. */
-  codeIndex: CodeIndexSettings
 }
 
 const defaults: AppSettings = {
@@ -160,7 +140,6 @@ const defaults: AppSettings = {
   turnExportFolder: null,
   turnShareDefaults: { ...defaultTurnShareDefaults },
   openBranchInSplit: true,
-  codeIndex: { ...defaultCodeIndexSettings },
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {
@@ -186,7 +165,6 @@ export function loadSettings(): AppSettings {
       ...parsed,
       hotkeys: { ...defaults.hotkeys, ...parsed.hotkeys },
       turnShareDefaults: { ...defaults.turnShareDefaults, ...parsed.turnShareDefaults },
-      codeIndex: { ...defaults.codeIndex, ...parsed.codeIndex },
     }
   } catch {
     return { ...defaults }

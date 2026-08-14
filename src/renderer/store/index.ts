@@ -94,21 +94,6 @@ export const defaultTurnShareDefaults: TurnShareDefaults = {
   toolLevel: 'commands',
 }
 
-/** Experimental cross-project code index (mirrors main's CodeIndexSettings). */
-export interface CodeIndexSettings {
-  enabled: boolean
-  maxFileKb: number
-  maxFilesPerRepo: number
-  excludedRepos: string[]
-}
-
-export const defaultCodeIndexSettings: CodeIndexSettings = {
-  enabled: false,
-  maxFileKb: 512,
-  maxFilesPerRepo: 20000,
-  excludedRepos: [],
-}
-
 export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | 'overview' | null
 
 
@@ -594,9 +579,6 @@ export interface AppState {
   setTurnExportFolder: (dir: string | null) => void
   turnShareDefaults: TurnShareDefaults
   setTurnShareDefaults: (defaults: TurnShareDefaults) => void
-  /** Experimental cross-project code index settings. */
-  codeIndexSettings: CodeIndexSettings
-  setCodeIndexSettings: (settings: CodeIndexSettings) => void
   /** Session id the Share Turn modal is open for, or null when closed. */
   shareTurnSessionId: string | null
   setShareTurnSessionId: (id: string | null) => void
@@ -969,8 +951,6 @@ export const useStore = create<AppState>((set, get) => ({
   setTurnExportFolder: (dir) => set({ turnExportFolder: dir }),
   turnShareDefaults: { ...defaultTurnShareDefaults },
   setTurnShareDefaults: (defaults) => set({ turnShareDefaults: defaults }),
-  codeIndexSettings: { ...defaultCodeIndexSettings },
-  setCodeIndexSettings: (settings) => set({ codeIndexSettings: settings }),
   shareTurnSessionId: null,
   setShareTurnSessionId: (id) => set({ shareTurnSessionId: id }),
   openBranchInSplit: true,

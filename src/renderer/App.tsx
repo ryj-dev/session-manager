@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, defaultTurnShareDefaults, defaultCodeIndexSettings, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type CodeIndexSettings, type RegistryEntry, type InjectedMemory } from './store'
+import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type RegistryEntry, type InjectedMemory } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -192,7 +192,6 @@ export function App(): JSX.Element {
   const completedFilter = useStore((s) => s.completedFilter)
   const turnExportFolder = useStore((s) => s.turnExportFolder)
   const turnShareDefaults = useStore((s) => s.turnShareDefaults)
-  const codeIndexSettings = useStore((s) => s.codeIndexSettings)
 
   // Settings
   const [showSettings, setShowSettings] = useState(false)
@@ -242,9 +241,6 @@ export function App(): JSX.Element {
       if (typeof settings.turnExportFolder === 'string') useStore.getState().setTurnExportFolder(settings.turnExportFolder)
       if (settings.turnShareDefaults && typeof settings.turnShareDefaults === 'object') {
         useStore.getState().setTurnShareDefaults({ ...defaultTurnShareDefaults, ...(settings.turnShareDefaults as Partial<TurnShareDefaults>) })
-      }
-      if (settings.codeIndex && typeof settings.codeIndex === 'object') {
-        useStore.getState().setCodeIndexSettings({ ...defaultCodeIndexSettings, ...(settings.codeIndex as Partial<CodeIndexSettings>) })
       }
       settingsLoadedRef.current = true
     })
@@ -306,8 +302,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, codeIndex: codeIndexSettings } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, codeIndexSettings])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups

@@ -24,4 +24,3 @@ Curated, app-versioned feature documentation. One article per feature; each has 
 - `canvas` — Per-session visual surface: agents answer with sortable tables, markdown reports, and annotated screenshots (canvas-show); user-sent images auto-display at send time.
 - `hotkeys-settings` — All 14 configurable Cmd-hotkeys with defaults, plus every Settings panel option including cleanup/uninstall.
 - `mcp-server-overview` — How the stdio MCP server registers, its architecture, and the full 39-tool surface grouped by area.
-- `code-index` — EXPERIMENTAL cross-project code search: tree-sitter symbols + FTS5 + embeddings over every known repo, project/fleet scopes, search-code / find-symbol / find-usages / code-index-status.

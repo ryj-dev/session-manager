@@ -32,12 +32,7 @@ import {
   configureEmbedClient,
   isAvailable as isEmbedClientAvailable,
   searchSemantic as embedClientSearch,
-  searchKeyword as embedClientKeyword,
-  codeSearch as embedClientCodeSearch,
-  codeFindSymbol as embedClientCodeFindSymbol,
-  codeFindUsages as embedClientCodeFindUsages,
-  codeStatus as embedClientCodeStatus,
-  type CodeIndexEnvelope
+  searchKeyword as embedClientKeyword
 } from './memory/embed-client'
 import * as notes from './notes-manager'
 import { listWikiArticles, readWikiArticle, scoreWikiKeyword, WIKI_KEY_PREFIX } from './wiki'
@@ -158,10 +153,6 @@ Not all sections are required. Each note type has recommended sections.
 | list-wiki-articles | List feature wiki articles: slug + one-line summary (wiki) |
 | read-wiki-article | Read one wiki article in full by slug (wiki) |
 | search-wiki | Hybrid keyword + semantic search over the feature wiki (wiki) |
-| search-code | EXPERIMENTAL: hybrid symbol + keyword + semantic search over indexed repos; scope 'project' (default) or 'fleet' = every indexed repo (code index) |
-| find-symbol | EXPERIMENTAL: locate definitions by name (exact + fuzzy) across the scope (code index) |
-| find-usages | EXPERIMENTAL: text-match references to an identifier across the scope (code index) |
-| code-index-status | EXPERIMENTAL: what's indexed, per-repo phase/coverage — call when a code search returns nothing, to tell "no results" from "not indexed" (code index) |
 
 Use **create-memory** with structured section inputs (context, details, outcome) instead of raw markdown.
 Use **batch-section-edit** to edit multiple sections across multiple notes in one call.
@@ -1885,157 +1876,6 @@ server.tool(
         isError: true,
       }
     }
-  }
-)
-
-// ─── Code index (experimental) ──────────────────────────────────────────────
-// All four tools proxy to the main process over the embed socket; this child
-// never opens code-index.db. Scope clamping happens server-side.
-
-const CODE_UNREACHABLE =
-  'Code index unreachable — the Session Manager app may not be running.'
-const CODE_DISABLED =
-  'The code index is disabled. Enable it in Session Manager Settings → Code index (experimental).'
-
-function codeEnvelopeNote(env: CodeIndexEnvelope): string {
-  const parts: string[] = []
-  if (env.indexing) parts.push('Indexing is still in progress — results may be incomplete.')
-  if (!env.callerRepo) {
-    parts.push(
-      "Caller cwd is not inside an indexed repo — 'project' scope is empty; pass scope: 'fleet' to search all indexed repos."
-    )
-  }
-  return parts.length > 0 ? `\n\nNote: ${parts.join(' ')}` : ''
-}
-
-function crossRepoMark(hit: { crossRepo: boolean; repo: string }): string {
-  return hit.crossRepo ? ` ⇠ different repo: ${hit.repo}` : ''
-}
-
-server.tool(
-  'search-code',
-  "EXPERIMENTAL code search over repos indexed by Session Manager. Hybrid ranking: symbol names + keyword (FTS) + semantic similarity. scope 'project' (default) = the calling session's repo; scope 'fleet' = every indexed repo — use fleet for \"have I solved this before?\" questions that may be answered in another project.",
-  {
-    query: z.string().describe('What to find — an identifier, phrase, or concept ("retry with backoff")'),
-    scope: z.enum(['project', 'fleet']).optional().describe("Default 'project'. 'fleet' searches every indexed repo"),
-    limit: z.number().optional().describe('Max results (default 15)'),
-    kind: z.string().optional().describe('Filter by symbol kind: function | method | class | interface | type | enum'),
-    path: z.string().optional().describe('Only results whose file path contains this substring'),
-  },
-  async ({ query, scope, limit, kind, path: pathFilter }) => {
-    const res = await embedClientCodeSearch({
-      query,
-      callerCwd: process.cwd(),
-      scope: scope ?? 'project',
-      limit,
-      kind,
-      pathFilter,
-    })
-    if (!res) return { content: [{ type: 'text', text: CODE_UNREACHABLE }], isError: true }
-    if (!res.enabled) return { content: [{ type: 'text', text: CODE_DISABLED }] }
-    if (res.hits.length === 0) {
-      return {
-        content: [{ type: 'text', text: `No results for "${query}" at ${scope ?? 'project'} scope.${codeEnvelopeNote(res)}\nCall code-index-status to check what is indexed.` }],
-      }
-    }
-    const blocks = res.hits.map((h) => {
-      const sym = h.symbol ? ` — ${h.symbol}${h.kind ? ` (${h.kind})` : ''}` : ''
-      return `${h.repo} › ${h.path}:${h.startLine}-${h.endLine}${sym}${crossRepoMark(h)}\n\`\`\`\n${h.snippet}\n\`\`\``
-    })
-    return { content: [{ type: 'text', text: blocks.join('\n\n') + codeEnvelopeNote(res) }] }
-  }
-)
-
-server.tool(
-  'find-symbol',
-  'EXPERIMENTAL: find where a symbol (function/class/method/type) is DEFINED, by exact or fuzzy name, across the code index. Faster and more precise than search-code when you know the name.',
-  {
-    name: z.string().describe('Symbol name, e.g. "resolveToken" (fuzzy: substring matches too)'),
-    scope: z.enum(['project', 'fleet']).optional().describe("Default 'project'. 'fleet' searches every indexed repo"),
-    limit: z.number().optional().describe('Max results (default 25)'),
-  },
-  async ({ name, scope, limit }) => {
-    const res = await embedClientCodeFindSymbol({
-      name,
-      callerCwd: process.cwd(),
-      scope: scope ?? 'project',
-      limit,
-    })
-    if (!res) return { content: [{ type: 'text', text: CODE_UNREACHABLE }], isError: true }
-    if (!res.enabled) return { content: [{ type: 'text', text: CODE_DISABLED }] }
-    if (res.hits.length === 0) {
-      return {
-        content: [{ type: 'text', text: `No definitions matching "${name}" at ${scope ?? 'project'} scope.${codeEnvelopeNote(res)}` }],
-      }
-    }
-    const lines = res.hits.map((h) => {
-      const qual = h.parentName ? `${h.parentName}.${h.name}` : h.name
-      const fuzzy = h.exact ? '' : ' (fuzzy)'
-      return `${h.repo} › ${h.path}:${h.startLine} — ${h.kind} ${qual}${fuzzy}${crossRepoMark(h)}\n  ${h.signature}`
-    })
-    return { content: [{ type: 'text', text: lines.join('\n') + codeEnvelopeNote(res) }] }
-  }
-)
-
-server.tool(
-  'find-usages',
-  'EXPERIMENTAL: find references to an identifier across the code index. Text-match based (FTS), NOT semantic/AST resolution — same-named identifiers from different scopes are not distinguished. Definition lines are labelled.',
-  {
-    symbol: z.string().describe('Identifier to find references to'),
-    scope: z.enum(['project', 'fleet']).optional().describe("Default 'project'. 'fleet' searches every indexed repo"),
-    limit: z.number().optional().describe('Max results (default 50)'),
-  },
-  async ({ symbol, scope, limit }) => {
-    const res = await embedClientCodeFindUsages({
-      name: symbol,
-      callerCwd: process.cwd(),
-      scope: scope ?? 'project',
-      limit,
-    })
-    if (!res) return { content: [{ type: 'text', text: CODE_UNREACHABLE }], isError: true }
-    if (!res.enabled) return { content: [{ type: 'text', text: CODE_DISABLED }] }
-    if (res.hits.length === 0) {
-      return {
-        content: [{ type: 'text', text: `No references to "${symbol}" at ${scope ?? 'project'} scope.${codeEnvelopeNote(res)}` }],
-      }
-    }
-    const lines = res.hits.map(
-      (h) => `${h.repo} › ${h.path}:${h.line}${h.isDefinition ? ' [definition]' : ''}${crossRepoMark(h)}  ${h.snippet}`
-    )
-    return {
-      content: [{ type: 'text', text: `Text-match references (not AST-resolved):\n${lines.join('\n')}${codeEnvelopeNote(res)}` }],
-    }
-  }
-)
-
-server.tool(
-  'code-index-status',
-  'EXPERIMENTAL: report what the code index covers — per-repo file/symbol/chunk counts, embedding backfill %, truncation, and whether indexing is in progress. Call this when a code search returns nothing, to distinguish "no results" from "not indexed yet".',
-  {},
-  async () => {
-    const res = await embedClientCodeStatus({ callerCwd: process.cwd() })
-    if (!res) return { content: [{ type: 'text', text: CODE_UNREACHABLE }], isError: true }
-    if (!res.enabled) return { content: [{ type: 'text', text: CODE_DISABLED }] }
-    const r = res.report
-    if (!r || !r.available) {
-      return {
-        content: [{ type: 'text', text: `Code index enabled but unavailable${r?.error ? `: ${r.error}` : ''}.` }],
-        isError: true,
-      }
-    }
-    const header = [
-      `Code index: ${r.repos.length} repo(s), ${(r.totalBytes / (1024 * 1024)).toFixed(1)} MB`,
-      `indexing now: ${res.indexing ? 'yes' : 'no'} · FTS: ${r.ftsAvailable ? 'ok' : 'UNAVAILABLE'} · parser: ${r.segmenterAvailable ? 'ok' : 'FALLBACK-ONLY'} · embeddings: ${r.embeddingsAvailable ? 'ok' : 'unavailable'}`,
-      r.callerRepo ? `caller repo: ${r.callerRepo}` : 'caller cwd is NOT inside an indexed repo',
-    ].join('\n')
-    const rows = r.repos.map((repo) => {
-      const flags: string[] = []
-      if (repo.truncated) flags.push('TRUNCATED (file cap hit — symbols may be incomplete)')
-      if (repo.skippedOversize) flags.push(`${repo.skippedOversize} oversize file(s) skipped`)
-      if (repo.isCaller) flags.push('← caller')
-      return `- ${repo.name}: ${repo.files} files, ${repo.symbols} symbols, ${repo.chunks} chunks, embeddings ${repo.embeddedPct}%${flags.length ? ` [${flags.join('; ')}]` : ''}`
-    })
-    return { content: [{ type: 'text', text: `${header}\n${rows.join('\n')}` }] }
   }
 )
 

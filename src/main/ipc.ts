@@ -54,7 +54,6 @@ import * as canvasStore from './canvas-store'
 import { triggerScheduleNow } from './scheduler'
 import * as registry from './session-registry'
 import * as observerCapture from './observer/capture'
-import { initCodeIndex, deleteCodeIndex, reindexAllRepos, codeIndexStatusSummary } from './code-index'
 import {
   acceptSuggestion,
   dismissSuggestion,
@@ -271,9 +270,6 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
 
   ipcMain.handle('settings:save', (_event, settings: AppSettings) => {
     saveSettings(settings)
-    // Experimental code index: boot lazily when the toggle flips on so no
-    // restart is needed (initCodeIndex is idempotent and enabled-gated).
-    if (settings.codeIndex?.enabled) initCodeIndex()
   })
 
   // Share Turn — reconstruct a session's turns from its transcript JSONL.
@@ -1033,7 +1029,6 @@ interface CleanupStatus {
   appSettings: { exists: boolean }
   observer: { exists: boolean; bytes: number }
   memoryInjection: { exists: boolean; bytes: number; sessions: number }
-  codeIndex: { exists: boolean; bytes: number; repos: number; chunks: number; embedded: number; enabled: boolean; indexing: boolean }
 }
 
 function registerCleanupHandlers(
@@ -1057,7 +1052,6 @@ function registerCleanupHandlers(
   const settingsFile = join(userData, 'state', 'settings.json')
   const observerDb = join(userData, 'observer.db')
   const memoryInjectionFile = join(userData, 'state', 'memory-injection.json')
-  const codeIndexDb = join(userData, 'code-index.db')
 
   const HOOK_MARKER = 'session-manager-hook'
 
@@ -1125,18 +1119,6 @@ function registerCleanupHandlers(
           count = Object.keys((parsed?.sessions as Record<string, unknown>) ?? {}).length
         }
         return { exists, bytes: fileSize(memoryInjectionFile), sessions: count }
-      })(),
-      codeIndex: (() => {
-        const summary = codeIndexStatusSummary()
-        return {
-          exists: existsSync(codeIndexDb),
-          bytes: summary.stats.bytes || fileSize(codeIndexDb),
-          repos: summary.stats.repos,
-          chunks: summary.stats.chunks,
-          embedded: summary.stats.embedded,
-          enabled: summary.enabled,
-          indexing: summary.indexing,
-        }
       })(),
     }
   }
@@ -1230,29 +1212,6 @@ function registerCleanupHandlers(
     } catch (err) { return { ok: false, error: String(err) } }
   })
 
-  ipcMain.handle('cleanup:removeCodeIndex', () => {
-    try {
-      // deleteCodeIndex closes the handle first; a stale file with no handle
-      // (feature toggled off since last run) still gets unlinked.
-      const { bytes } = deleteCodeIndex()
-      let total = bytes
-      if (existsSync(codeIndexDb)) {
-        total += fileSize(codeIndexDb)
-        try { unlinkSync(codeIndexDb) } catch { /* locked */ }
-        try { unlinkSync(`${codeIndexDb}-wal`) } catch { /* missing */ }
-        try { unlinkSync(`${codeIndexDb}-shm`) } catch { /* missing */ }
-      }
-      return { ok: true, bytes: total }
-    } catch (err) { return { ok: false, error: String(err) } }
-  })
-
-  ipcMain.handle('codeIndex:reindex', async () => {
-    try {
-      await reindexAllRepos(true)
-      return { ok: true }
-    } catch (err) { return { ok: false, error: String(err) } }
-  })
-
   ipcMain.handle('cleanup:removeNotes', () => {
     try {
       const stats = clearDirContents(notesDir)
@@ -1330,19 +1289,6 @@ Typical flow: \`search-wiki("how do worktree workers merge back")\` → \`read-w
 ## Search memory first
 
 Before investigating any topic — project, bug, tool, architecture — run \`search-memories\` first. Useful context almost certainly already exists. Only fall back to code / filesystem / web search after memory comes up empty.
-
-## Code index (experimental) — search code before crawling it
-
-When enabled in Settings, every session gets four code-search tools backed by a persistent index spanning **all** repos the app knows (not just your cwd):
-
-| Tool | Reach for it when |
-|------|-------------------|
-| \`find-symbol\` | You know (part of) a name and want its definition — faster and more precise than grep |
-| \`search-code\` | Concept-shaped queries with no greppable literal ("retry with backoff", "where sessions get restored") — hybrid symbol + keyword + semantic ranking |
-| \`find-usages\` | Every reference to an identifier (text-match, definitions labelled) — refactor blast radius |
-| \`code-index-status\` | A search returned nothing — distinguish "no results" from "not indexed yet" before concluding code doesn't exist |
-
-**Prefer these over grep/fff for symbol lookups and concept queries; keep grep/fff for literal strings and filenames.** Default scope is your own repo. Pass \`scope: "fleet"\` to search every indexed repo — the answer to *"have I written this before?"* usually lives in another checkout, and this is the only tool that can see it. Cross-repo hits are marked; cite them to the user with their repo name. If the tools report the feature disabled, drop back to grep — don't ask the user to enable it mid-task.
 
 ## Memory knowledge base
 
