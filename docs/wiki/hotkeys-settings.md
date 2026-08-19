@@ -48,10 +48,11 @@ All bindings use the Cmd modifier on macOS (Alt on Windows) and are configurable
 - **Spinner tips** — *Show Session Manager tips in Claude Code's spinner* (default off): mixes ~20 tips about app features (the wiki, hotkeys, pipeline, canvas, …) in with Claude Code's own spinner tips, each prefixed `Session Manager —` so they're never mistaken for built-ins (Claude Code's spinner adds its own `Tip:` ahead of every tip it shows, so ours render as `Tip: Session Manager — …`). Injected per-spawn via `claude --settings` with a `spinnerTipsOverride` fragment, so `~/.claude/settings.json` is untouched and sessions started outside the app are unaffected. Tips resolve hotkey labels from the current bindings; existing sessions keep whatever tips they were spawned with.
 - **Memory injection** — prompt-time memory injection mode (default *No injection*): *First prompt only* or *Search on every prompt* semantically match memory notes against submitted prompts and inject the top matches (max 3 per prompt, excerpts only) into the session's context. Optional *Limit notes per session* cap. When something lands, a `Relevant memories injected: [title] [title]` line appears in the transcript — click a title to expand the full note. See the memory-knowledge-base article for matching details.
 - **Agentic pipeline** — default autonomy: manual / gated (default) / autonomous.
+- **Observer** — *Enable the observer & curator* (opt-in, default off): digests finished sessions from their transcripts and runs the reflective curator + housekeeping. See the observer-agent article.
 - **Keyboard shortcuts** — the rebinding modal.
 - **Statusline** — opt-in managed Claude Code statusline (script + config under `~/.claude/`).
 - **CLAUDE.md block** — opt-in managed block in `~/.claude/CLAUDE.md` teaching sessions how to use the MCP server (marker-bracketed, cleanly removable; previewable before install).
-- **Cleanup & uninstall** — every integration (MCP registration, hooks, plugin, statusline, CLAUDE.md block, memory store, embeddings, notes, observer log, memory-injection dedupe, saved sessions, settings) with on-disk sizes and one-click removal; each can also be disabled without deleting data.
+- **Cleanup & uninstall** — every integration (MCP registration, hooks, plugin, statusline, CLAUDE.md block, memory store, embeddings, notes, observer store, memory-injection dedupe, saved sessions, settings) with on-disk sizes and one-click removal; each can also be disabled without deleting data.
 
 Settings persist to `state/settings.json` in the app data directory.
 

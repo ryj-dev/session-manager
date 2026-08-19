@@ -29,13 +29,11 @@ The MCP server runs **out of process** (spawned per-session by Claude Code over 
 
 **Canvas (4)** — `canvas-show`, `canvas-inspect-image`, `canvas-list-artifacts`, `canvas-focus`. See [canvas](canvas.md).
 
-**Observer (1)** — `observer-suggest`. The curator's only write path: files ONE proposed automation into the user's insights inbox for accept/dismiss. Restricted to observer sessions by their `--allowedTools`; a normal session has no reason to call it. See [observer-agent](observer-agent.md).
+**Observer (3)** — `observer-suggest`, `observer-journal-read`, `observer-journal-write`. The curator run's write paths: file a proposal into the user's insights inbox, and read/rewrite the curator's private cross-run journal. Registered ONLY when the server's environment carries the curator role, and re-checked against a per-run token by the app — no ordinary session ever sees these tools. See [observer-agent](observer-agent.md).
 
 **Feature wiki (3)** — `list-wiki-articles`, `read-wiki-article`, `search-wiki`. Read-only access to this wiki: articles ship with the app (`docs/wiki` in the repo, `resources/wiki` packaged) and are indexed into the same embedding DB as memories/todos under a `wiki:` namespace, so `search-wiki` is hybrid keyword + semantic. The wiki is authoritative, versioned product documentation — distinct from the per-user memory KB.
 
 Tool names are invoked as `mcp__session-manager__<tool>` from a session.
-
-Every tool call also emits a **name-only beacon** to the app's hook server so the observer can mine which tools you reach for — the tool name, never its arguments. It is fire-and-forget and adds no latency to (and cannot fail) the call.
 
 ## Identity: how tools know who's calling
 

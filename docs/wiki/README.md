@@ -22,7 +22,7 @@ Key combos in these articles (`Cmd+L`, `Cmd+J`, …) are the **defaults** — ev
 - `design-gallery` — ~60 brand design-system previews in light/dark, served via the design:// protocol (Cmd+D).
 - `file-explorer` — Keyboard-driven directory browser (Cmd+E) with path persistence and spawn-into-directory.
 - `sessions-overview` — Cmd+P: every live session grouped by owner (graph / pipeline / scheduled / agents / observer), with status, uptime, parent linkage and kill.
-- `observer-agent` — Background observer: usage capture, deterministic pattern mining, a ~daily Haiku curator, and the insights inbox you accept or dismiss from.
+- `observer-agent` — Opt-in observer: Haiku digests of each finished session's intent + friction, a reflective ~daily Sonnet curator with a cross-run journal, decoupled housekeeping, and the insights inbox you accept or dismiss from.
 - `agentic-pipeline` — Cmd+L: todo → orchestrator → plan/implement/review loop, worktree fan-out, autonomy levels, milestones, pipeline MCP tools.
 - `scheduled-tasks` — Cmd+J: launch/first-of-day/interval/daily triggers, per-day caps, resumable run history, login-failure retry, model picker.
 - `canvas` — Per-session visual surface: agents answer with sortable tables, markdown reports, and annotated screenshots (canvas-show); user-sent images auto-display at send time.
