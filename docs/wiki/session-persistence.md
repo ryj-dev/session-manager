@@ -2,7 +2,7 @@
 slug: session-persistence
 title: Session Persistence & Restore
 summary: Sessions are journaled continuously and offered for restore on next launch — surviving both clean quits and hard crashes; renderer crashes reconnect silently.
-related: [terminal-management, split-view, hotkeys-settings]
+related: [terminal-management, split-view, hotkeys-settings, session-archiving-auto]
 ---
 
 # Session Persistence & Restore

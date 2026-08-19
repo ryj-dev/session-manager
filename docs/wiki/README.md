@@ -9,6 +9,7 @@ Key combos in these articles (`Cmd+L`, `Cmd+J`, …) are the **defaults** — ev
 - `terminal-management` — PTY-backed multi-session terminals: spawn, live snapshots, resume, crash recovery.
 - `graph-view` — Force-directed star/hub graph of all sessions with keyboard nav, momentum zoom, and status colors.
 - `session-persistence` — Save on quit, restore modal on launch, `claude --resume`, silent crash reconnection.
+- `session-archiving-auto` — Opt-in inactivity archiving: PTY torn down after N idle minutes, node + snapshot kept, silent click-to-resume, message auto-wake, per-session pin.
 - `hook-integration-status` — Hook server: Claude Code hook events → live working/permission/finished status, ambient todo reminders, HTTP surface.
 - `inter-session-messaging` — `send-message` with instant monitor-plugin inbox delivery, popups, and long-message file handoff.
 - `spawned-sessions` — `spawn-session` MCP tool: reportBack modes, allowedTools, context rules, CLI-arg prompt delivery.

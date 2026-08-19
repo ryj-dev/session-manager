@@ -2,7 +2,7 @@
 slug: inter-session-messaging
 title: Inter-Session Messaging
 summary: Sessions message each other with the send-message MCP tool; delivery is instant via a monitor-plugin inbox, even while the target is working.
-related: [spawned-sessions, hook-integration-status, agent-system, mcp-server-overview]
+related: [spawned-sessions, hook-integration-status, agent-system, mcp-server-overview, session-archiving-auto]
 ---
 
 # Inter-Session Messaging
