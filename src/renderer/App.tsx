@@ -146,6 +146,11 @@ export function App(): JSX.Element {
   const setSpawnIntoCurrentSplit = useStore((s) => s.setSpawnIntoCurrentSplit)
   const openBranchInSplit = useStore((s) => s.openBranchInSplit)
   const setOpenBranchInSplit = useStore((s) => s.setOpenBranchInSplit)
+  const archiveInactiveSessions = useStore((s) => s.archiveInactiveSessions)
+  const setArchiveInactiveSessions = useStore((s) => s.setArchiveInactiveSessions)
+  const archiveInactiveMinutes = useStore((s) => s.archiveInactiveMinutes)
+  const setArchiveInactiveMinutes = useStore((s) => s.setArchiveInactiveMinutes)
+  const archivePinnedSessionIds = useStore((s) => s.archivePinnedSessionIds)
   const terminalPairingMode = useStore((s) => s.terminalPairingMode)
   const setTerminalPairingMode = useStore((s) => s.setTerminalPairingMode)
   const setAttachedTerminal = useStore((s) => s.setAttachedTerminal)
@@ -230,6 +235,8 @@ export function App(): JSX.Element {
       if (typeof settings.canvasAutoShowUserImages === 'boolean') useStore.getState().setCanvasAutoShowUserImages(settings.canvasAutoShowUserImages)
       if (typeof settings.spawnIntoCurrentSplit === 'boolean') setSpawnIntoCurrentSplit(settings.spawnIntoCurrentSplit)
       if (typeof settings.openBranchInSplit === 'boolean') setOpenBranchInSplit(settings.openBranchInSplit)
+      if (typeof settings.archiveInactiveSessions === 'boolean') setArchiveInactiveSessions(settings.archiveInactiveSessions)
+      if (typeof settings.archiveInactiveMinutes === 'number') setArchiveInactiveMinutes(settings.archiveInactiveMinutes)
       if (settings.terminalPairingMode === 'off' || settings.terminalPairingMode === 'split' || settings.terminalPairingMode === 'overlay') {
         setTerminalPairingMode(settings.terminalPairingMode)
       }
@@ -333,8 +340,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, githubStateFilter, githubRangeFilter, githubAutoReview } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, githubStateFilter, githubRangeFilter, githubAutoReview])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, archiveInactiveSessions, archiveInactiveMinutes, githubStateFilter, githubRangeFilter, githubAutoReview } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, archiveInactiveSessions, archiveInactiveMinutes, githubStateFilter, githubRangeFilter, githubAutoReview])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -1235,9 +1242,61 @@ export function App(): JSX.Element {
     }
   }, [viewMode, focusedSessionId, markSessionSeen])
 
+  // Session archiving lifecycle. Main tears down an inactive session's PTY but
+  // keeps the node: mark it 'archived' (frozen snapshot stays), free its xterm
+  // + WebGL context, and let the imminent pty:exit pass through harmlessly.
+  // 'waking' = a resume respawn is in flight (keystrokes blocked in Terminal);
+  // 'woke' = ready — settle to 'seen' unless a hook already set a richer status.
+  useEffect(() => {
+    const un1 = window.api.onSessionArchived(({ id }) => {
+      const store = useStore.getState()
+      if (!store.sessions.some((s) => s.id === id)) return
+      store.updateSessionStatus(id, 'archived')
+      // Free the terminal (WebGL context) — the resume path remounts a fresh
+      // one and `claude --resume` repaints the transcript itself, so the
+      // serialized buffer is deliberately NOT replayed.
+      disposeTerminal(id)
+      firstSnapshotSubs.current.delete(id)
+      clearTerminalReady(id)
+    })
+    const un2 = window.api.onSessionWaking(({ id }) => {
+      const store = useStore.getState()
+      if (store.sessions.some((s) => s.id === id)) store.updateSessionStatus(id, 'waking')
+    })
+    const un3 = window.api.onSessionWoke(({ id }) => {
+      const store = useStore.getState()
+      const session = store.sessions.find((s) => s.id === id)
+      if (session?.status === 'waking') store.updateSessionStatus(id, 'seen')
+    })
+    return () => { un1(); un2(); un3() }
+  }, [])
+
+  // Auto-resume archived sessions the user enters (node click → focused view,
+  // or entering a split containing one), and keep main informed of which
+  // sessions are on screen so it never archives one out from under the user.
+  useEffect(() => {
+    const store = useStore.getState()
+    const visible: string[] = []
+    if (viewMode === 'focused' && focusedSessionId) visible.push(focusedSessionId)
+    if (viewMode === 'split' && activeSplitGroupId) {
+      const group = store.splitGroups.find((g) => g.id === activeSplitGroupId)
+      if (group) visible.push(...group.orderedSessionIds)
+    }
+    window.api.archiveSetVisible(visible)
+    for (const id of visible) {
+      const session = store.sessions.find((s) => s.id === id)
+      if (session?.status === 'archived') {
+        void window.api.archiveResume(id).catch((err) => console.error('[archive] resume failed:', err))
+      }
+    }
+  }, [viewMode, focusedSessionId, activeSplitGroupId])
+
   // Listen for PTY exits
   useEffect(() => {
     const unsubscribe = window.api.onPtyExit(({ id }) => {
+      // An archive teardown also surfaces as a PTY exit — the 'session:archived'
+      // broadcast landed first, so skip the removal path and keep the node.
+      if (useStore.getState().sessions.find((s) => s.id === id)?.status === 'archived') return
       updateSessionStatus(id, 'exited')
 
       const store = useStore.getState()
@@ -1398,7 +1457,7 @@ export function App(): JSX.Element {
 
     const currentSessions = useStore.getState().sessions
     const hasActive = currentSessions.some(
-      (s) => s.status !== 'finished' && s.status !== 'seen' && s.status !== 'exited'
+      (s) => s.status !== 'finished' && s.status !== 'seen' && s.status !== 'exited' && s.status !== 'archived'
     )
     if (!hasActive && currentSessions.every((s) => s.snapshot)) return
 
@@ -1410,6 +1469,9 @@ export function App(): JSX.Element {
       for (const session of liveSessions) {
         // Skip idle sessions that already have a snapshot (hooks capture final snapshots on state change).
         // Keep capturing for sessions without a snapshot yet (waiting for WebGL to render).
+        // Archived sessions keep their frozen snapshot — their terminal is
+        // disposed, so a capture attempt would no-op but keep the loop alive.
+        if (session.status === 'archived') continue
         if (session.snapshot && (session.status === 'finished' || session.status === 'seen' || session.status === 'permission')) continue
 
         anyActive = true
@@ -1444,6 +1506,9 @@ export function App(): JSX.Element {
             // context each, exhausting the GPU's context limit and blacking out
             // the visible terminal. They mount on demand when viewed in the board.
             if (s.isPipeline) return false
+            // Archived sessions have no PTY — mounting a terminal would only
+            // burn a WebGL context (freeing that is half the point of archiving).
+            if (s.status === 'archived') return false
             // Scheduled-run sessions, like pipeline sessions, have no graph node and
             // mount on demand in the Scheduled Tasks panel — skip the hidden snapshot
             // terminal so they don't each burn a WebGL context.
@@ -1517,6 +1582,25 @@ export function App(): JSX.Element {
                   </button>
                 )
               })()}
+              {archiveInactiveSessions && focusedSession.claudeSessionId && (() => {
+                // Pin toggle — exempts this session from inactivity archiving.
+                const pinned = archivePinnedSessionIds.includes(focusedSession.id)
+                return (
+                  <button
+                    onClick={() => {
+                      const next = !pinned
+                      void window.api.archiveSetPinned(focusedSession.id, next)
+                      useStore.getState().setArchivePinned(focusedSession.id, next)
+                    }}
+                    className={`transition-colors ${pinned ? 'text-amber-400 hover:text-amber-300' : 'text-zinc-600 hover:text-zinc-400'}`}
+                    title={pinned ? 'Pinned — will not be archived for inactivity' : 'Pin to exempt from inactivity archiving'}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9.5 2l4.5 4.5-3 1-2 4-1.5-1.5L4 13.5 2.5 12 6 8.5 4.5 7l4-2z" />
+                    </svg>
+                  </button>
+                )
+              })()}
               <span className="text-[10px] text-zinc-600">{formatHotkey(hotkeys.returnToGraph)} to return</span>
               <button
                 onClick={() => forceCloseSession(focusedSessionId!)}
@@ -1577,6 +1661,14 @@ export function App(): JSX.Element {
                 </>
               )
             })()}
+            {/* Waking indicator — the resumed `claude --resume` repaints the
+                transcript itself; until then keystrokes are blocked. */}
+            {(focusedSession.status === 'waking' || focusedSession.status === 'archived') && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 rounded-full border border-cyan-700/60 bg-cyan-950/80 px-3 py-1.5 text-[11px] text-cyan-300 shadow-lg backdrop-blur pointer-events-none">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span>Waking session…</span>
+              </div>
+            )}
             <MessagePopup focusedSessionId={focusedSessionId} />
           </div>
         </div>

@@ -27,6 +27,7 @@ import { submitDraft as githubSubmitDraft, putDraft as githubPutDraft, resolveRe
 import { markThreadRead as githubMarkThreadRead } from './github-poller'
 import { getAuthStatus as githubAuthStatus, getActiveToken as githubActiveToken, apiHeaders as githubApiHeaders } from './github-auth'
 import type { GithubAutoMode } from './settings-store'
+import * as archiver from './session-archiver'
 
 let server: Server | null = null
 let serverPort = 0
@@ -118,6 +119,9 @@ const lastPtyActivity = new Map<string, number>()
 
 /** Clean up all hook-server state for a session (call on PTY exit/kill). */
 export function cleanupSession(appSessionId: string): void {
+  // Real teardown, not an archive: drop any archived record / queued messages /
+  // waking state so a closed node can't be "resumed" later.
+  archiver.forgetSession(appSessionId)
   registry.forget(appSessionId)
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
@@ -189,6 +193,10 @@ export function onPtyData(appSessionId: string, data: string): void {
   // Record activity first — terminals echo keystrokes, so any user input or
   // Claude output surfaces here. Drives the ephemeral idle sweep below.
   lastPtyActivity.set(appSessionId, Date.now())
+
+  // Archiver gate 2 input: output volume while idle (byte noise floor), plus
+  // prompt-ready detection for waking sessions' queued-message flush.
+  archiver.noteSessionOutput(appSessionId, data)
 
   // Permission rejection detection
   if (!awaitingPermission.has(appSessionId)) return
@@ -408,6 +416,10 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         writeSecretFile(serverSecret)
         if (!opts.skipInstall) installHooks(serverPort)
         startEphemeralSweep()
+        // Archiving: queued messages to archived sessions flush through the
+        // same inbox delivery path as live messages.
+        archiver.configureArchiver({ deliver: deliverSessionMessage })
+        archiver.startArchiveSweep()
         resolve(serverPort)
       } else {
         reject(new Error('Failed to bind hook server'))
@@ -423,6 +435,7 @@ export function reinstallHooks(): void {
 }
 
 export function stopHookServer(): void {
+  archiver.stopArchiveSweep()
   stopEphemeralSweep()
   removeHooks()
   removePortFile()
@@ -2539,13 +2552,29 @@ export async function finalizeTaskCompletion(
 
 function handleListSessions(res: import('http').ServerResponse): void {
   try {
-    const sessions = getAllSessions().map((s) => ({
+    const sessions: Array<{
+      id: string; projectPath: string; claudeSessionId: string | null
+      status: string; title: string | null
+    }> = getAllSessions().map((s) => ({
       id: s.id,
       projectPath: s.projectPath,
       claudeSessionId: s.claudeSessionId,
-      status: sessionStatus.get(s.id) ?? 'unknown',
+      // A resumed-but-not-yet-ready session reads 'waking', not its stale
+      // pre-archive hook status.
+      status: archiver.isWaking(s.id) ? 'waking' : sessionStatus.get(s.id) ?? 'unknown',
       title: s.terminalTitle,
     }))
+    // Archived sessions have no live PTY but keep their node + conversation —
+    // list them flagged 'archived'. Messaging one auto-wakes it.
+    for (const r of archiver.listArchivedSessions()) {
+      sessions.push({
+        id: r.id,
+        projectPath: r.projectPath,
+        claudeSessionId: r.claudeSessionId,
+        status: 'archived',
+        title: r.terminalTitle,
+      })
+    }
 
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ sessions }))
@@ -2561,6 +2590,14 @@ export function deliverSessionMessage(
   fromSessionId: string | null,
 ): { ok: true } | { ok: false; error: string; status: number } {
   const session = getSession(targetSessionId)
+  // Archived target → queue server-side and trigger a silent resume; the queue
+  // flushes into this same function once the session is ready. Waking target
+  // (PTY alive, plugin monitor possibly not yet) → queue without re-resuming.
+  // Queued rather than appended now: the inbox is wiped on exit and a fresh
+  // `tail -f` starts at EOF, so an early append would be silently lost.
+  if (archiver.isArchived(targetSessionId) || archiver.isWaking(targetSessionId)) {
+    return archiver.queueMessageForArchived(targetSessionId, message, fromSessionId)
+  }
   if (!session) return { ok: false, error: `Session ${targetSessionId} not found`, status: 404 }
 
   const fromLabel = fromSessionId ? `Message from session ${fromSessionId}` : 'Message from another session'
@@ -2883,6 +2920,10 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     sessionTranscriptPath.set(appSessionId, payload.transcript_path)
   }
 
+  // Archiver: any hook traffic from a waking session proves the resumed
+  // process is up → flush its queued messages.
+  archiver.noteSessionHookEvent(appSessionId)
+
   const event = payload.hook_event_name
 
   // ── Observer capture ──────────────────────────────────────────────────
@@ -2919,6 +2960,8 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
       case 'permission_prompt':
         awaitingPermission.add(appSessionId)
         sessionStatus.set(appSessionId, 'idle')
+        // Mid-turn wait for the user — never archivable (gate 1).
+        archiver.noteSessionHookStatus(appSessionId, 'permission')
         registry.setStatus(appSessionId, 'permission')
         win.webContents.send('claude:status', { id: appSessionId, status: 'permission' })
         break
@@ -2926,6 +2969,7 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   } else if (event === 'Stop') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'idle')
+    archiver.noteSessionHookStatus(appSessionId, 'idle')
     registry.setStatus(appSessionId, 'idle')
     win.webContents.send('claude:status', { id: appSessionId, status: 'finished' })
 
@@ -2961,6 +3005,11 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'UserPromptSubmit') {
     awaitingPermission.delete(appSessionId)
     sessionStatus.set(appSessionId, 'working')
+    // Archiver gates: working resets the quiet clock; a turn-ending wakeup tool
+    // in PostToolUse flags pending background work; a user prompt clears it.
+    archiver.noteSessionHookStatus(appSessionId, 'working')
+    if (event === 'PostToolUse') archiver.noteSessionPostToolUse(appSessionId, payload.tool_name, payload.tool_input)
+    if (event === 'UserPromptSubmit') archiver.noteSessionUserPrompt(appSessionId)
     registry.setStatus(appSessionId, 'working')
     registry.markActivity()
     win.webContents.send('claude:status', { id: appSessionId, status: 'working' })

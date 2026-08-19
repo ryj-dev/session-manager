@@ -24,6 +24,11 @@ const STATUS_STYLES: Record<SessionStatus, { border: string; glow: string; dot: 
   finished:   { border: 'border-green-400', glow: 'shadow-[0_0_12px_rgba(74,222,128,0.3)]',  dot: 'bg-green-400' },
   seen:       null, // no indicator
   exited:     null, // no indicator
+  // Archived: PTY torn down, frozen snapshot — deliberately muted. Clicking
+  // the node silently resumes the conversation.
+  archived:   { border: 'border-zinc-800', glow: '', dot: 'bg-zinc-500' },
+  // Waking: `claude --resume` respawn in flight.
+  waking:     { border: 'border-cyan-400', glow: 'shadow-[0_0_12px_rgba(34,211,238,0.3)]', dot: 'bg-cyan-400' },
 }
 
 export function SessionNode({
@@ -112,10 +117,10 @@ export function SessionNode({
           '--tw-ring-color': isGroupingSelected ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.7)',
         } as React.CSSProperties : undefined}
       >
-        {/* Terminal snapshot */}
+        {/* Terminal snapshot — dimmed while archived (frozen frame) */}
         <canvas
           ref={canvasRef}
-          className="w-full h-full bg-[#0a0a0a]"
+          className={`w-full h-full bg-[#0a0a0a] ${session.status === 'archived' ? 'opacity-50' : ''}`}
         />
 
         {/* Overlay with title */}
@@ -135,7 +140,7 @@ export function SessionNode({
         {/* Status indicator dot */}
         {STATUS_STYLES[session.status] && (
           <div className="absolute top-1.5 right-1.5">
-            <div className={`w-2 h-2 rounded-full ${STATUS_STYLES[session.status]!.dot} ${session.status === 'working' ? 'animate-pulse' : ''}`} />
+            <div className={`w-2 h-2 rounded-full ${STATUS_STYLES[session.status]!.dot} ${session.status === 'working' || session.status === 'waking' ? 'animate-pulse' : ''}`} />
           </div>
         )}
 

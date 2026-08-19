@@ -1031,7 +1031,7 @@ server.tool(
 
 server.tool(
   'list-sessions',
-  'List all active Claude Code sessions in the session manager. Returns session IDs, project paths, status, and terminal titles. Use this to discover sessions for messaging.',
+  'List all active Claude Code sessions in the session manager. Returns session IDs, project paths, status, and terminal titles. Use this to discover sessions for messaging. Sessions whose PTY was archived for inactivity are included with status "archived" — they are still valid message targets (sending wakes them automatically).',
   {},
   async () => {
     try {

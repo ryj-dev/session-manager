@@ -59,6 +59,7 @@ import { refreshNow as githubRefreshNow, markThreadRead as githubMarkThreadRead,
 import { submitDraft as githubSubmitDraft, discardDraft as githubDiscardDraft } from './github-actions'
 import { runGithubAgent } from './hook-server'
 import * as registry from './session-registry'
+import * as archiver from './session-archiver'
 import * as observerCapture from './observer/capture'
 import {
   acceptSuggestion,
@@ -117,6 +118,9 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Same wiring for the observer's headless curator run, so its PTY drains and
   // its hook status flows even though it has no graph node.
   setCuratorAttachListeners((id, session) => attachSessionListeners(id, session))
+  // And for archived-session resumes: the fresh PTY reuses the ORIGINAL app
+  // session id, so the exit-path attachedSessions guard has already cleared it.
+  archiver.setArchiverAttachListeners((id, session) => attachSessionListeners(id, session))
 
   // Broadcast Claude session ID changes to the renderer so the store can update.
   onClaudeSessionIdChange((id, claudeSessionId) => {
@@ -223,11 +227,13 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
 
   // Write input to a session
   ipcMain.on('pty:write', (_event, { id, data }: { id: string; data: string }) => {
+    archiver.noteSessionInput(id) // gate 2: user input resets the quiet clock
     writeToSession(id, data)
   })
 
   // Write input to a session once Claude is ready (queued until terminal title is set)
   ipcMain.on('pty:writeWhenReady', (_event, { id, data }: { id: string; data: string }) => {
+    archiver.noteSessionInput(id)
     writeWhenReady(id, data)
   })
 
@@ -248,6 +254,22 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Update session title (so it can be persisted across restarts)
   ipcMain.on('pty:title', (_event, { id, title }: { id: string; title: string }) => {
     updateSessionTitle(id, title)
+  })
+
+  // ── Session archiving ────────────────────────────────────────────────────
+  // Resume an archived session under its original app session id (node click /
+  // focus). Idempotent: already-live and mid-wake calls are ok:true no-ops.
+  ipcMain.handle('archive:resume', (_e, id: string) => archiver.resumeArchivedSession(id, 'user'))
+
+  // Per-session pin — exempts a session from auto-archiving (in-memory).
+  ipcMain.handle('archive:setPinned', (_e, id: string, pinned: boolean) =>
+    archiver.setSessionPinned(id, pinned),
+  )
+
+  // Renderer pushes the set of on-screen sessions (focused / active split) —
+  // a session the user is looking at is never archived out from under them.
+  ipcMain.on('archive:setVisible', (_e, ids: string[]) => {
+    archiver.setVisibleSessions(Array.isArray(ids) ? ids : [])
   })
 
   // Saved sessions

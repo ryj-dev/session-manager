@@ -74,6 +74,36 @@ const api = {
   updateSessionTitle: (id: string, title: string): void =>
     ipcRenderer.send('pty:title', { id, title }),
 
+  // Session archiving — resume an archived session in place (same app session
+  // id), pin/unpin a session against auto-archiving, and report which sessions
+  // are on screen (visible sessions are never archived).
+  archiveResume: (id: string): Promise<{ ok: boolean; alreadyLive?: boolean; error?: string }> =>
+    ipcRenderer.invoke('archive:resume', id),
+
+  archiveSetPinned: (id: string, pinned: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('archive:setPinned', id, pinned),
+
+  archiveSetVisible: (ids: string[]): void =>
+    ipcRenderer.send('archive:setVisible', ids),
+
+  onSessionArchived: (callback: (data: { id: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string }) => callback(data)
+    ipcRenderer.on('session:archived', handler)
+    return (): void => { ipcRenderer.removeListener('session:archived', handler) }
+  },
+
+  onSessionWaking: (callback: (data: { id: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string }) => callback(data)
+    ipcRenderer.on('session:waking', handler)
+    return (): void => { ipcRenderer.removeListener('session:waking', handler) }
+  },
+
+  onSessionWoke: (callback: (data: { id: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { id: string }) => callback(data)
+    ipcRenderer.on('session:woke', handler)
+    return (): void => { ipcRenderer.removeListener('session:woke', handler) }
+  },
+
   getClaudeSessionInfo: (id: string): Promise<{ claudeSessionId: string | null; isResumable: boolean } | null> =>
     ipcRenderer.invoke('pty:claudeSessionInfo', { id }),
 
@@ -126,10 +156,10 @@ const api = {
     ipcRenderer.send('splitGroups:save', groups),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; archiveInactiveSessions?: boolean; archiveInactiveMinutes?: number; }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; archiveInactiveSessions?: boolean; archiveInactiveMinutes?: number; }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // Share Turn

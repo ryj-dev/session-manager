@@ -77,6 +77,12 @@ export interface AppSettings {
   turnShareDefaults: TurnShareDefaults
   /** Cmd+B branch: open the fork beside the original in a split group. */
   openBranchInSplit: boolean
+  /** Archive inactive sessions: tear down an idle session's PTY after
+   *  `archiveInactiveMinutes`, keeping its graph node + claudeSessionId for a
+   *  silent click-to-resume. Opt-in, default false. */
+  archiveInactiveSessions: boolean
+  /** Minutes of inactivity before an eligible session is archived (min 5). */
+  archiveInactiveMinutes: number
   /** GitHub panel: PR-state filter. 'active' hides merged/closed. */
   githubStateFilter?: 'active' | 'all'
   /** GitHub panel: how far back to show items (by notification updatedAt). */
@@ -130,6 +136,8 @@ const defaults: AppSettings = {
   turnExportFolder: null,
   turnShareDefaults: { ...defaultTurnShareDefaults },
   openBranchInSplit: true,
+  archiveInactiveSessions: false,
+  archiveInactiveMinutes: 30,
   githubStateFilter: 'active',
   githubRangeFilter: 'week',
   githubAutoReview: { ...defaultGithubAutoReview },

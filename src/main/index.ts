@@ -6,6 +6,7 @@ import { getArtifactById, sweepOrphanedImages } from './canvas-store'
 import { ALLOWED_IMAGE_EXTS } from './canvas-types'
 import { registerIpcHandlers } from './ipc'
 import { getResumableSessions, killAllSessions, onClaudeSessionIdChange } from './pty-manager'
+import { getArchivedResumable } from './session-archiver'
 import { saveSessions, type SavedSession } from './session-store'
 import { getPipelineClaudeSessionIds } from './pipeline-store'
 import { getScheduleClaudeSessionIds } from './schedule-store'
@@ -61,7 +62,10 @@ let didSave = false
 function collectResumableSessions(): SavedSession[] {
   const pipelineIds = getPipelineClaudeSessionIds()
   const scheduleIds = getScheduleClaudeSessionIds()
-  return getResumableSessions()
+  // Archived sessions have no live PTY but their conversations are just as
+  // resumable — merge them in so quitting doesn't silently drop them. (Only
+  // graph sessions can archive, so no pipeline/schedule filtering needed.)
+  return [...getResumableSessions(), ...getArchivedResumable()]
     .filter(
       (s) => !s.claudeSessionId || (!pipelineIds.has(s.claudeSessionId) && !scheduleIds.has(s.claudeSessionId))
     )

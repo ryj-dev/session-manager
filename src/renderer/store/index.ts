@@ -63,7 +63,13 @@ export const defaultTurnShareDefaults: TurnShareDefaults = {
 export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | 'overview' | 'github' | null
 
 
-export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
+export type SessionStatus =
+  | 'working' | 'permission' | 'finished' | 'seen' | 'exited'
+  /** PTY torn down for inactivity; node + snapshot + claudeSessionId kept.
+   *  Entering the session (or a message arriving for it) resumes it. */
+  | 'archived'
+  /** `claude --resume` respawn in flight — keystrokes are blocked until ready. */
+  | 'waking'
 
 export type MessagePopupMode = 'manual' | 'timed' | 'disabled'
 
@@ -617,6 +623,15 @@ export interface AppState {
   /** Cmd+B branch: open the fork beside the original in a split group. */
   openBranchInSplit: boolean
   setOpenBranchInSplit: (value: boolean) => void
+  /** Archive inactive sessions (kill PTY, keep node, resume on click). Opt-in. */
+  archiveInactiveSessions: boolean
+  setArchiveInactiveSessions: (value: boolean) => void
+  /** Minutes of inactivity before an eligible session archives (min 5). */
+  archiveInactiveMinutes: number
+  setArchiveInactiveMinutes: (value: number) => void
+  /** Sessions pinned against auto-archiving (mirror of main's in-memory set). */
+  archivePinnedSessionIds: string[]
+  setArchivePinned: (id: string, pinned: boolean) => void
 
   // Hover-overlay attached-terminal pin state (per-parent-Claude-session ids).
   // When pinned, the overlay sticks open and lays side-by-side instead of overlaying.
@@ -1006,6 +1021,19 @@ export const useStore = create<AppState>((set, get) => ({
   setShareTurnSessionId: (id) => set({ shareTurnSessionId: id }),
   openBranchInSplit: true,
   setOpenBranchInSplit: (value) => set({ openBranchInSplit: value }),
+  archiveInactiveSessions: false,
+  setArchiveInactiveSessions: (value) => set({ archiveInactiveSessions: value }),
+  archiveInactiveMinutes: 30,
+  setArchiveInactiveMinutes: (value) => set({ archiveInactiveMinutes: Math.max(5, Math.round(value) || 5) }),
+  archivePinnedSessionIds: [],
+  setArchivePinned: (id, pinned) =>
+    set((state) => ({
+      archivePinnedSessionIds: pinned
+        ? state.archivePinnedSessionIds.includes(id)
+          ? state.archivePinnedSessionIds
+          : [...state.archivePinnedSessionIds, id]
+        : state.archivePinnedSessionIds.filter((x) => x !== id),
+    })),
 
   pinnedAttachedTerminalIds: [],
   togglePinnedAttachedTerminal: (parentId) =>

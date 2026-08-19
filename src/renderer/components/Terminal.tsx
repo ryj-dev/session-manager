@@ -297,8 +297,12 @@ export function Terminal({ sessionId, visible, onTitleChange, autoFocus = true }
         })
       }
 
-      // Forward keyboard input to PTY
+      // Forward keyboard input to PTY. While the session is archived or waking
+      // (resume in flight) keystrokes are BLOCKED, not buffered — typing into a
+      // repainting `claude --resume` would garble the prompt.
       term.onData((data) => {
+        const status = useStore.getState().sessions.find((s) => s.id === sessionId)?.status
+        if (status === 'archived' || status === 'waking') return
         window.api.writeSession(sessionId, data)
       })
 

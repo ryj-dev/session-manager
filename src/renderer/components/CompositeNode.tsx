@@ -18,6 +18,8 @@ const STATUS_BORDER: Record<SessionStatus, string | null> = {
   finished: 'rgb(74 222 128)',
   seen: null,
   exited: null,
+  archived: null,
+  waking: 'rgb(34 211 238)',
 }
 
 const STATUS_DOT: Record<SessionStatus, string | null> = {
@@ -26,6 +28,8 @@ const STATUS_DOT: Record<SessionStatus, string | null> = {
   finished: 'bg-green-400',
   seen: null,
   exited: null,
+  archived: 'bg-zinc-500',
+  waking: 'bg-cyan-400',
 }
 
 /**

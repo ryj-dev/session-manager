@@ -19,6 +19,8 @@ const STATUS_BORDER: Record<SessionStatus, string | null> = {
   finished: 'rgb(74 222 128)',    // green-400
   seen: null,
   exited: null,
+  archived: null,
+  waking: 'rgb(34 211 238)',
 }
 
 const STATUS_GLOW: Record<SessionStatus, string | null> = {
@@ -27,6 +29,8 @@ const STATUS_GLOW: Record<SessionStatus, string | null> = {
   finished: '0 0 14px rgba(74,222,128,0.30)',
   seen: null,
   exited: null,
+  archived: null,
+  waking: '0 0 14px rgba(34,211,238,0.30)',
 }
 
 // Default font size when not in split (matches xterm default).
