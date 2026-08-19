@@ -73,6 +73,7 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const notesProjectKey = useHotkeyDisplay('toggleNotesProject')
   const pipelineKey = useHotkeyDisplay('togglePipeline')
   const [dirInput, setDirInput] = useState(baseProjectsDir || '')
+  const [archiveMinutesInput, setArchiveMinutesInput] = useState(String(archiveInactiveMinutes))
   const [turnFolderInput, setTurnFolderInput] = useState(turnExportFolder || '')
   const [claudeMdInstalled, setClaudeMdInstalled] = useState<boolean | null>(null)
   const [claudeMdBusy, setClaudeMdBusy] = useState(false)
@@ -81,6 +82,10 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   useEffect(() => {
     setDirInput(baseProjectsDir || '')
   }, [baseProjectsDir])
+
+  useEffect(() => {
+    setArchiveMinutesInput(String(archiveInactiveMinutes))
+  }, [archiveInactiveMinutes])
 
   useEffect(() => {
     setTurnFolderInput(turnExportFolder || '')
@@ -303,8 +308,19 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
                   <input
                     type="number"
                     min={5}
-                    value={archiveInactiveMinutes}
-                    onChange={(e) => setArchiveInactiveMinutes(Number(e.target.value))}
+                    value={archiveMinutesInput}
+                    onChange={(e) => {
+                      const raw = e.target.value
+                      setArchiveMinutesInput(raw)
+                      const n = Number(raw)
+                      if (raw !== '' && Number.isFinite(n) && n >= 5) setArchiveInactiveMinutes(n)
+                    }}
+                    onBlur={() => {
+                      const n = Number(archiveMinutesInput)
+                      const clamped = archiveMinutesInput === '' || !Number.isFinite(n) ? 5 : Math.max(5, Math.round(n))
+                      setArchiveInactiveMinutes(clamped)
+                      setArchiveMinutesInput(String(clamped))
+                    }}
                     className="w-16 px-2 py-1 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
                   />
                   <span className="text-xs text-zinc-500">minutes of inactivity (min 5)</span>
