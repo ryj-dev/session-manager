@@ -65,6 +65,16 @@ export interface GithubItem {
   latestCommentUrl: string | null
   /** Prepared response awaiting submission (draft mode) — see GithubDraft. */
   draft?: GithubDraft | null
+  /** The agent's Claude conversation id + cwd, captured when it hands over its
+   *  response. The agent's PTY is torn down once it finishes (sessions don't
+   *  linger on the graph), but the conversation stays resumable — the panel's
+   *  "Discuss" button re-opens it. */
+  agentClaudeSessionId?: string | null
+  agentCwd?: string
+  /** App/PTY session id while the agent is LIVE (running, or finished but kept
+   *  open because the user is watching it) — powers the panel's "Watch live"
+   *  button. Cleared when the PTY is finally torn down. */
+  agentSessionId?: string | null
   /** ISO timestamp of the last submitted response, with a one-line summary —
    *  set by github-actions on successful submit. */
   respondedAt?: string
@@ -120,7 +130,15 @@ export function upsertItems(incoming: GithubItem[]): GithubItem[] {
     existing.set(
       item.id,
       prev
-        ? { ...item, draft: prev.draft, respondedAt: prev.respondedAt, respondedSummary: prev.respondedSummary }
+        ? {
+            ...item,
+            draft: prev.draft,
+            respondedAt: prev.respondedAt,
+            respondedSummary: prev.respondedSummary,
+            agentClaudeSessionId: prev.agentClaudeSessionId,
+            agentCwd: prev.agentCwd,
+            agentSessionId: prev.agentSessionId,
+          }
         : item,
     )
   }
@@ -150,6 +168,16 @@ export function clearDraft(id: string): GithubItem[] {
   return persist(getItems().map((i) => (i.id === id ? { ...i, draft: null } : i)))
 }
 
+export function setAgentLive(id: string, agentSessionId: string | null): GithubItem[] {
+  return persist(getItems().map((i) => (i.id === id ? { ...i, agentSessionId } : i)))
+}
+
+export function setAgentSession(id: string, claudeSessionId: string | null, cwd: string | undefined): GithubItem[] {
+  return persist(
+    getItems().map((i) => (i.id === id ? { ...i, agentClaudeSessionId: claudeSessionId, agentCwd: cwd } : i)),
+  )
+}
+
 export function markResponded(id: string, summary: string): GithubItem[] {
   return persist(
     getItems().map((i) =>
@@ -164,4 +192,10 @@ export function removeItem(id: string): GithubItem[] {
 
 export function clearItems(): GithubItem[] {
   return persist([])
+}
+
+/** Startup reconcile: no PTY survives an app restart, so any persisted live
+ *  marker is an orphan. */
+export function clearAllAgentLive(): GithubItem[] {
+  return persist(getItems().map((i) => (i.agentSessionId ? { ...i, agentSessionId: null } : i)))
 }

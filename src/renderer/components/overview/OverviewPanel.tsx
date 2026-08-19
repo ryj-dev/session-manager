@@ -32,6 +32,7 @@ const KIND_BADGE: Record<SessionKind, { label: string; className: string }> = {
   agent:     { label: 'agent',     className: 'bg-emerald-500/15 text-emerald-300' },
   observer:  { label: 'observer',  className: 'bg-fuchsia-500/15 text-fuchsia-300' },
   preview:   { label: 'preview',   className: 'bg-zinc-500/15 text-zinc-400' },
+  github:    { label: 'github',    className: 'bg-orange-500/15 text-orange-300' },
 }
 
 const STATUS_DOT: Record<RegistryStatus, { className: string; pulse: boolean; label: string }> = {
@@ -58,13 +59,15 @@ const STATUS_DOT: Record<RegistryStatus, { className: string; pulse: boolean; la
 function useOpenTargets(): Partial<Record<SessionKind, string>> {
   const pipelineKey = useHotkeyDisplay('togglePipeline')
   const scheduledKey = useHotkeyDisplay('toggleScheduled')
+  const githubKey = useHotkeyDisplay('toggleGithub')
   return useMemo(() => ({
     user:      'Focus this session on the graph',
     terminal:  'Focus this terminal on the graph',
     agent:     'Focus this agent session on the graph',
     pipeline:  `Open the pipeline board (${pipelineKey})`,
     scheduled: `Open the scheduled-tasks panel (${scheduledKey})`,
-  }), [pipelineKey, scheduledKey])
+    github:    `Open the GitHub panel (${githubKey})`,
+  }), [pipelineKey, scheduledKey, githubKey])
 }
 
 const NO_OPEN_TARGET: Partial<Record<SessionKind, string>> = {
@@ -107,7 +110,7 @@ function buildSections(
   pipelineTitles: Map<string, string>,
   scheduleNames: Map<string, string>,
   /** Formatted, live hotkey labels — never hardcode these, they are rebindable. */
-  keys: { pipeline: string; scheduled: string },
+  keys: { pipeline: string; scheduled: string; github: string },
 ): Section[] {
   const by = (kind: SessionKind): RegistryEntry[] => entries.filter((e) => e.origin.kind === kind)
 
@@ -163,6 +166,16 @@ function buildSections(
         entries: list,
       })),
     },
+    // GitHub review/fix agents run off the graph and tear down when they hand
+    // over their response — only ever visible here mid-run. Omitted when empty.
+    ...(by('github').length > 0
+      ? [{
+          key: 'github',
+          title: 'GitHub agents',
+          hint: `Background PR review/fix agents — drafts land in the GitHub panel (${keys.github})`,
+          entries: by('github'),
+        }]
+      : []),
     {
       key: 'agents',
       title: 'Spawned agents & terminals',
@@ -253,12 +266,14 @@ export function OverviewPanel({ visible, onClose }: Props): JSX.Element | null {
   )
   const pipelineKey = useHotkeyDisplay('togglePipeline')
   const scheduledKey = useHotkeyDisplay('toggleScheduled')
+  const githubKey = useHotkeyDisplay('toggleGithub')
   const sections = useMemo(
     () => buildSections(visibleEntries, pipelineTitles, scheduleNames, {
       pipeline: pipelineKey,
       scheduled: scheduledKey,
+      github: githubKey,
     }),
-    [visibleEntries, pipelineTitles, scheduleNames, pipelineKey, scheduledKey],
+    [visibleEntries, pipelineTitles, scheduleNames, pipelineKey, scheduledKey, githubKey],
   )
 
   const ephemeralCount = entries.length - entries.filter((e) => !e.ephemeral).length
@@ -273,6 +288,9 @@ export function OverviewPanel({ visible, onClose }: Props): JSX.Element | null {
         return
       case 'scheduled':
         store.setActivePanel('scheduled')
+        return
+      case 'github':
+        store.setActivePanel('github')
         return
       case 'observer':
       case 'preview':

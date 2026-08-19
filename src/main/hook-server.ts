@@ -833,6 +833,83 @@ const githubItemSessions = new Map<string, string>()
 // the conversation stays resumable via the item's agentClaudeSessionId.
 const githubRespondedSessions = new Map<string, string>()
 
+// ── GitHub agent lifecycle: watching, adoption, focus-aware teardown ─────────
+//
+// Every live, un-adopted agent: session id → item id. Drives adoption (a real
+// user prompt graduates the agent to a normal graph session) and teardown.
+const githubAgentBySession = new Map<string, string>()
+// The spawn prompt is delivered as a CLI arg, which still fires one
+// UserPromptSubmit — swallow it so it doesn't count as the user engaging.
+const githubInitialPromptPending = new Set<string>()
+// Finished while the user was WATCHING (focused on the terminal): kept open so
+// they can start talking. Torn down when focus leaves and the session is idle.
+const githubDeferredTeardowns = new Map<string, string>()
+
+// The renderer reports which session's terminal the user is actually looking
+// at (focused/split view; null on the graph). "Watching" is exactly this.
+let uiFocusedSessionId: string | null = null
+export function setUiFocusedSession(id: string | null): void {
+  uiFocusedSessionId = id
+  finalizeDeferredGithubTeardowns()
+}
+
+function broadcastGithubItems(): void {
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) win.webContents.send('github:changed', githubStore.getItems())
+}
+
+/** Final PTY teardown for a finished agent: capture the (possibly updated)
+ *  conversation id, drop the live marker, and reclaim the PTY. */
+function finalizeGithubTeardown(sessionId: string, itemId: string): void {
+  githubAgentBySession.delete(sessionId)
+  githubInitialPromptPending.delete(sessionId)
+  const live = getSession(sessionId)
+  if (live?.claudeSessionId) githubStore.setAgentSession(itemId, live.claudeSessionId, live.projectPath)
+  githubStore.setAgentLive(itemId, null)
+  broadcastGithubItems()
+  scheduleSessionTeardown(sessionId)
+}
+
+/** Tear down deferred (finished-while-watched) agents once the user has moved
+ *  away AND the session is idle. A session the user engaged with never gets
+ *  here — engagement adopts it (removed from the deferred map). */
+function finalizeDeferredGithubTeardowns(): void {
+  for (const [sessionId, itemId] of [...githubDeferredTeardowns]) {
+    if (sessionId === uiFocusedSessionId) continue
+    if (!getSession(sessionId)) {
+      githubDeferredTeardowns.delete(sessionId)
+      githubStore.setAgentLive(itemId, null)
+      continue
+    }
+    if (sessionStatus.get(sessionId) !== 'idle') continue
+    githubDeferredTeardowns.delete(sessionId)
+    finalizeGithubTeardown(sessionId, itemId)
+  }
+}
+
+/** The user sent a real prompt to an agent — it's theirs now. Un-hide it on
+ *  the graph (renderer clears isGithub via 'github:agentAdopted'), retag its
+ *  registry origin, and remove it from every teardown path. */
+function adoptGithubAgent(sessionId: string, itemId: string): void {
+  githubAgentBySession.delete(sessionId)
+  githubInitialPromptPending.delete(sessionId)
+  githubRespondedSessions.delete(sessionId)
+  githubDeferredTeardowns.delete(sessionId)
+  githubItemSessions.delete(itemId)
+  const live = getSession(sessionId)
+  if (live) githubStore.setAgentSession(itemId, live.claudeSessionId ?? null, live.projectPath)
+  githubStore.setAgentLive(itemId, null)
+  const item = githubStore.getItem(itemId)
+  registry.setOrigin(sessionId, {
+    kind: 'user',
+    label: item ? `GitHub · ${item.repo}#${item.prNumber}` : undefined,
+  })
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) win.webContents.send('github:agentAdopted', { sessionId })
+  broadcastGithubItems()
+  console.log(`[hook-server] github agent ${sessionId} adopted by user`)
+}
+
 /** The kind-specific brief. Both kinds respond through the github-respond MCP
  *  tool — the draft-gate is enforced by the app (github-actions), so the agent
  *  is TOLD it cannot post directly and gh is for reading only. */
@@ -908,22 +985,33 @@ export async function runGithubAgent(
 
   const id = randomUUID()
   const prompt = githubAgentPrompt(item, cwd)
-  const session = spawnSession(id, cwd, 'claude', ['--permission-mode', 'auto', '--', prompt])
+  // Settings-chosen model (alias or full id); empty = inherit the user default.
+  const modelId = resolveModelId(loadSettings().githubReviewModel)
+  const modelArgs = modelId ? ['--model', modelId] : []
+  const session = spawnSession(id, cwd, 'claude', [...modelArgs, '--permission-mode', 'auto', '--', prompt])
   if (attachListenersFn) attachListenersFn(id, session)
 
+  // isGithub keeps it OFF the graph — it runs in the background like scheduled
+  // runs; the GitHub panel (drafts + Discuss) is its home UI.
   const win = BrowserWindow.getAllWindows()[0]
   if (win && !win.isDestroyed()) {
     win.webContents.send('session:spawned', {
       id,
       projectPath: cwd,
       claudeSessionId: session.claudeSessionId ?? null,
+      isGithub: true,
     })
   }
   registry.setOrigin(id, {
-    kind: 'user',
+    kind: 'github',
     label: `GitHub · ${item.repo}#${item.prNumber}`,
   })
   githubItemSessions.set(itemId, id)
+  githubAgentBySession.set(id, itemId)
+  githubInitialPromptPending.add(id)
+  // Live marker → the panel card shows "Watch live" while it runs.
+  githubStore.setAgentLive(itemId, id)
+  broadcastGithubItems()
   // Spawning the agent means the item is being handled — clear unread on
   // GitHub (read back, GitHub stays the source of truth).
   void githubMarkThreadRead(itemId)
@@ -1036,6 +1124,8 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
 
     // The MODE decides what happens next — the calling agent does not.
     // 'auto' → submit right now; 'draft' and 'off' → stored, user approves.
+    // No native notifications here — the amber drafts pill on the graph (and
+    // the panel itself) is the surfacing mechanism.
     const mode = githubAutoModeFor(item.kind)
     if (mode === 'auto') {
       const summary = await githubSubmitDraft(payload.itemId)
@@ -3020,21 +3110,20 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
       scheduleSessionTeardown(appSessionId)
     }
 
-    // GitHub agent completion: once its github-respond has been delivered and
-    // the turn ends, tear the PTY down (same path as scheduled runs). The
-    // claudeSessionId was captured on the item at respond time — re-read it
-    // here in case /resume changed it — so the panel's "Discuss" can re-open
-    // the conversation.
+    // GitHub agent completion. If the user is WATCHING the terminal right now,
+    // keep it open (deferred teardown — they may start talking, which adopts
+    // it); otherwise tear the PTY down (same path as scheduled runs). The
+    // conversation id was captured at respond time and is re-read in the
+    // finalizer, so the panel's "Discuss" can always re-open it.
     const githubItemId = githubRespondedSessions.get(appSessionId)
     if (githubItemId) {
       githubRespondedSessions.delete(appSessionId)
       githubItemSessions.delete(githubItemId)
-      const live = getSession(appSessionId)
-      if (live?.claudeSessionId) {
-        githubStore.setAgentSession(githubItemId, live.claudeSessionId, live.projectPath)
-        win.webContents.send('github:changed', githubStore.getItems())
+      if (uiFocusedSessionId === appSessionId) {
+        githubDeferredTeardowns.set(appSessionId, githubItemId)
+      } else {
+        finalizeGithubTeardown(appSessionId, githubItemId)
       }
-      scheduleSessionTeardown(appSessionId)
     }
 
     // Observer-run completion (curator or housekeeping). The run is an
@@ -3056,7 +3145,19 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     // in PostToolUse flags pending background work; a user prompt clears it.
     archiver.noteSessionHookStatus(appSessionId, 'working')
     if (event === 'PostToolUse') archiver.noteSessionPostToolUse(appSessionId, payload.tool_name, payload.tool_input)
-    if (event === 'UserPromptSubmit') archiver.noteSessionUserPrompt(appSessionId)
+    if (event === 'UserPromptSubmit') {
+      archiver.noteSessionUserPrompt(appSessionId)
+      // A real user prompt to a GitHub agent adopts it (the spawn prompt is
+      // delivered as a CLI arg but still fires this event once — swallowed).
+      const ghItemId = githubAgentBySession.get(appSessionId)
+      if (ghItemId) {
+        if (githubInitialPromptPending.has(appSessionId)) {
+          githubInitialPromptPending.delete(appSessionId)
+        } else {
+          adoptGithubAgent(appSessionId, ghItemId)
+        }
+      }
+    }
     registry.setStatus(appSessionId, 'working')
     registry.markActivity()
     win.webContents.send('claude:status', { id: appSessionId, status: 'working' })

@@ -72,6 +72,7 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
   const status = useStore((s) => s.githubStatus)
   const setStatus = useStore((s) => s.setGithubStatus)
   const authLost = useStore((s) => s.githubAuthLost)
+  const addSession = useStore((s) => s.addSession)
   const stateFilter = useStore((s) => s.githubStateFilter)
   const setStateFilter = useStore((s) => s.setGithubStateFilter)
   const rangeFilter = useStore((s) => s.githubRangeFilter)
@@ -105,11 +106,10 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
   }, [visible, onClose])
 
   // Apply the state + range filters, keeping a hidden count so the bar can say
-  // what the filters are eating. Unread items are always shown — a filter must
-  // never hide something GitHub considers new for you — and they surface FIRST,
-  // in their own cross-kind "Unread activity" section; the per-kind sections
-  // below are read history.
-  const { unread, grouped, shown, hidden } = useMemo(() => {
+  // what the filters are eating. Attention order: drafts awaiting your Submit
+  // FIRST (never hidden by filters), then unread (also never hidden), then the
+  // per-kind read history.
+  const { drafts, unread, grouped, shown, hidden } = useMemo(() => {
     const cutoff = rangeCutoffMs(rangeFilter)
     const visible = items.filter((item) => {
       if (item.unread) return true
@@ -118,13 +118,15 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
       if (cutoff !== null && new Date(item.updatedAt).getTime() < cutoff) return false
       return true
     })
+    const drafts: GithubItem[] = []
     const unread: GithubItem[] = []
     const map: Record<GithubItemKind, GithubItem[]> = { 'review-request': [], mention: [], 'my-pr-activity': [] }
     for (const item of visible) {
-      if (item.unread) unread.push(item)
+      if (item.draft) drafts.push(item)
+      else if (item.unread) unread.push(item)
       else map[item.kind].push(item)
     }
-    return { unread, grouped: map, shown: visible.length, hidden: items.length - visible.length }
+    return { drafts, unread, grouped: map, shown: visible.length, hidden: items.length - visible.length }
   }, [items, stateFilter, rangeFilter])
 
   const refresh = useCallback(async () => {
@@ -211,6 +213,43 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
   const discardDraft = useCallback(async (item: GithubItem) => {
     await window.api.githubDiscardDraft(item.id)
   }, [])
+
+  /** Jump into a LIVE agent's terminal (focused view). Watching also defers
+   *  auto-teardown: if it finishes while you're looking, it stays open. */
+  const watchAgent = useCallback(
+    (item: GithubItem) => {
+      if (!item.agentSessionId) return
+      const store = useStore.getState()
+      store.setFocusedSessionId(item.agentSessionId)
+      store.setViewMode('focused')
+      onClose()
+    },
+    [onClose],
+  )
+
+  /** Re-open the (torn-down) agent's conversation as a normal graph session so
+   *  the user can talk to it about its draft/response. */
+  const discuss = useCallback(
+    async (item: GithubItem) => {
+      if (!item.agentClaudeSessionId || !item.agentCwd) return
+      setBusy(item.id)
+      setActionError(null)
+      try {
+        const result = await window.api.resumeSession(item.agentClaudeSessionId, item.agentCwd)
+        addSession(result.id, result.projectPath, item.agentClaudeSessionId)
+        // Land the user IN the conversation, not just back on the graph.
+        const store = useStore.getState()
+        store.setFocusedSessionId(result.id)
+        store.setViewMode('focused')
+        onClose()
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setBusy(null)
+      }
+    },
+    [addSession, onClose],
+  )
 
   if (!visible) return null
 
@@ -309,6 +348,34 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
                 All {total} items are outside the current filters.
               </p>
             )}
+            {drafts.length > 0 && (
+              <section>
+                <h2 className="mb-2 flex items-baseline gap-2 text-[12px] font-semibold uppercase tracking-wide text-amber-300">
+                  Drafts awaiting your review
+                  <span className="text-[10px] font-normal normal-case text-zinc-600">prepared responses — nothing posts until you Submit</span>
+                </h2>
+                <div className="space-y-2">
+                  {drafts.map((item) => (
+                    <ItemCard
+                      key={item.id}
+                      item={item}
+                      showKind
+                      busy={busy === item.id}
+                      onOpen={() => {
+                        void window.api.openExternal(item.htmlUrl)
+                        void window.api.githubMarkRead(item.id)
+                      }}
+                      onStart={() => void startAgent(item)}
+                      onSubmitDraft={() => void submitDraft(item)}
+                      onDiscardDraft={() => void discardDraft(item)}
+                      onDiscuss={() => void discuss(item)}
+                      onWatch={() => watchAgent(item)}
+                      onMarkRead={() => void window.api.githubMarkRead(item.id)}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
             {unread.length > 0 && (
               <section>
                 <h2 className="mb-2 flex items-baseline gap-2 text-[12px] font-semibold uppercase tracking-wide text-sky-300">
@@ -329,6 +396,8 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
                       onStart={() => void startAgent(item)}
                       onSubmitDraft={() => void submitDraft(item)}
                       onDiscardDraft={() => void discardDraft(item)}
+                      onDiscuss={() => void discuss(item)}
+                      onWatch={() => watchAgent(item)}
                       onMarkRead={() => void window.api.githubMarkRead(item.id)}
                     />
                   ))}
@@ -355,6 +424,8 @@ export function GithubPanel({ visible, onClose }: Props): JSX.Element | null {
                         onStart={() => void startAgent(item)}
                         onSubmitDraft={() => void submitDraft(item)}
                         onDiscardDraft={() => void discardDraft(item)}
+                        onDiscuss={() => void discuss(item)}
+                        onWatch={() => watchAgent(item)}
                         onMarkRead={() => void window.api.githubMarkRead(item.id)}
                       />
                     ))}
@@ -426,7 +497,7 @@ function draftSummary(draft: NonNullable<GithubItem['draft']>): string {
 }
 
 function ItemCard({
-  item, busy, onOpen, onStart, onSubmitDraft, onDiscardDraft, onMarkRead, showKind = false,
+  item, busy, onOpen, onStart, onSubmitDraft, onDiscardDraft, onDiscuss, onWatch, onMarkRead, showKind = false,
 }: {
   item: GithubItem
   busy: boolean
@@ -434,13 +505,16 @@ function ItemCard({
   onStart: () => void
   onSubmitDraft: () => void
   onDiscardDraft: () => void
+  onDiscuss: () => void
+  onWatch: () => void
   onMarkRead: () => void
-  /** Show the kind chip — used in the mixed-kind "Unread activity" section. */
+  /** Show the kind chip — used in the mixed-kind sections. */
   showKind?: boolean
 }): JSX.Element {
   const [draftOpen, setDraftOpen] = useState(false)
   const state = STATE_CHIP[item.prState]
   const actionable = item.prState === 'open' || item.prState === 'draft'
+  const canDiscuss = Boolean(item.agentClaudeSessionId && item.agentCwd)
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2.5">
       <div className="flex items-center gap-2">
@@ -460,7 +534,17 @@ function ItemCard({
         <span>·</span>
         <span>{fmtAgo(item.updatedAt)}</span>
         <div className="ml-auto flex items-center gap-1.5">
-          {actionable && !item.draft && (
+          {item.agentSessionId && (
+            <button
+              onClick={onWatch}
+              className="flex items-center gap-1 rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300 hover:bg-amber-500/25"
+              title="An agent is working on this now — open its terminal. If it finishes while you're watching, it stays open so you can talk to it."
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+              Watch live
+            </button>
+          )}
+          {actionable && !item.draft && !item.agentSessionId && (
             <button
               onClick={onStart}
               disabled={busy}
@@ -487,6 +571,14 @@ function ItemCard({
                 onClick={() => setDraftOpen((v) => !v)}
                 className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300"
               >{draftOpen ? 'Hide' : 'View'}</button>
+              {canDiscuss && (
+                <button
+                  onClick={onDiscuss}
+                  disabled={busy}
+                  className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+                  title="Re-open the agent's conversation to discuss or revise this draft"
+                >Discuss</button>
+              )}
               <button
                 onClick={onSubmitDraft}
                 disabled={busy}
@@ -522,7 +614,17 @@ function ItemCard({
 
       {/* Submission record. */}
       {!item.draft && item.respondedAt && (
-        <p className="mt-1.5 text-[10px] text-green-400/70">✓ {item.respondedSummary} · {fmtAgo(item.respondedAt)}</p>
+        <p className="mt-1.5 flex items-center gap-2 text-[10px] text-green-400/70">
+          <span>✓ {item.respondedSummary} · {fmtAgo(item.respondedAt)}</span>
+          {canDiscuss && (
+            <button
+              onClick={onDiscuss}
+              disabled={busy}
+              className="rounded px-1.5 py-0.5 text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+              title="Re-open the agent's conversation about this response"
+            >Discuss</button>
+          )}
+        </p>
       )}
     </div>
   )

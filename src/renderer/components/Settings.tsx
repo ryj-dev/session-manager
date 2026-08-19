@@ -27,6 +27,8 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const pipelineDefaultAutonomy = useStore((s) => s.pipelineDefaultAutonomy)
   const githubAutoReview = useStore((s) => s.githubAutoReview)
   const setGithubAutoReview = useStore((s) => s.setGithubAutoReview)
+  const githubReviewModel = useStore((s) => s.githubReviewModel)
+  const setGithubReviewModel = useStore((s) => s.setGithubReviewModel)
   const setPipelineDefaultAutonomy = useStore((s) => s.setPipelineDefaultAutonomy)
   const messagePopup = useStore((s) => s.messagePopup)
   const setMessagePopup = useStore((s) => s.setMessagePopup)
@@ -395,6 +397,20 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
                   </select>
                 </div>
               ))}
+              <div className="flex items-center gap-2 mt-2">
+                <label className="text-xs text-zinc-400 flex-1">Review model</label>
+                <select
+                  value={githubReviewModel}
+                  onChange={(e) => setGithubReviewModel(e.target.value)}
+                  className="w-44 px-2 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 appearance-none cursor-pointer"
+                >
+                  <option value="">Default — current model</option>
+                  <option value="haiku">Haiku — fastest</option>
+                  <option value="sonnet">Sonnet — balanced</option>
+                  <option value="opus">Opus — strong</option>
+                  <option value="fable">Fable — strongest</option>
+                </select>
+              </div>
             </div>
 
             {/* Share turn */}

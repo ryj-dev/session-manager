@@ -281,6 +281,8 @@ export interface GithubItem {
   /** The (torn-down) agent's resumable conversation — powers "Discuss". */
   agentClaudeSessionId?: string | null
   agentCwd?: string
+  /** App session id while the agent is live — powers "Watch live". */
+  agentSessionId?: string | null
 }
 
 /** Mirrors GithubAutoMode / GithubAutoReviewRules in src/main/settings-store.ts. */
@@ -322,6 +324,8 @@ export type SessionKind =
   /** A drawer/preview PTY rendering an existing conversation — not a session
    *  the user started, and never shown on the graph. */
   | 'preview'
+  /** A background GitHub PR review/fix agent (Cmd+G panel). */
+  | 'github'
 export type RegistryStatus = 'working' | 'idle' | 'permission' | 'zombie' | 'unknown'
 
 export interface SessionOrigin {
@@ -493,6 +497,8 @@ export interface Session {
    *  snapshot layer, and the restore prompt — they live in the Scheduled Tasks panel
    *  — but still mount as real PTYs. */
   isScheduled: boolean
+  /** Background GitHub agent — kept off the graph (Cmd+G panel is its home). */
+  isGithub: boolean
   /** For Claude sessions with `terminalPairingMode === 'overlay'`: the id of the hidden
    *  terminal session attached to this one. Null on attached sessions and on
    *  Claude sessions without an attachment. */
@@ -502,7 +508,7 @@ export interface Session {
 export interface AppState {
   // Sessions
   sessions: Session[]
-  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean; isScheduled?: boolean }) => void
+  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean; isScheduled?: boolean; isGithub?: boolean }) => void
   removeSession: (id: string) => void
   updateSessionStatus: (id: string, status: SessionStatus) => void
   markSessionSeen: (id: string) => void
@@ -725,6 +731,8 @@ export interface AppState {
   /** Poller hit a 401 and no fallback token worked — panel shows reconnect. */
   githubAuthLost: boolean
   setGithubAuthLost: (lost: boolean) => void
+  /** The user engaged a GitHub agent — un-hide it on the graph. */
+  adoptGithubSession: (sessionId: string) => void
   /** Panel filters — prefs, persisted in the settings blob (wired in App.tsx). */
   githubStateFilter: GithubStateFilter
   setGithubStateFilter: (f: GithubStateFilter) => void
@@ -733,6 +741,9 @@ export interface AppState {
   /** Per-event auto-review modes (settings pref; enforced in main). */
   githubAutoReview: GithubAutoReviewRules
   setGithubAutoReview: (rules: GithubAutoReviewRules) => void
+  /** Model for review/fix agents: alias or full id; '' = user default. */
+  githubReviewModel: string
+  setGithubReviewModel: (model: string) => void
 
   // Canvas. Main process owns the artifact list (canvas-store.ts); the mirror is
   // refreshed by 'canvas:changed'. Everything else here is renderer-local UI
@@ -817,6 +828,7 @@ export const useStore = create<AppState>((set, get) => ({
             isAttached: !!opts?.isAttached,
             isPipeline: !!opts?.isPipeline,
             isScheduled: !!opts?.isScheduled,
+            isGithub: !!opts?.isGithub,
             attachedTerminalId: null,
           }
         ]
@@ -1134,12 +1146,18 @@ export const useStore = create<AppState>((set, get) => ({
   setGithubStatus: (status) => set({ githubStatus: status }),
   githubAuthLost: false,
   setGithubAuthLost: (lost) => set({ githubAuthLost: lost }),
+  adoptGithubSession: (sessionId) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) => (s.id === sessionId ? { ...s, isGithub: false } : s)),
+    })),
   githubStateFilter: 'active',
   setGithubStateFilter: (f) => set({ githubStateFilter: f }),
   githubRangeFilter: 'week',
   setGithubRangeFilter: (f) => set({ githubRangeFilter: f }),
   githubAutoReview: { ...defaultGithubAutoReview },
   setGithubAutoReview: (rules) => set({ githubAutoReview: rules }),
+  githubReviewModel: '',
+  setGithubReviewModel: (model) => set({ githubReviewModel: model }),
 
   // Canvas
   canvasArtifacts: [],

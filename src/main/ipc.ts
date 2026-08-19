@@ -57,7 +57,7 @@ import * as githubAuth from './github-auth'
 import * as githubStore from './github-store'
 import { refreshNow as githubRefreshNow, markThreadRead as githubMarkThreadRead, isAuthLost as githubIsAuthLost } from './github-poller'
 import { submitDraft as githubSubmitDraft, discardDraft as githubDiscardDraft } from './github-actions'
-import { runGithubAgent } from './hook-server'
+import { runGithubAgent, setUiFocusedSession } from './hook-server'
 import * as registry from './session-registry'
 import * as archiver from './session-archiver'
 import {
@@ -833,6 +833,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // the poller's auto-start uses; resolves the checkout itself. Resolves to
   // { sessionId } or { skipped: reason }.
   ipcMain.handle('github:startAgent', (_e, itemId: string) => runGithubAgent(itemId))
+
+  // The renderer reports which session's terminal the user is looking at
+  // (null on the graph). Drives GitHub-agent focus-aware teardown: an agent
+  // that finishes while watched stays open until the user moves away.
+  ipcMain.on('ui:focusedSession', (_e, id: string | null) => setUiFocusedSession(id))
 
   // Submit an item's pending draft to GitHub (the panel's Submit button —
   // github-actions is the only posting path). Resolves to a summary string;

@@ -170,6 +170,7 @@ export function App(): JSX.Element {
   const openCanvasSessionIds = useStore((s) => s.openCanvasSessionIds)
   const canvasArtifacts = useStore((s) => s.canvasArtifacts)
   const observerPendingCount = useStore((s) => s.observerInbox?.pendingCount ?? 0)
+  const githubDraftsCount = useStore((s) => s.githubItems.reduce((n, i) => n + (i.draft ? 1 : 0), 0))
 
   // Panel data
   const { items: designItems } = useDesigns()
@@ -203,6 +204,7 @@ export function App(): JSX.Element {
   const githubStateFilter = useStore((s) => s.githubStateFilter)
   const githubRangeFilter = useStore((s) => s.githubRangeFilter)
   const githubAutoReview = useStore((s) => s.githubAutoReview)
+  const githubReviewModel = useStore((s) => s.githubReviewModel)
 
   // Settings
   const [showSettings, setShowSettings] = useState(false)
@@ -258,6 +260,7 @@ export function App(): JSX.Element {
       if (settings.githubAutoReview && typeof settings.githubAutoReview === 'object') {
         useStore.getState().setGithubAutoReview({ ...defaultGithubAutoReview, ...(settings.githubAutoReview as Partial<GithubAutoReviewRules>) })
       }
+      if (typeof settings.githubReviewModel === 'string') useStore.getState().setGithubReviewModel(settings.githubReviewModel)
       if (settings.pipelineDefaultAutonomy === 'manual' || settings.pipelineDefaultAutonomy === 'gated' || settings.pipelineDefaultAutonomy === 'auto') {
         useStore.getState().setPipelineDefaultAutonomy(settings.pipelineDefaultAutonomy)
       }
@@ -300,8 +303,18 @@ export function App(): JSX.Element {
       store.setGithubAuthLost(false)
     })
     const unsubAuth = window.api.onGithubAuthLost(() => useStore.getState().setGithubAuthLost(true))
-    return () => { unsubItems(); unsubAuth() }
+    const unsubAdopted = window.api.onGithubAgentAdopted(({ sessionId }) =>
+      useStore.getState().adoptGithubSession(sessionId)
+    )
+    return () => { unsubItems(); unsubAuth(); unsubAdopted() }
   }, [])
+
+  // Report which session's terminal the user is looking at (null on the graph)
+  // — main uses it for GitHub-agent focus-aware teardown ("watching" = exactly
+  // this, not the ⌘P overview or the panel).
+  useEffect(() => {
+    window.api.notifyFocusedSession(viewMode !== 'graph' ? focusedSessionId : null)
+  }, [viewMode, focusedSessionId])
 
   // Prompt-time memory injection: record which notes landed in each session so
   // the transcript's "[title]" tokens can be linkified (Terminal link provider).
@@ -343,8 +356,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, archiveInactiveSessions, archiveInactiveMinutes, observerEnabled, githubStateFilter, githubRangeFilter, githubAutoReview } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, archiveInactiveSessions, archiveInactiveMinutes, observerEnabled, githubStateFilter, githubRangeFilter, githubAutoReview])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, archiveInactiveSessions, archiveInactiveMinutes, observerEnabled, githubStateFilter, githubRangeFilter, githubAutoReview, githubReviewModel } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, archiveInactiveSessions, archiveInactiveMinutes, observerEnabled, githubStateFilter, githubRangeFilter, githubAutoReview, githubReviewModel])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -1336,8 +1349,8 @@ export function App(): JSX.Element {
 
   // Listen for sessions spawned externally (via MCP)
   useEffect(() => {
-    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline, isScheduled }) => {
-      addSession(id, projectPath, claudeSessionId ?? null, { isPipeline: !!isPipeline, isScheduled: !!isScheduled })
+    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline, isScheduled, isGithub }) => {
+      addSession(id, projectPath, claudeSessionId ?? null, { isPipeline: !!isPipeline, isScheduled: !!isScheduled, isGithub: !!isGithub })
     })
     return unsubscribe
   }, [addSession])
@@ -1781,19 +1794,33 @@ export function App(): JSX.Element {
         onClose={() => setActivePanel(null)}
       />
 
-      {/* Pending-insights badge — a quiet pill, not a notification. Only on the
-          graph (nothing to interrupt there) and only when the observer has
-          something waiting. Clicking opens the overview it lives in. */}
-      {viewMode === 'graph' && !activePanel && (observerPendingCount > 0) && (
-        <button
-          onClick={() => setActivePanel('overview')}
-          className="absolute bottom-4 right-4 z-[26] flex items-center gap-1.5 rounded-full border border-fuchsia-700/50 bg-fuchsia-950/70 px-3 py-1.5 text-[11px] text-fuchsia-300 shadow-lg backdrop-blur transition-colors hover:border-fuchsia-400"
-          title={`${observerPendingCount} suggestion${observerPendingCount === 1 ? '' : 's'} waiting — ${formatHotkey(hotkeys.openOverview)}`}
-        >
-          <span>✦</span>
-          <span className="tabular-nums">{observerPendingCount}</span>
-          <span className="text-fuchsia-400/70">insight{observerPendingCount === 1 ? '' : 's'}</span>
-        </button>
+      {/* Quiet graph-corner pills — not notifications. Only on the graph
+          (nothing to interrupt there); each opens the panel it lives in. */}
+      {viewMode === 'graph' && !activePanel && (observerPendingCount > 0 || githubDraftsCount > 0) && (
+        <div className="absolute bottom-4 right-4 z-[26] flex flex-col items-end gap-2">
+          {githubDraftsCount > 0 && (
+            <button
+              onClick={() => setActivePanel('github')}
+              className="flex items-center gap-1.5 rounded-full border border-amber-700/50 bg-amber-950/70 px-3 py-1.5 text-[11px] text-amber-300 shadow-lg backdrop-blur transition-colors hover:border-amber-400"
+              title={`${githubDraftsCount} GitHub draft${githubDraftsCount === 1 ? '' : 's'} awaiting your review — ${formatHotkey(hotkeys.toggleGithub)}`}
+            >
+              <span>⎇</span>
+              <span className="tabular-nums">{githubDraftsCount}</span>
+              <span className="text-amber-400/70">draft{githubDraftsCount === 1 ? '' : 's'} ready</span>
+            </button>
+          )}
+          {observerPendingCount > 0 && (
+            <button
+              onClick={() => setActivePanel('overview')}
+              className="flex items-center gap-1.5 rounded-full border border-fuchsia-700/50 bg-fuchsia-950/70 px-3 py-1.5 text-[11px] text-fuchsia-300 shadow-lg backdrop-blur transition-colors hover:border-fuchsia-400"
+              title={`${observerPendingCount} suggestion${observerPendingCount === 1 ? '' : 's'} waiting — ${formatHotkey(hotkeys.openOverview)}`}
+            >
+              <span>✦</span>
+              <span className="tabular-nums">{observerPendingCount}</span>
+              <span className="text-fuchsia-400/70">insight{observerPendingCount === 1 ? '' : 's'}</span>
+            </button>
+          )}
+        </div>
       )}
 
       {/* Sessions overview (Cmd+P) */}

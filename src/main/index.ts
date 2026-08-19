@@ -13,6 +13,7 @@ import { getScheduleClaudeSessionIds } from './schedule-store'
 import { startHookServer, stopHookServer, runGithubAgent, githubAutoModeFor } from './hook-server'
 import { startScheduler, stopScheduler } from './scheduler'
 import { startGithubPoller, stopGithubPoller, configureGithubAutoStart } from './github-poller'
+import { clearAllAgentLive } from './github-store'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
 import { initMemoryEmbeddings, reindexAll } from './memory/embeddings-runtime'
@@ -345,6 +346,9 @@ app.whenReady().then(async () => {
   // Auto-start is injected (not imported by the poller) to avoid the
   // hook-server → github-actions → github-poller cycle.
   configureGithubAutoStart(runGithubAgent, githubAutoModeFor)
+  // No PTY survives a restart — clear orphaned "agent live" markers so the
+  // panel never offers Watch on a dead session.
+  clearAllAgentLive()
   startGithubPoller()
   // The observer watches app usage and proposes automations. Debt-based and
   // idle-gated (see observer/jobs.ts) — nothing fires while the user is busy.

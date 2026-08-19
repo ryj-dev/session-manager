@@ -50,6 +50,11 @@ export type SessionKind =
    */
   | 'preview'
 
+  /** A background PR review/fix agent owned by the GitHub panel (Cmd+G). Runs
+   *  headless off the graph; torn down when it delivers its response, with the
+   *  conversation kept resumable from the panel's Discuss button. */
+  | 'github'
+
 export type RegistryStatus = 'working' | 'idle' | 'permission' | 'zombie' | 'unknown'
 
 /** Origin metadata attached to a live session at spawn time. */

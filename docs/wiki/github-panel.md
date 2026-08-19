@@ -39,6 +39,18 @@ A `401` mid-flight (rotated/revoked token) never goes silently stale: the poller
 
 Under **draft** mode (and for all manual starts) the response lands on the item as a **"Draft ready"** block — view it, then **Submit** (the app posts the review, or pushes the commits + posts the replies, using your token) or **Discard**. Under **auto** mode the app submits immediately. A pending draft is never hidden by filters; failed submissions keep the draft for retry; submitted items show a "✓ responded" record.
 
+**Agents run in the background, off the graph** (like scheduled runs); mid-run they're visible in the ⌘P overview under "GitHub agents", and their panel card shows a pulsing **Watch live** button that opens the working terminal. Results surface via the amber **"N drafts ready"** pill in the graph's corner (like the insights pill) — no native notifications.
+
+**Session lifecycle** (focus-aware):
+- Finishes while you're NOT watching → PTY torn down; conversation kept resumable.
+- Finishes while you ARE watching (its terminal is your focused view — the ⌘P overview and the panel don't count) → stays open so you can start talking.
+- Watched but you navigate away without engaging → torn down once idle + away.
+- **You send it a prompt (any time) → adopted**: it becomes a normal graph session, never auto-closes, and ages like any other session.
+
+The conversation always stays resumable after teardown — **Discuss** on the draft block / responded record re-opens it focused, so you can question the reasoning or ask for revisions ("soften comment 2, then respond again" — a re-respond replaces the draft). Note that spawning an agent marks the thread read on GitHub — with auto-review on, the "needs your attention" signal is the **Drafts awaiting your review** section (always sorted first, above Unread activity), not the unread dot.
+
+The agent's **model** is configurable in Settings → GitHub auto-review (haiku/sonnet/opus/fable, or default = your current model).
+
 ### Auto-start rules (Settings → GitHub auto-review)
 
 Per event kind — review requests / mentions / comments on my PRs — choose **Off** (manual buttons only, the default), **Draft** (auto-spawn, you approve the result), or **Auto** (auto-spawn and post directly). Safeguards: one active agent per item, self-echo suppression (activity authored by your own login never triggers a spawn), and only open/draft PRs qualify. An approval with no comments generates no response — it just sits in Unread activity until seen.

@@ -237,7 +237,7 @@ const api = {
     ipcRenderer.invoke('claude:setStatuslineConfig', elements, customComponents),
 
   // Session spawned externally (via MCP)
-  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean; isScheduled?: boolean }) => void) => {
+  onSessionSpawned: (callback: (data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean; isScheduled?: boolean; isGithub?: boolean }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { id: string; projectPath: string; claudeSessionId?: string | null; isPipeline?: boolean; isScheduled?: boolean }) => callback(data)
     ipcRenderer.on('session:spawned', handler)
     return (): void => { ipcRenderer.removeListener('session:spawned', handler) }
@@ -389,6 +389,15 @@ const api = {
     ipcRenderer.on('github:authLost', handler)
     return (): void => { ipcRenderer.removeListener('github:authLost', handler) }
   },
+  onGithubAgentAdopted: (callback: (data: { sessionId: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { sessionId: string }) => callback(data)
+    ipcRenderer.on('github:agentAdopted', handler)
+    return (): void => { ipcRenderer.removeListener('github:agentAdopted', handler) }
+  },
+  // Which session's terminal the user is looking at (null on the graph) —
+  // drives GitHub-agent focus-aware teardown in main.
+  notifyFocusedSession: (id: string | null): void =>
+    ipcRenderer.send('ui:focusedSession', id),
 
   // Canvas artifacts. State lives in main (canvas-store); the renderer mirrors
   // it via 'canvas:changed'. 'canvas:emitted' carries each NEW artifact (drives

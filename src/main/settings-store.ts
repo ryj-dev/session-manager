@@ -95,6 +95,9 @@ export interface AppSettings {
    *  auto-spawn an agent whose response lands as a draft awaiting Submit;
    *  'auto' = agent's response is submitted immediately. */
   githubAutoReview?: GithubAutoReviewRules
+  /** Model for GitHub review/fix agents: alias (haiku|sonnet|opus|fable) or a
+   *  full model id. Empty/undefined = inherit the user's current default. */
+  githubReviewModel?: string
 }
 
 export type GithubAutoMode = 'off' | 'draft' | 'auto'
@@ -146,6 +149,7 @@ const defaults: AppSettings = {
   githubStateFilter: 'active',
   githubRangeFilter: 'week',
   githubAutoReview: { ...defaultGithubAutoReview },
+  githubReviewModel: '',
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {
