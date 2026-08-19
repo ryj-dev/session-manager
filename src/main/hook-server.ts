@@ -167,13 +167,13 @@ interface HookPayload {
    *  user-sent image paths on the canvas). */
   prompt?: string
   /** Path to the session's transcript JSONL — present on every hook event.
-   *  Captured for the Share Turn feature (turn reconstruction). */
+   *  Captured for Share Turn (turn reconstruction) and, for observed session
+   *  kinds, noted into the observer's digest queue. */
   transcript_path?: string
   /** PreToolUse/PostToolUse: which tool is about to run / just ran. */
   tool_name?: string
-  /** PreToolUse: the tool's arguments. For Bash this is the exact command —
-   *  the observer's highest-signal source. Normalised + secret-redacted by
-   *  observer/capture before anything is persisted. */
+  /** PreToolUse: the tool's arguments (used by the archiver's background-work
+   *  classifier; the observer no longer records tool use). */
   tool_input?: unknown
 }
 

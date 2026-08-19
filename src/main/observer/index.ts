@@ -110,7 +110,10 @@ export function startObserver(): void {
 
   // Catch-up: sessions that were live when the app last quit never hit a
   // teardown path, so their queue rows are still 'open'. Flip them now.
-  if (observerEnabled()) catchUpDigestQueue()
+  // Unconditional — rows only ever exist from a period when the observer was
+  // enabled, and flipping their state generates nothing; the drain itself
+  // stays behind the toggle.
+  catchUpDigestQueue()
 
   registerJob({
     id: 'digests',

@@ -381,11 +381,9 @@ function formatSuggestions(
 // The gate itself lives in observer/role-gate.ts (a leaf module, so the tests
 // can exercise it without connecting a stdio transport).
 //
-// This server does NOT report tool usage to the observer. It used to, via a
-// fire-and-forget beacon over an allowlist of 22 tool names — but the app's
-// PreToolUse hook already sees every tool call from every MCP server, so the
-// beacon only ever produced a duplicate event under a second, different token.
-// Capture happens once, in observer/capture.ts.
+// This server does NOT report tool usage to the observer. V2 captures no
+// events at all — the observer's only signal is session-transcript digests,
+// produced by the app after a session ends (see observer/digests.ts).
 
 /** Non-empty when this MCP server belongs to a background observer run. */
 const OBSERVER_ROLE = process.env.SM_OBSERVER_ROLE || null
