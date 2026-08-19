@@ -444,7 +444,7 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
                       type="checkbox"
                       checked={turnShareDefaults[key]}
                       onChange={(e) => setTurnShareDefaults({ ...turnShareDefaults, [key]: e.target.checked })}
-                      className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-zinc-500"
+                      className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
                     />
                     <span className="text-xs text-zinc-300">{label}</span>
                   </label>
