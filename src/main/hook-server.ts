@@ -22,6 +22,11 @@ import * as observer from './observer/capture'
 import { authorizeSuggestRequest, endCuratorRun, ingestSuggestion, isCuratorSession } from './observer'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 import { buildMemoryInjection } from './memory-injection'
+import * as githubStore from './github-store'
+import { submitDraft as githubSubmitDraft, putDraft as githubPutDraft, resolveRepoPath as githubResolveRepoPath } from './github-actions'
+import { markThreadRead as githubMarkThreadRead } from './github-poller'
+import { getAuthStatus as githubAuthStatus, getActiveToken as githubActiveToken, apiHeaders as githubApiHeaders } from './github-auth'
+import type { GithubAutoMode } from './settings-store'
 
 let server: Server | null = null
 let serverPort = 0
@@ -320,6 +325,13 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/schedules/delete')      { handleScheduleDelete(body, res); return }
 
         // ── Canvas endpoints (called by the canvas MCP tools) ──
+        // GitHub panel (MCP tools github-inbox / github-get-item /
+        // github-respond / github-mark-read).
+        if (url.pathname === '/github/inbox')     { handleGithubInbox(body, res); return }
+        if (url.pathname === '/github/get-item')  { handleGithubGetItem(body, res); return }
+        if (url.pathname === '/github/respond')   { void handleGithubRespond(body, res); return }
+        if (url.pathname === '/github/mark-read') { void handleGithubMarkRead(body, res); return }
+
         if (url.pathname === '/canvas/emit')    { handleCanvasEmit(body, res); return }
         if (url.pathname === '/canvas/focus')   { handleCanvasFocus(body, res); return }
         if (url.pathname === '/canvas/list')    { handleCanvasList(body, res); return }
@@ -756,6 +768,232 @@ export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string 
 
   console.log(`[hook-server] ran scheduled task ${schedule.id} as session ${id} in ${cwd}`)
   return id
+}
+
+// ── GitHub agent spawn (manual buttons + poller auto-start) ─────────────────
+
+// One active agent per GitHub item: a second trigger while a session is still
+// alive is skipped (the running agent will see the newer activity itself).
+const githubItemSessions = new Map<string, string>()
+
+/** The kind-specific brief. Both kinds respond through the github-respond MCP
+ *  tool — the draft-gate is enforced by the app (github-actions), so the agent
+ *  is TOLD it cannot post directly and gh is for reading only. */
+function githubAgentPrompt(item: githubStore.GithubItem, repoPath: string): string {
+  const respondRules =
+    `When your response is ready, call the \`mcp__session-manager__github-respond\` MCP tool with itemId "${item.id}". ` +
+    `The app decides whether it is stored as a draft for the user to approve or submitted immediately — that is not your choice. ` +
+    `NEVER post reviews, comments, or pushes to GitHub yourself (no \`gh pr review\`, no \`gh api\` writes, no \`git push\`) — ` +
+    `the \`gh\` CLI is for READING only. If you have nothing worth responding to, say so and stop without calling the tool.`
+
+  if (item.kind === 'my-pr-activity') {
+    return (
+      `PR #${item.prNumber} in ${item.repo} ("${item.title}") is my PR and has new review comments/feedback.\n\n` +
+      `1. Read the feedback: \`gh pr view ${item.prNumber} --repo ${item.repo} --comments\` and the review threads via \`gh api repos/${item.repo}/pulls/${item.prNumber}/comments\` (note each comment's numeric id).\n` +
+      `2. If the feedback needs code changes: check out the PR branch (\`gh pr checkout ${item.prNumber} --repo ${item.repo}\`; stop and report if the working tree is dirty), implement the fixes, and COMMIT LOCALLY — do NOT push.\n` +
+      `3. Call github-respond with type "reply-with-fixes": per-thread \`replies\` (commentId + body), \`commitsReady: true\` and \`repoPath: "${repoPath}"\` if you committed, or just a \`body\` comment if no code change was needed.\n\n` +
+      respondRules
+    )
+  }
+  const kindLine = item.kind === 'review-request' ? 'My review was requested on' : 'I was mentioned on'
+  return (
+    `${kindLine} PR #${item.prNumber} in ${item.repo} ("${item.title}" by ${item.author}).\n\n` +
+    `1. Read the PR: \`gh pr view ${item.prNumber} --repo ${item.repo} --comments\` and \`gh pr diff ${item.prNumber} --repo ${item.repo}\`.\n` +
+    `2. Review the diff for correctness, bugs, security, architecture and tests — read surrounding code in this checkout wherever the diff alone is ambiguous.\n` +
+    `3. Call github-respond with type "review": a \`verdict\` (approve | request-changes | comment), a \`body\` summary, and \`comments\` [{path, line, body}] for line-anchored findings.\n\n` +
+    respondRules
+  )
+}
+
+/** True when the newest activity on the thread was authored by the connected
+ *  login — an echo of something we (or the user) just posted. Best-effort:
+ *  unknown shapes return false (don't suppress). */
+async function isSelfEcho(item: githubStore.GithubItem): Promise<boolean> {
+  if (!item.latestCommentUrl) return false
+  try {
+    const auth = await githubActiveToken()
+    if (!auth) return false
+    const status = await githubAuthStatus()
+    if (!status.login) return false
+    const res = await fetch(item.latestCommentUrl, { headers: githubApiHeaders(auth.token) })
+    if (!res.ok) return false
+    const comment = (await res.json()) as { user?: { login?: string } }
+    return comment.user?.login === status.login
+  } catch {
+    return false
+  }
+}
+
+/** Spawn the review/fix agent for a GitHub item. Shared by the panel buttons
+ *  (mode-agnostic — the draft/auto decision happens at respond time) and the
+ *  poller's auto-start (which checks the rules first). Returns the session id,
+ *  or null when skipped (no checkout, agent already running, self-echo). */
+export async function runGithubAgent(
+  itemId: string,
+  opts: { skipSelfEcho?: boolean } = {},
+): Promise<{ sessionId: string } | { skipped: string }> {
+  const item = githubStore.getItem(itemId)
+  if (!item) throw new Error(`Unknown GitHub item ${itemId}`)
+
+  const existing = githubItemSessions.get(itemId)
+  if (existing && getSession(existing)) return { skipped: 'an agent session for this item is still running' }
+
+  if (opts.skipSelfEcho && (await isSelfEcho(item))) {
+    return { skipped: 'latest activity is our own submission (self-echo)' }
+  }
+
+  const cwd = githubResolveRepoPath(item.repo)
+  if (!cwd) {
+    return { skipped: `no local checkout of ${item.repo} under the base projects folder` }
+  }
+
+  const id = randomUUID()
+  const prompt = githubAgentPrompt(item, cwd)
+  const session = spawnSession(id, cwd, 'claude', ['--permission-mode', 'auto', '--', prompt])
+  if (attachListenersFn) attachListenersFn(id, session)
+
+  const win = BrowserWindow.getAllWindows()[0]
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('session:spawned', {
+      id,
+      projectPath: cwd,
+      claudeSessionId: session.claudeSessionId ?? null,
+    })
+  }
+  registry.setOrigin(id, {
+    kind: 'user',
+    label: `GitHub · ${item.repo}#${item.prNumber}`,
+  })
+  githubItemSessions.set(itemId, id)
+  // Spawning the agent means the item is being handled — clear unread on
+  // GitHub (read back, GitHub stays the source of truth).
+  void githubMarkThreadRead(itemId)
+  console.log(`[hook-server] spawned github agent for ${item.repo}#${item.prNumber} as session ${id}`)
+  return { sessionId: id }
+}
+
+/** Look up the auto-review mode for an item kind from settings. */
+export function githubAutoModeFor(kind: githubStore.GithubItemKind): GithubAutoMode {
+  const rules = loadSettings().githubAutoReview
+  if (!rules) return 'off'
+  if (kind === 'review-request') return rules.reviewRequest
+  if (kind === 'mention') return rules.mention
+  return rules.myPrActivity
+}
+
+// ── GitHub HTTP handlers (MCP tool backends) ────────────────────────────────
+
+function githubCounts(): { unreadByKind: Record<string, number>; unreadTotal: number; activeTotal: number; draftsPending: number } {
+  const items = githubStore.getItems()
+  const unreadByKind: Record<string, number> = { 'review-request': 0, mention: 0, 'my-pr-activity': 0 }
+  let unreadTotal = 0
+  let activeTotal = 0
+  let draftsPending = 0
+  for (const i of items) {
+    if (i.unread) { unreadByKind[i.kind] += 1; unreadTotal += 1 }
+    if (i.prState === 'open' || i.prState === 'draft') activeTotal += 1
+    if (i.draft) draftsPending += 1
+  }
+  return { unreadByKind, unreadTotal, activeTotal, draftsPending }
+}
+
+function handleGithubInbox(body: string, res: ServerResponse): void {
+  try {
+    const filters = readJson<{
+      kind?: githubStore.GithubItemKind
+      unread?: boolean
+      prState?: githubStore.GithubItem['prState']
+      repo?: string
+      since?: string
+    }>(body || '{}')
+    let items = githubStore.getItems()
+    if (filters.kind) items = items.filter((i) => i.kind === filters.kind)
+    if (filters.unread !== undefined) items = items.filter((i) => i.unread === filters.unread)
+    if (filters.prState) items = items.filter((i) => i.prState === filters.prState)
+    if (filters.repo) items = items.filter((i) => i.repo.toLowerCase() === filters.repo!.toLowerCase())
+    if (filters.since) items = items.filter((i) => i.updatedAt >= filters.since!)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ counts: githubCounts(), items }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+function handleGithubGetItem(body: string, res: ServerResponse): void {
+  try {
+    const { itemId } = readJson<{ itemId: string }>(body)
+    const item = githubStore.getItem(itemId)
+    res.writeHead(item ? 200 : 404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(item ?? { error: `GitHub item ${itemId} not found` }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+async function handleGithubRespond(body: string, res: ServerResponse): Promise<void> {
+  try {
+    const payload = readJson<{
+      itemId: string
+      type: 'review' | 'reply-with-fixes'
+      verdict?: 'approve' | 'request-changes' | 'comment'
+      body: string
+      comments?: { path: string; line: number; body: string }[]
+      replies?: { commentId: number; body: string }[]
+      commitsReady?: boolean
+      repoPath?: string
+      sessionId?: string
+    }>(body)
+    const item = githubStore.getItem(payload.itemId)
+    if (!item) {
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `GitHub item ${payload.itemId} not found` }))
+      return
+    }
+    const draft: githubStore.GithubDraft = {
+      type: payload.type,
+      verdict: payload.verdict,
+      body: payload.body,
+      comments: payload.comments,
+      replies: payload.replies,
+      commitsReady: payload.commitsReady,
+      repoPath: payload.repoPath,
+      sessionId: payload.sessionId ?? null,
+      createdAt: new Date().toISOString(),
+    }
+    githubPutDraft(payload.itemId, draft)
+
+    // The MODE decides what happens next — the calling agent does not.
+    // 'auto' → submit right now; 'draft' and 'off' → stored, user approves.
+    const mode = githubAutoModeFor(item.kind)
+    if (mode === 'auto') {
+      const summary = await githubSubmitDraft(payload.itemId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ status: 'submitted', summary }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      status: 'draft-stored',
+      summary: 'Draft stored on the item — the user will review and submit it from the GitHub panel. Do not attempt to post it another way.',
+    }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+async function handleGithubMarkRead(body: string, res: ServerResponse): Promise<void> {
+  try {
+    const { itemId } = readJson<{ itemId: string }>(body)
+    await githubMarkThreadRead(itemId)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ ok: true }))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
 }
 
 // ── Pipeline orchestrator spawn ─────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type RegistryEntry, type InjectedMemory } from './store'
+import { useStore, defaultHotkeys, defaultTurnShareDefaults, artifactsForSession, type HotkeyMap, type PipelineTask, type ScheduledTask, type CanvasArtifact, type TurnShareDefaults, type RegistryEntry, type InjectedMemory, type GithubItem, type GithubAutoReviewRules, defaultGithubAutoReview } from './store'
 import {
   getLeafIds,
   layoutFromBsp,
@@ -25,6 +25,7 @@ import MemoryPanel from './components/memory/MemoryPanel'
 import { NotesPanel } from './components/notes/NotesPanel'
 import { PipelineView } from './components/pipeline/PipelineView'
 import { ScheduledTasksView } from './components/scheduled/ScheduledTasksView'
+import { GithubPanel } from './components/github/GithubPanel'
 import { OverviewPanel } from './components/overview/OverviewPanel'
 import { MessagePopup } from './components/MessagePopup'
 import { MemoryExpansionOverlay } from './components/MemoryExpansionOverlay'
@@ -192,6 +193,9 @@ export function App(): JSX.Element {
   const completedFilter = useStore((s) => s.completedFilter)
   const turnExportFolder = useStore((s) => s.turnExportFolder)
   const turnShareDefaults = useStore((s) => s.turnShareDefaults)
+  const githubStateFilter = useStore((s) => s.githubStateFilter)
+  const githubRangeFilter = useStore((s) => s.githubRangeFilter)
+  const githubAutoReview = useStore((s) => s.githubAutoReview)
 
   // Settings
   const [showSettings, setShowSettings] = useState(false)
@@ -235,6 +239,15 @@ export function App(): JSX.Element {
       if (settings.completedFilter === 'all' || settings.completedFilter === 'day' || settings.completedFilter === 'week' || settings.completedFilter === 'month') {
         useStore.getState().setCompletedFilter(settings.completedFilter)
       }
+      if (settings.githubStateFilter === 'active' || settings.githubStateFilter === 'all') {
+        useStore.getState().setGithubStateFilter(settings.githubStateFilter)
+      }
+      if (settings.githubRangeFilter === 'day' || settings.githubRangeFilter === 'week' || settings.githubRangeFilter === 'month' || settings.githubRangeFilter === 'all') {
+        useStore.getState().setGithubRangeFilter(settings.githubRangeFilter)
+      }
+      if (settings.githubAutoReview && typeof settings.githubAutoReview === 'object') {
+        useStore.getState().setGithubAutoReview({ ...defaultGithubAutoReview, ...(settings.githubAutoReview as Partial<GithubAutoReviewRules>) })
+      }
       if (settings.pipelineDefaultAutonomy === 'manual' || settings.pipelineDefaultAutonomy === 'gated' || settings.pipelineDefaultAutonomy === 'auto') {
         useStore.getState().setPipelineDefaultAutonomy(settings.pipelineDefaultAutonomy)
       }
@@ -260,6 +273,24 @@ export function App(): JSX.Element {
     window.api.schedulesList().then((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
     const unsub = window.api.onSchedulesChanged((tasks) => useStore.getState().setScheduledTasks(tasks as ScheduledTask[]))
     return unsub
+  }, [])
+
+  // GitHub panel mirror: items via 'github:changed', auth loss via
+  // 'github:authLost' (401 with no working fallback — panel shows reconnect).
+  useEffect(() => {
+    window.api.githubList().then((res) => {
+      const { items, authLost } = res as { items: GithubItem[]; authLost: boolean }
+      const store = useStore.getState()
+      store.setGithubItems(items)
+      store.setGithubAuthLost(authLost)
+    })
+    const unsubItems = window.api.onGithubChanged((items) => {
+      const store = useStore.getState()
+      store.setGithubItems(items as GithubItem[])
+      store.setGithubAuthLost(false)
+    })
+    const unsubAuth = window.api.onGithubAuthLost(() => useStore.getState().setGithubAuthLost(true))
+    return () => { unsubItems(); unsubAuth() }
   }, [])
 
   // Prompt-time memory injection: record which notes landed in each session so
@@ -302,8 +333,8 @@ export function App(): JSX.Element {
   // Persist settings whenever they change (only after initial load to avoid overwriting)
   useEffect(() => {
     if (!settingsLoadedRef.current) return
-    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit } as unknown as Parameters<typeof window.api.saveSettings>[0])
-  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit])
+    window.api.saveSettings({ baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys: hotkeys as unknown as Record<string, string>, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, githubStateFilter, githubRangeFilter, githubAutoReview } as unknown as Parameters<typeof window.api.saveSettings>[0])
+  }, [baseProjectsDir, autoFocusOnSpawn, persistExplorerPath, explorerFollowsProject, colorExplorerByProject, hotkeys, messagePopup, messagePopupSeconds, todosShowCompleted, todosSelectedTags, todosDetailWidth, autoModeForChildSessions, autoModeForManualSessions, autoModeForRestoredSessions, ambientTodoNudge, injectSpinnerTips, memoryInjectionMode, memoryInjectionSessionCap, memoryInjectionThreshold, canvasAutoShowUserImages, spawnIntoCurrentSplit, terminalPairingMode, pipelineDefaultAutonomy, completedFilter, turnExportFolder, turnShareDefaults, openBranchInSplit, githubStateFilter, githubRangeFilter, githubAutoReview])
 
   // Persist split groups whenever they change. Members are translated to
   // claudeSessionId so the file is meaningful across restarts. Groups
@@ -1099,6 +1130,12 @@ export function App(): JSX.Element {
         return
       }
 
+      if (key === hotkeys.toggleGithub) {
+        e.preventDefault()
+        setActivePanel(activePanel === 'github' ? null : 'github')
+        return
+      }
+
       if (key === hotkeys.openOverview) {
         e.preventDefault()
         // Full-panel overview of every live session, whatever spawned it.
@@ -1659,6 +1696,12 @@ export function App(): JSX.Element {
       {/* Scheduled tasks (Cmd+J) */}
       <ScheduledTasksView
         visible={activePanel === 'scheduled'}
+        onClose={() => setActivePanel(null)}
+      />
+
+      {/* GitHub PRs & reviews (Cmd+G) */}
+      <GithubPanel
+        visible={activePanel === 'github'}
         onClose={() => setActivePanel(null)}
       />
 

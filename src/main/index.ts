@@ -9,8 +9,9 @@ import { getResumableSessions, killAllSessions, onClaudeSessionIdChange } from '
 import { saveSessions, type SavedSession } from './session-store'
 import { getPipelineClaudeSessionIds } from './pipeline-store'
 import { getScheduleClaudeSessionIds } from './schedule-store'
-import { startHookServer, stopHookServer } from './hook-server'
+import { startHookServer, stopHookServer, runGithubAgent, githubAutoModeFor } from './hook-server'
 import { startScheduler, stopScheduler } from './scheduler'
+import { startGithubPoller, stopGithubPoller, configureGithubAutoStart } from './github-poller'
 import { cleanupAllSkillCommands } from './fs-service'
 import { startMemoryWatcher, stopMemoryWatcher } from './memory/watcher'
 import { initMemoryEmbeddings, reindexAll } from './memory/embeddings-runtime'
@@ -109,6 +110,7 @@ function saveAndCleanup(): void {
   killAllSessions()
   cleanupAllSkillCommands()
   stopScheduler()
+  stopGithubPoller()
   stopObserver()
   stopHookServer()
   stopMemoryWatcher()
@@ -334,6 +336,12 @@ app.whenReady().then(async () => {
   registerIpcHandlers({ reinstallMcp: doRegisterMcp })
   createWindow()
   startScheduler()
+  // Polls GitHub notifications for the PR panel; no-ops (with an auth-lost
+  // broadcast) until a token is available via gh CLI or an explicit connect.
+  // Auto-start is injected (not imported by the poller) to avoid the
+  // hook-server → github-actions → github-poller cycle.
+  configureGithubAutoStart(runGithubAgent, githubAutoModeFor)
+  startGithubPoller()
   // The observer watches app usage and proposes automations. Debt-based and
   // idle-gated (see observer/jobs.ts) — nothing fires while the user is busy.
   startObserver()

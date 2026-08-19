@@ -25,6 +25,8 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const completedFilter = useStore((s) => s.completedFilter)
   const setCompletedFilter = useStore((s) => s.setCompletedFilter)
   const pipelineDefaultAutonomy = useStore((s) => s.pipelineDefaultAutonomy)
+  const githubAutoReview = useStore((s) => s.githubAutoReview)
+  const setGithubAutoReview = useStore((s) => s.setGithubAutoReview)
   const setPipelineDefaultAutonomy = useStore((s) => s.setPipelineDefaultAutonomy)
   const messagePopup = useStore((s) => s.messagePopup)
   const setMessagePopup = useStore((s) => s.setMessagePopup)
@@ -308,6 +310,32 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               <p className="text-[10px] text-zinc-600 mt-1">
                 The orchestrator&apos;s default decision-making freedom. Per-task autonomy can still be changed inside the pipeline ({pipelineKey}) when you open a task.
               </p>
+            </div>
+
+            {/* GitHub auto-review */}
+            <div className="mb-4">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">GitHub auto-review</div>
+              <p className="text-[10px] text-zinc-600 mb-2">
+                When new PR activity arrives, spawn a Claude agent automatically. <span className="text-zinc-500">Draft</span> = its response waits for your Submit in the GitHub panel; <span className="text-zinc-500">Auto</span> = posted immediately under your name.
+              </p>
+              {([
+                ['reviewRequest', 'Review requests'],
+                ['mention', 'Mentions'],
+                ['myPrActivity', 'Comments on my PRs'],
+              ] as const).map(([key, label]) => (
+                <div key={key} className="flex items-center gap-2 mb-1.5">
+                  <label className="text-xs text-zinc-400 flex-1">{label}</label>
+                  <select
+                    value={githubAutoReview[key]}
+                    onChange={(e) => setGithubAutoReview({ ...githubAutoReview, [key]: e.target.value as 'off' | 'draft' | 'auto' })}
+                    className="w-44 px-2 py-1.5 bg-zinc-800 border border-zinc-700 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-zinc-500 appearance-none cursor-pointer"
+                  >
+                    <option value="off">Off — manual only</option>
+                    <option value="draft">Draft — I approve</option>
+                    <option value="auto">Auto — post directly</option>
+                  </select>
+                </div>
+              ))}
             </div>
 
             {/* Share turn */}

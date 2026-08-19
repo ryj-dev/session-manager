@@ -12,6 +12,8 @@
  */
 
 import { join } from 'path'
+import { loadSettings } from '../settings-store'
+import { formatHotkey } from '../claude-tips'
 import * as scheduleStore from '../schedule-store'
 import * as notesManager from '../notes-manager'
 import { readNote, writeNote } from '../memory/store'
@@ -90,11 +92,14 @@ function applyScheduledTask(s: SuggestionRow, defaultProjectPath: string | null)
     launch,
     recurrence,
     // Created DISABLED. A suggestion the user accepted in one click should not
-    // silently start firing a Claude session on a timer — they enable it in ⌘J
-    // once they've read the prompt.
+    // silently start firing a Claude session on a timer — they enable it in
+    // the scheduled-tasks panel once they've read the prompt.
     enabled: false,
   })
-  return { ok: true, message: `Created scheduled task "${task.name}" (disabled — enable it in ⌘J when you're happy with the prompt)` }
+  // Live binding, not a hardcoded "⌘J" — the hotkey is user-rebindable and
+  // the base modifier differs on Windows.
+  const scheduledKey = formatHotkey(loadSettings().hotkeys.toggleScheduled)
+  return { ok: true, message: `Created scheduled task "${task.name}" (disabled — enable it in ${scheduledKey} when you're happy with the prompt)` }
 }
 
 function applyTodo(s: SuggestionRow): ApplyResult {

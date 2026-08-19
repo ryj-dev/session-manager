@@ -1,7 +1,7 @@
 ---
 slug: todos-project-notes
 title: Todos & Project Notes
-summary: A single global todo+note list shared by user and agents, scoped by project: tags, with hybrid search and ambient in-session reminders.
+summary: "A single global todo+note list shared by user and agents, scoped by project: tags, with hybrid search and ambient in-session reminders."
 related: [memory-knowledge-base, agentic-pipeline, hook-integration-status, hotkeys-settings]
 ---
 

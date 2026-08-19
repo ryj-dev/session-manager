@@ -328,6 +328,38 @@ const api = {
     return (): void => { ipcRenderer.removeListener('schedules:changed', handler) }
   },
 
+  // GitHub integration (PR panel). Auth + items live in main (github-auth /
+  // github-store, fed by github-poller); the renderer mirrors items via
+  // 'github:changed' and auth loss via 'github:authLost'. Mirrors the
+  // schedules* API above.
+  openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('shell:openExternal', url),
+  githubStatus: (): Promise<unknown> => ipcRenderer.invoke('github:status'),
+  githubList: (): Promise<unknown> => ipcRenderer.invoke('github:list'),
+  githubConnectToken: (token: string): Promise<unknown> =>
+    ipcRenderer.invoke('github:connectToken', token),
+  githubDeviceStart: (): Promise<unknown> => ipcRenderer.invoke('github:deviceStart'),
+  githubDeviceWait: (): Promise<unknown> => ipcRenderer.invoke('github:deviceWait'),
+  githubDisconnect: (): Promise<unknown> => ipcRenderer.invoke('github:disconnect'),
+  githubRefresh: (): Promise<unknown> => ipcRenderer.invoke('github:refresh'),
+  githubMarkRead: (id: string): Promise<unknown[]> =>
+    ipcRenderer.invoke('github:markRead', id),
+  githubStartAgent: (itemId: string): Promise<{ sessionId: string } | { skipped: string }> =>
+    ipcRenderer.invoke('github:startAgent', itemId),
+  githubSubmitDraft: (itemId: string): Promise<string> =>
+    ipcRenderer.invoke('github:submitDraft', itemId),
+  githubDiscardDraft: (itemId: string): Promise<unknown[]> =>
+    ipcRenderer.invoke('github:discardDraft', itemId),
+  onGithubChanged: (callback: (items: unknown[]) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, items: unknown[]) => callback(items)
+    ipcRenderer.on('github:changed', handler)
+    return (): void => { ipcRenderer.removeListener('github:changed', handler) }
+  },
+  onGithubAuthLost: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('github:authLost', handler)
+    return (): void => { ipcRenderer.removeListener('github:authLost', handler) }
+  },
+
   // Canvas artifacts. State lives in main (canvas-store); the renderer mirrors
   // it via 'canvas:changed'. 'canvas:emitted' carries each NEW artifact (drives
   // auto-open); 'canvas:focus' re-selects an existing one. Mutations flow only

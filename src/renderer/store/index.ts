@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { defaultHotkeysFor, type HotkeyMap } from '../../shared/hotkeys'
 import {
   defaultLayoutFor,
   getLeafIds,
@@ -33,49 +34,14 @@ export interface InjectedMemory {
   body: string
 }
 
-export interface HotkeyMap {
-  spawnSession: string
-  spawnTerminal: string
-  returnToGraph: string
-  toggleExplorer: string
-  toggleAgents: string
-  toggleSkills: string
-  toggleDesign: string
-  openSettings: string
-  toggleMemory: string
-  toggleNotesProject: string
-  toggleNotesGlobal: string
-  copyFilePath: string
-  togglePipeline: string
-  toggleScheduled: string
-  toggleCanvas: string
-  shareTurn: string
-  branchSession: string
-  openOverview: string
-}
+// Hotkey actions + defaults live in src/shared/hotkeys.ts, shared with the
+// main process (settings-store, claude-tips, CLAUDE.md block) so the two
+// sides can never drift apart again.
+export type { HotkeyMap } from '../../shared/hotkeys'
 
-export const defaultHotkeys: HotkeyMap = {
-  spawnSession: 't',
-  spawnTerminal: 'shift+t',
-  returnToGraph: 'w',
-  toggleExplorer: 'e',
-  toggleAgents: 'a',
-  toggleSkills: 's',
-  toggleDesign: 'd',
-  openSettings: 'o',
-  toggleMemory: 'm',
-  toggleNotesProject: 'n',
-  toggleNotesGlobal: 'shift+n',
-  // Mac: Cmd+Opt+C. Windows: Alt+Shift+C (Alt is the base app modifier on Windows,
-  // so 'alt' isn't expressible as an extra; use shift instead).
-  copyFilePath: typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac') ? 'alt+c' : 'shift+c',
-  togglePipeline: 'l',
-  toggleScheduled: 'j',
-  toggleCanvas: 'k',
-  shareTurn: 'shift+s',
-  branchSession: 'b',
-  openOverview: 'p',
-}
+export const defaultHotkeys: HotkeyMap = defaultHotkeysFor(
+  typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac')
+)
 
 export type TurnToolLevel = 'summary' | 'commands' | 'full'
 
@@ -94,7 +60,7 @@ export const defaultTurnShareDefaults: TurnShareDefaults = {
   toolLevel: 'commands',
 }
 
-export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | 'overview' | null
+export type ActivePanel = 'explorer' | 'agents' | 'skills' | 'design' | 'memory' | 'notes' | 'pipeline' | 'scheduled' | 'overview' | 'github' | null
 
 
 export type SessionStatus = 'working' | 'permission' | 'finished' | 'seen' | 'exited'
@@ -267,6 +233,72 @@ export interface ScheduledTask {
   lastRunAt?: string
   /** Run history, capped to the most-recent runs in the main store. */
   runs: ScheduleRun[]
+}
+
+// ---- GitHub integration (PR panel) ----
+// Types mirror the main-process source of truth in src/main/github-store.ts /
+// github-auth.ts. The renderer keeps a mirror refreshed by 'github:changed'.
+
+export type GithubItemKind = 'review-request' | 'mention' | 'my-pr-activity'
+
+/** Mirrors GithubDraft in src/main/github-store.ts. */
+export interface GithubDraft {
+  type: 'review' | 'reply-with-fixes'
+  verdict?: 'approve' | 'request-changes' | 'comment'
+  body: string
+  comments?: { path: string; line: number; body: string }[]
+  replies?: { commentId: number; body: string }[]
+  commitsReady?: boolean
+  repoPath?: string
+  sessionId: string | null
+  createdAt: string
+}
+
+export interface GithubItem {
+  /** GitHub notification thread id — stable per PR per user. */
+  id: string
+  kind: GithubItemKind
+  /** "owner/repo" */
+  repo: string
+  prNumber: number
+  title: string
+  author: string
+  htmlUrl: string
+  prState: 'open' | 'draft' | 'merged' | 'closed'
+  updatedAt: string
+  unread: boolean
+  latestCommentUrl: string | null
+  /** Agent-prepared response awaiting Submit (draft mode). */
+  draft?: GithubDraft | null
+  respondedAt?: string
+  respondedSummary?: string
+}
+
+/** Mirrors GithubAutoMode / GithubAutoReviewRules in src/main/settings-store.ts. */
+export type GithubAutoMode = 'off' | 'draft' | 'auto'
+export interface GithubAutoReviewRules {
+  reviewRequest: GithubAutoMode
+  mention: GithubAutoMode
+  myPrActivity: GithubAutoMode
+}
+export const defaultGithubAutoReview: GithubAutoReviewRules = {
+  reviewRequest: 'off',
+  mention: 'off',
+  myPrActivity: 'off',
+}
+
+/** PR-state filter: 'active' hides merged/closed (the default). */
+export type GithubStateFilter = 'active' | 'all'
+/** How far back to show items, by notification updatedAt. */
+export type GithubRangeFilter = 'day' | 'week' | 'month' | 'all'
+
+export interface GithubAuthStatus {
+  connected: boolean
+  source: 'stored' | 'gh-cli' | null
+  login: string | null
+  scopes: string | null
+  deviceFlowAvailable: boolean
+  error: string | null
 }
 
 // ---- Unified session registry (Cmd+P overview) ----
@@ -658,6 +690,25 @@ export interface AppState {
   /** Fire a schedule immediately; resolves to the spawned session id (or null). */
   runScheduledTaskNow: (id: string) => Promise<string | null>
 
+  // GitHub integration. Main owns auth + items (github-auth/github-store, fed
+  // by github-poller); these mirror via 'github:changed' (wired in App.tsx).
+  githubItems: GithubItem[]
+  setGithubItems: (items: GithubItem[]) => void
+  /** Last-known auth status; null until the first probe resolves. */
+  githubStatus: GithubAuthStatus | null
+  setGithubStatus: (status: GithubAuthStatus | null) => void
+  /** Poller hit a 401 and no fallback token worked — panel shows reconnect. */
+  githubAuthLost: boolean
+  setGithubAuthLost: (lost: boolean) => void
+  /** Panel filters — prefs, persisted in the settings blob (wired in App.tsx). */
+  githubStateFilter: GithubStateFilter
+  setGithubStateFilter: (f: GithubStateFilter) => void
+  githubRangeFilter: GithubRangeFilter
+  setGithubRangeFilter: (f: GithubRangeFilter) => void
+  /** Per-event auto-review modes (settings pref; enforced in main). */
+  githubAutoReview: GithubAutoReviewRules
+  setGithubAutoReview: (rules: GithubAutoReviewRules) => void
+
   // Canvas. Main process owns the artifact list (canvas-store.ts); the mirror is
   // refreshed by 'canvas:changed'. Everything else here is renderer-local UI
   // state: which sessions' docks are open, which artifact is selected per
@@ -1048,6 +1099,20 @@ export const useStore = create<AppState>((set, get) => ({
     window.api.observerUi('schedule.runNow')
     return window.api.schedulesRunNow(id)
   },
+
+  // GitHub integration
+  githubItems: [],
+  setGithubItems: (items) => set({ githubItems: items }),
+  githubStatus: null,
+  setGithubStatus: (status) => set({ githubStatus: status }),
+  githubAuthLost: false,
+  setGithubAuthLost: (lost) => set({ githubAuthLost: lost }),
+  githubStateFilter: 'active',
+  setGithubStateFilter: (f) => set({ githubStateFilter: f }),
+  githubRangeFilter: 'week',
+  setGithubRangeFilter: (f) => set({ githubRangeFilter: f }),
+  githubAutoReview: { ...defaultGithubAutoReview },
+  setGithubAutoReview: (rules) => set({ githubAutoReview: rules }),
 
   // Canvas
   canvasArtifacts: [],

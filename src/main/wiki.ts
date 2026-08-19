@@ -40,7 +40,11 @@ function parseArticle(dir: string, filename: string): WikiArticle | null {
       related: Array.isArray(data.related) ? data.related.map(String) : [],
       body: content.trim(),
     }
-  } catch {
+  } catch (err) {
+    // Loud, not silent: a YAML frontmatter typo once made an article invisible
+    // to every wiki tool with no trace. Returning null still keeps the rest of
+    // the wiki serving.
+    console.warn(`[wiki] failed to parse ${filename} — article will be missing from the wiki:`, err instanceof Error ? err.message : err)
     return null
   }
 }

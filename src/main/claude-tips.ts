@@ -3,6 +3,7 @@ import { join } from 'path'
 import { mkdirSync } from 'fs'
 import { loadSettings } from './settings-store'
 import { atomicWriteSync } from './atomic-write'
+import { formatHotkeyFor } from '../shared/hotkeys'
 
 /**
  * Session Manager spinner tips — injected into Claude Code via its
@@ -14,35 +15,16 @@ import { atomicWriteSync } from './atomic-write'
  * with the wiki itself getting top billing so users learn the docs exist.
  */
 
-/** Renderer hotkeys that aren't in the main-process HotkeyMap defaults
- *  (settings-store predates them). Mirror of renderer store defaults. */
-const EXTRA_HOTKEY_DEFAULTS: Record<string, string> = {
-  togglePipeline: 'l',
-  toggleScheduled: 'j',
-  toggleCanvas: 'k',
-}
-
-const MAC_SYMBOLS: Record<string, string> = { ctrl: '⌃', alt: '⌥', shift: '⇧' }
-const WIN_SYMBOLS: Record<string, string> = { ctrl: 'Ctrl+', alt: 'Alt+', shift: 'Shift+' }
-
-/** Main-process twin of the renderer's formatHotkey: the base app modifier
- *  (Cmd on Mac, Alt on Windows) is implied and always prepended. */
+/** Main-process formatHotkey: the base app modifier (Cmd on Mac, Alt on
+ *  Windows) is implied and always prepended. Delegates to the shared module. */
 export function formatHotkey(raw: string): string {
-  const parts = raw.split('+')
-  const key = parts[parts.length - 1]
-  const modifiers = new Set(parts.slice(0, -1))
-  const isMac = process.platform === 'darwin'
-  let display = isMac ? '⌘' : 'Alt+'
-  for (const mod of ['ctrl', 'alt', 'shift']) {
-    if (modifiers.has(mod)) display += isMac ? MAC_SYMBOLS[mod] : WIN_SYMBOLS[mod]
-  }
-  return display + key.toUpperCase()
+  return formatHotkeyFor(raw, process.platform === 'darwin')
 }
 
-/** Build the tip list from the current hotkey bindings. */
+/** Build the tip list from the current hotkey bindings. All actions are in
+ *  the shared HotkeyMap, so loadSettings() always supplies every key. */
 export function buildTips(hotkeys: Record<string, string>): string[] {
-  const fh = (action: string): string =>
-    formatHotkey(hotkeys[action] ?? EXTRA_HOTKEY_DEFAULTS[action] ?? '?')
+  const fh = (action: string): string => formatHotkey(hotkeys[action] ?? '?')
 
   const tips = [
     // The wiki gets two tips — it's the feature that teaches all the others

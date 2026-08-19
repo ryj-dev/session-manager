@@ -3,39 +3,11 @@ import { join } from 'path'
 import { readFileSync, mkdirSync } from 'fs'
 import { atomicWriteSync } from './atomic-write'
 
-export interface HotkeyMap {
-  spawnSession: string
-  spawnTerminal: string
-  returnToGraph: string
-  toggleExplorer: string
-  toggleAgents: string
-  toggleSkills: string
-  toggleDesign: string
-  openSettings: string
-  toggleMemory: string
-  toggleNotesProject: string
-  toggleNotesGlobal: string
-  shareTurn: string
-  branchSession: string
-  openOverview: string
-}
+import { defaultHotkeysFor, type HotkeyMap } from '../shared/hotkeys'
 
-export const defaultHotkeys: HotkeyMap = {
-  spawnSession: 't',
-  spawnTerminal: 'shift+t',
-  returnToGraph: 'w',
-  toggleExplorer: 'e',
-  toggleAgents: 'a',
-  toggleSkills: 's',
-  toggleDesign: 'd',
-  openSettings: 'o',
-  toggleMemory: 'm',
-  toggleNotesProject: 'n',
-  toggleNotesGlobal: 'shift+n',
-  shareTurn: 'shift+s',
-  branchSession: 'b',
-  openOverview: 'p',
-}
+export type { HotkeyMap } from '../shared/hotkeys'
+
+export const defaultHotkeys: HotkeyMap = defaultHotkeysFor(process.platform === 'darwin')
 
 /** Default layer selection + tool-activity level for the Share Turn modal. */
 export interface TurnShareDefaults {
@@ -99,15 +71,34 @@ export interface AppSettings {
    *   - 'overlay' : shell attached as a hidden right-edge hover sidebar
    */
   terminalPairingMode: 'off' | 'split' | 'overlay'
-  /** Agentic pipeline (Cmd+L) — persisted board state. Typed loosely here;
-   *  the renderer owns the PipelineTask shape. */
-  pipelineTasks?: unknown[]
   pipelineDefaultAutonomy?: 'manual' | 'gated' | 'auto'
   /** Share Turn export folder. Blank/null = `<projectPath>/turns/`. */
   turnExportFolder: string | null
   turnShareDefaults: TurnShareDefaults
   /** Cmd+B branch: open the fork beside the original in a split group. */
   openBranchInSplit: boolean
+  /** GitHub panel: PR-state filter. 'active' hides merged/closed. */
+  githubStateFilter?: 'active' | 'all'
+  /** GitHub panel: how far back to show items (by notification updatedAt). */
+  githubRangeFilter?: 'day' | 'week' | 'month' | 'all'
+  /** Per-event auto-review modes. 'off' = manual buttons only; 'draft' =
+   *  auto-spawn an agent whose response lands as a draft awaiting Submit;
+   *  'auto' = agent's response is submitted immediately. */
+  githubAutoReview?: GithubAutoReviewRules
+}
+
+export type GithubAutoMode = 'off' | 'draft' | 'auto'
+
+export interface GithubAutoReviewRules {
+  reviewRequest: GithubAutoMode
+  mention: GithubAutoMode
+  myPrActivity: GithubAutoMode
+}
+
+export const defaultGithubAutoReview: GithubAutoReviewRules = {
+  reviewRequest: 'off',
+  mention: 'off',
+  myPrActivity: 'off',
 }
 
 const defaults: AppSettings = {
@@ -135,11 +126,13 @@ const defaults: AppSettings = {
   canvasAutoShowUserImages: true,
   spawnIntoCurrentSplit: false,
   terminalPairingMode: 'off',
-  pipelineTasks: [],
   pipelineDefaultAutonomy: 'gated',
   turnExportFolder: null,
   turnShareDefaults: { ...defaultTurnShareDefaults },
   openBranchInSplit: true,
+  githubStateFilter: 'active',
+  githubRangeFilter: 'week',
+  githubAutoReview: { ...defaultGithubAutoReview },
 }
 
 export function setDisabledIntegration(key: keyof DisabledIntegrations, value: boolean): void {
@@ -165,6 +158,7 @@ export function loadSettings(): AppSettings {
       ...parsed,
       hotkeys: { ...defaults.hotkeys, ...parsed.hotkeys },
       turnShareDefaults: { ...defaults.turnShareDefaults, ...parsed.turnShareDefaults },
+      githubAutoReview: { ...defaultGithubAutoReview, ...parsed.githubAutoReview },
     }
   } catch {
     return { ...defaults }

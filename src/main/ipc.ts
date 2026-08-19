@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, app } from 'electron'
+import { ipcMain, BrowserWindow, app, shell } from 'electron'
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, rmSync, statSync, readdirSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -22,6 +22,7 @@ import { parseTranscriptTurns, deriveTranscriptPath, type ShareableTurn } from '
 import { loadSavedSessions, clearSavedSessions, type SavedSession } from './session-store'
 import { loadSplitGroups, saveSplitGroups, type SavedSplitGroup } from './split-groups-store'
 import { loadSettings, saveSettings, setDisabledIntegration, type AppSettings } from './settings-store'
+import { formatHotkey } from './claude-tips'
 import { resetMemoryInjectionState } from './memory-injection'
 import { unregisterMcpServer } from './mcp-launcher'
 import { uninstallPlugin, installPlugin } from './plugin-manager'
@@ -52,6 +53,11 @@ import * as scheduleStore from './schedule-store'
 import type { ScheduledTask } from './schedule-store'
 import * as canvasStore from './canvas-store'
 import { triggerScheduleNow } from './scheduler'
+import * as githubAuth from './github-auth'
+import * as githubStore from './github-store'
+import { refreshNow as githubRefreshNow, markThreadRead as githubMarkThreadRead, isAuthLost as githubIsAuthLost } from './github-poller'
+import { submitDraft as githubSubmitDraft, discardDraft as githubDiscardDraft } from './github-actions'
+import { runGithubAgent } from './hook-server'
 import * as registry from './session-registry'
 import * as observerCapture from './observer/capture'
 import {
@@ -269,7 +275,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   })
 
   ipcMain.handle('settings:save', (_event, settings: AppSettings) => {
-    saveSettings(settings)
+    // Merge over the stored file, never overwrite it wholesale: the renderer's
+    // payload only contains renderer-owned keys, and a plain saveSettings()
+    // here would silently drop main-owned ones (e.g. disabledIntegrations —
+    // a Cleanup-panel disable would be undone by the next settings change).
+    saveSettings({ ...loadSettings(), ...settings })
   })
 
   // Share Turn — reconstruct a session's turns from its transcript JSONL.
@@ -753,6 +763,63 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     const sessionId = triggerScheduleNow(id)
     sendToRenderer('schedules:changed', scheduleStore.getSchedules())
     return sessionId
+  })
+
+  // GitHub integration. Main owns auth (github-auth) + items (github-store,
+  // fed by github-poller); the renderer mirrors items via the 'github:changed'
+  // broadcast and auth loss via 'github:authLost'. Mirrors the schedules:*
+  // handlers above.
+  // Open a URL in the default browser. Guarded to http(s) — this is reachable
+  // from renderer code displaying remote-derived strings (PR urls).
+  ipcMain.handle('shell:openExternal', (_e, url: string) => {
+    if (!/^https?:\/\//i.test(url)) return false
+    void shell.openExternal(url)
+    return true
+  })
+
+  ipcMain.handle('github:status', () => githubAuth.getAuthStatus())
+
+  ipcMain.handle('github:list', () => ({ items: githubStore.getItems(), authLost: githubIsAuthLost() }))
+
+  ipcMain.handle('github:connectToken', async (_e, token: string) => {
+    const status = await githubAuth.connectWithToken(token)
+    githubRefreshNow().catch(() => { /* next tick retries */ })
+    return status
+  })
+
+  ipcMain.handle('github:deviceStart', () => githubAuth.startDeviceFlow())
+
+  ipcMain.handle('github:deviceWait', async () => {
+    const status = await githubAuth.waitForDeviceFlow()
+    githubRefreshNow().catch(() => { /* next tick retries */ })
+    return status
+  })
+
+  ipcMain.handle('github:disconnect', () => githubAuth.disconnect())
+
+  ipcMain.handle('github:refresh', async () => {
+    await githubRefreshNow()
+    return { items: githubStore.getItems(), authLost: githubIsAuthLost() }
+  })
+
+  ipcMain.handle('github:markRead', async (_e, id: string) => {
+    await githubMarkThreadRead(id)
+    return githubStore.getItems()
+  })
+
+  // Spawn the review/fix agent for an item (panel buttons). Same code path
+  // the poller's auto-start uses; resolves the checkout itself. Resolves to
+  // { sessionId } or { skipped: reason }.
+  ipcMain.handle('github:startAgent', (_e, itemId: string) => runGithubAgent(itemId))
+
+  // Submit an item's pending draft to GitHub (the panel's Submit button —
+  // github-actions is the only posting path). Resolves to a summary string;
+  // rejects with a human-readable message, keeping the draft for retry.
+  ipcMain.handle('github:submitDraft', (_e, itemId: string) => githubSubmitDraft(itemId))
+
+  ipcMain.handle('github:discardDraft', (_e, itemId: string) => {
+    githubDiscardDraft(itemId)
+    return githubStore.getItems()
   })
 
   // Canvas artifacts. Main owns the state (canvas-store); the renderer mirrors
@@ -1436,9 +1503,9 @@ When in doubt, default to \`"true"\` — an unnecessary report is low-cost; a mi
 
 ## Agentic pipeline
 
-The agentic pipeline turns a backlog todo into autonomous, multi-session work. Press **Cmd+L** to open the pipeline board (a kanban of \`Backlog → Plan → Implement → Review → Done\`); opened from the graph it shows all projects, opened from inside a session it filters to that session's project. Starting a backlog todo spawns an **orchestrator** session that reads the todo as the task brief and drives it through the stages — planning, implementing, then fanning out **reviewer** workers across the relevant dimensions (correctness, bugs, security if touched, architecture, tests, performance) and looping review⇄fix until the work passes. Each task runs in its own git **worktree** so parallel tasks never collide; isolated workers are merged back when they finish. Landing in \`Done\` marks the backing todo done. Pipeline sessions are real, resumable Claude sessions but are kept out of the graph view — manage them from the board and the per-task drawer (milestone feed + terminal).
+The agentic pipeline turns a backlog todo into autonomous, multi-session work. Press **${formatHotkey(loadSettings().hotkeys.togglePipeline)}** to open the pipeline board (a kanban of \`Backlog → Plan → Implement → Review → Done\`); opened from the graph it shows all projects, opened from inside a session it filters to that session's project. Starting a backlog todo spawns an **orchestrator** session that reads the todo as the task brief and drives it through the stages — planning, implementing, then fanning out **reviewer** workers across the relevant dimensions (correctness, bugs, security if touched, architecture, tests, performance) and looping review⇄fix until the work passes. Each task runs in its own git **worktree** so parallel tasks never collide; isolated workers are merged back when they finish. Landing in \`Done\` marks the backing todo done. Pipeline sessions are real, resumable Claude sessions but are kept out of the graph view — manage them from the board and the per-task drawer (milestone feed + terminal).
 
-**Autonomy** governs how far the orchestrator runs before pausing for you. Set the global default in Settings (⌘O → "Agentic pipeline"); override per-task with an \`autonomy:<level>\` tag on the todo. Levels:
+**Autonomy** governs how far the orchestrator runs before pausing for you. Set the global default in Settings (${formatHotkey(loadSettings().hotkeys.openSettings)} → "Agentic pipeline"); override per-task with an \`autonomy:<level>\` tag on the todo. Levels:
 
 - \`auto\` — runs end-to-end without stopping; gates auto-approve.
 - \`gated\` (default) — pauses at stage gates for your approval, then continues.

@@ -1,4 +1,5 @@
 import { useStore, type HotkeyMap } from '../store'
+import { formatHotkeyFor } from '../../shared/hotkeys'
 
 /** Human-readable labels for each hotkey action */
 export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
@@ -19,24 +20,8 @@ export const hotkeyLabels: Record<keyof HotkeyMap, string> = {
   toggleCanvas: 'Toggle canvas (focused session)',
   shareTurn: 'Share turn (focused session)',
   branchSession: 'Branch session (focused session)',
-  openOverview: 'Sessions overview'
-}
-
-/** All recognized modifier tokens in canonical order */
-const MODIFIER_ORDER = ['ctrl', 'alt', 'shift'] as const
-
-/** Mac symbol for each modifier */
-const MAC_SYMBOLS: Record<string, string> = {
-  ctrl: '⌃',
-  alt: '⌥',
-  shift: '⇧'
-}
-
-/** Windows/Linux label for each modifier */
-const WIN_SYMBOLS: Record<string, string> = {
-  ctrl: 'Ctrl+',
-  alt: 'Alt+',
-  shift: 'Shift+'
+  openOverview: 'Sessions overview',
+  toggleGithub: 'Toggle GitHub panel'
 }
 
 const IS_MAC = typeof navigator !== 'undefined' && navigator.platform.startsWith('Mac')
@@ -98,23 +83,7 @@ function keyFromCode(code: string): string | null {
  * On Windows: prepends "Alt+" (always implied) then modifier labels, e.g. "Alt+Shift+T"
  */
 export function formatHotkey(raw: string): string {
-  const parts = raw.split('+')
-  const key = parts[parts.length - 1]
-  const modifiers = new Set(parts.slice(0, -1))
-
-  if (IS_MAC) {
-    let display = '⌘'
-    for (const mod of MODIFIER_ORDER) {
-      if (modifiers.has(mod)) display += MAC_SYMBOLS[mod]
-    }
-    return display + key.toUpperCase()
-  } else {
-    let display = 'Alt+'
-    for (const mod of MODIFIER_ORDER) {
-      if (modifiers.has(mod)) display += WIN_SYMBOLS[mod]
-    }
-    return display + key.toUpperCase()
-  }
+  return formatHotkeyFor(raw, IS_MAC)
 }
 
 /**

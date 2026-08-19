@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore, defaultHotkeys, type HotkeyMap } from '../store'
 import { formatHotkey, parseHotkeyKeys, hotkeyLabels, comboFromEvent } from '../lib/hotkeys'
+import { RESERVED_COMBOS } from '../../shared/hotkeys'
 
 interface KeyboardShortcutsProps {
   visible: boolean
@@ -196,6 +197,7 @@ export function KeyboardShortcuts({ visible, onClose }: KeyboardShortcutsProps):
   const hotkeys = useStore((s) => s.hotkeys)
   const setHotkeys = useStore((s) => s.setHotkeys)
   const [editingAction, setEditingAction] = useState<keyof HotkeyMap | null>(null)
+  const [conflict, setConflict] = useState<string | null>(null)
   const [hoveredKeys, setHoveredKeys] = useState<Set<string>>(new Set())
 
   // Escape to close (but not while editing)
@@ -206,6 +208,7 @@ export function KeyboardShortcuts({ visible, onClose }: KeyboardShortcutsProps):
         e.preventDefault()
         if (editingAction) {
           setEditingAction(null)
+          setConflict(null)
         } else {
           onClose()
         }
@@ -215,15 +218,31 @@ export function KeyboardShortcuts({ visible, onClose }: KeyboardShortcutsProps):
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [visible, onClose, editingAction])
 
-  // Hotkey capture when editing — uses comboFromEvent to handle Alt/Opt correctly
+  // Hotkey capture when editing — uses comboFromEvent to handle Alt/Opt correctly.
+  // Refuses combos that are reserved (force-close) or already bound to another
+  // action: App.tsx's handler is first-match-wins, so a duplicate binding would
+  // silently dead-end one of the two actions.
   const handleHotkeyCapture = useCallback((e: KeyboardEvent) => {
     if (!editingAction) return
     e.preventDefault()
     e.stopPropagation()
     const combo = comboFromEvent(e)
     if (!combo) return
+    const reservedBy = RESERVED_COMBOS[combo]
+    if (reservedBy) {
+      setConflict(`${formatHotkey(combo)} is reserved for "${reservedBy}"`)
+      return
+    }
+    const takenBy = (Object.keys(hotkeys) as (keyof HotkeyMap)[]).find(
+      (a) => a !== editingAction && hotkeys[a] === combo
+    )
+    if (takenBy) {
+      setConflict(`${formatHotkey(combo)} is already used by "${hotkeyLabels[takenBy]}"`)
+      return
+    }
     setHotkeys({ ...hotkeys, [editingAction]: combo })
     setEditingAction(null)
+    setConflict(null)
   }, [editingAction, hotkeys, setHotkeys])
 
   useEffect(() => {
@@ -328,6 +347,11 @@ export function KeyboardShortcuts({ visible, onClose }: KeyboardShortcutsProps):
                       Reset defaults
                     </button>
                   </div>
+                  {conflict && (
+                    <div className="mb-2 px-2 py-1 rounded border border-red-500/30 bg-red-500/10 text-[10px] text-red-300">
+                      {conflict} — press a different key
+                    </div>
+                  )}
                   <div className="space-y-1">
                     {configurableActions.map(({ action, label, display, keyIds }) => (
                       <div
@@ -338,7 +362,7 @@ export function KeyboardShortcuts({ visible, onClose }: KeyboardShortcutsProps):
                       >
                         <span className="text-xs text-zinc-400">{label}</span>
                         <button
-                          onClick={() => setEditingAction(action)}
+                          onClick={() => { setEditingAction(action); setConflict(null) }}
                           className={`px-2 py-0.5 rounded border text-[10px] font-mono transition-all min-w-[48px] text-center ${
                             editingAction === action
                               ? 'bg-blue-500/20 border-blue-400/50 text-blue-300 animate-pulse'

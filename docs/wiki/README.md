@@ -2,6 +2,8 @@
 
 Curated, app-versioned feature documentation. One article per feature; each has frontmatter (`slug`, `title`, `summary`, `related`) for listing and search. These articles are the authoritative "how does this work / how do I use it" reference, served to agents via the wiki MCP tools.
 
+Key combos in these articles (`Cmd+L`, `Cmd+J`, …) are the **defaults** — every configurable hotkey is user-rebindable in Settings → Keyboard shortcuts, and on Windows/Linux the base modifier is `Alt`, not `Cmd`. Frontmatter gotcha: quote any `summary:` containing a colon — unparseable frontmatter makes the article invisible to the wiki tools (it logs a warning at load).
+
 ## Index
 
 - `terminal-management` — PTY-backed multi-session terminals: spawn, live snapshots, resume, crash recovery.
@@ -12,6 +14,7 @@ Curated, app-versioned feature documentation. One article per feature; each has 
 - `spawned-sessions` — `spawn-session` MCP tool: reportBack modes, allowedTools, context rules, CLI-arg prompt delivery.
 - `agent-system` — `spawn-agent`/`list-agents`: bundled specialist agents with hard tool restrictions.
 - `split-view` — Group 2–9 sessions into an i3-style N-ary tiled layout with live reshape preview and slot hotkeys.
+- `session-branching` — Cmd+B forks the focused Claude session (`--fork-session`); both stay alive, branch opens beside the original.
 - `memory-knowledge-base` — Markdown knowledge notes with wikilinks/backlinks, typed sections, hybrid semantic search, Sigma.js graph (Cmd+M).
 - `todos-project-notes` — Global hybrid todo+note list with `project:` tags, hybrid search, MCP CRUD, ambient in-session reminders.
 - `skills-system` — Inject slash-command skills (brainstorming, frontend-slides, regression-loop) into new or running sessions (Cmd+S).
@@ -22,5 +25,8 @@ Curated, app-versioned feature documentation. One article per feature; each has 
 - `agentic-pipeline` — Cmd+L: todo → orchestrator → plan/implement/review loop, worktree fan-out, autonomy levels, milestones, pipeline MCP tools.
 - `scheduled-tasks` — Cmd+J: launch/first-of-day/interval/daily triggers, per-day caps, resumable run history, login-failure retry, model picker.
 - `canvas` — Per-session visual surface: agents answer with sortable tables, markdown reports, and annotated screenshots (canvas-show); user-sent images auto-display at send time.
-- `hotkeys-settings` — All 14 configurable Cmd-hotkeys with defaults, plus every Settings panel option including cleanup/uninstall.
-- `mcp-server-overview` — How the stdio MCP server registers, its architecture, and the full 39-tool surface grouped by area.
+- `share-turn` — Cmd+Shift+S: export one turn (prompt / tool activity / result) as clean markdown, with secret flagging, click-to-redact, and copy or save-to-folder.
+- `statusline-editor` — Visual builder for a managed Claude Code statusline: toggle elements with live preview, generated script under ~/.claude/, Claude-assisted custom components.
+- `github-panel` — Cmd+G: PR review requests / mentions / my-PR activity polled from GitHub; agents respond via github-respond into user-approved drafts (or auto-submit), with per-event auto-start rules.
+- `hotkeys-settings` — All 19 configurable Cmd-hotkeys with defaults, plus every Settings panel option including cleanup/uninstall.
+- `mcp-server-overview` — How the stdio MCP server registers, its architecture, and the full tool surface grouped by area.

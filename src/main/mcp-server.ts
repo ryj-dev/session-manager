@@ -227,6 +227,10 @@ The app also hosts a distinct Notes system for user-facing task tracking — fre
 
 Statuses in v1: \`not-started\` and \`completed\` only. Assignment and agent dispatch come in v2.
 
+## GitHub inbox (Cmd+G panel)
+
+The app polls the user's GitHub PR notifications into a triaged inbox. **github-inbox** lists what needs attention (with unread/active/draft counts), **github-get-item** fetches one item incl. its pending draft, **github-mark-read** clears a thread on GitHub (GitHub's read-state is the source of truth). To respond to an item, prepare the response and hand it over with **github-respond** — the APP decides whether it becomes a user-approved draft or is submitted immediately; never post reviews/replies to GitHub directly (gh CLI is for reading PR content only) and never \`git push\` fix commits (commit locally, set commitsReady, the app pushes on submit).
+
 Memory notes stored in: ${MEMORIES_DIR}`
   }
 )
@@ -928,6 +932,97 @@ server.tool(
         content: [{ type: 'text', text: `Error spawning session: ${err instanceof Error ? err.message : String(err)}` }],
         isError: true
       }
+    }
+  }
+)
+
+// ── GitHub panel tools ──────────────────────────────────────────────────────
+// Backed by the app's GitHub integration (Cmd+G panel): a poller mirrors PR
+// notifications; agents respond through github-respond, where the APP decides
+// draft-vs-submit. Read PR content with the gh CLI — these tools are only for
+// the app's triaged inbox and the response gate.
+
+server.tool(
+  'github-inbox',
+  "The app's triaged GitHub PR inbox (what the user sees in the Cmd+G panel): review requests, mentions, and activity on the user's PRs, each with unread state, PR state, and any pending draft response. Returns a counts envelope (unread per kind, active PRs, drafts pending) plus the matching items. Use gh CLI for PR content — this tool is for what needs attention.",
+  {
+    kind: z.enum(['review-request', 'mention', 'my-pr-activity']).optional().describe('Only this kind of item'),
+    unread: z.boolean().optional().describe('true = only unread, false = only read'),
+    prState: z.enum(['open', 'draft', 'merged', 'closed']).optional().describe('Only PRs in this state'),
+    repo: z.string().optional().describe('Only this repository ("owner/repo")'),
+    since: z.string().optional().describe('Only items updated at/after this ISO timestamp'),
+  },
+  async (filters) => {
+    try {
+      const result = await callHookServer('/github/inbox', filters)
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error reading GitHub inbox: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'github-get-item',
+  'Full detail for one GitHub inbox item by id, including its pending draft response (if any) and submission history. Use when resuming work on an item github-inbox surfaced.',
+  {
+    itemId: z.string().describe('The inbox item id (from github-inbox)'),
+  },
+  async ({ itemId }) => {
+    try {
+      const result = await callHookServer('/github/get-item', { itemId })
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error reading GitHub item: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'github-respond',
+  "Hand a prepared response for a GitHub inbox item to the app. THE APP decides what happens: under draft mode it is stored for the user to approve and submit from the panel; under auto mode it is posted to GitHub immediately. You do not choose — never try to post to GitHub directly instead (no gh pr review / gh api writes / git push). For type 'review' provide verdict + body + optional line comments. For type 'reply-with-fixes' provide per-thread replies and, if you committed fixes locally (never push yourself), commitsReady + repoPath.",
+  {
+    itemId: z.string().describe('The inbox item id this responds to'),
+    type: z.enum(['review', 'reply-with-fixes']).describe("'review' = a PR review (requests/mentions). 'reply-with-fixes' = replies (and optional local commits) on the user's own PR."),
+    verdict: z.enum(['approve', 'request-changes', 'comment']).optional().describe('Reviews only: the review event'),
+    body: z.string().describe('Review summary / overview comment (markdown)'),
+    comments: z.array(z.object({
+      path: z.string().describe('File path in the repo'),
+      line: z.number().describe('Line number in the diff'),
+      body: z.string().describe('The comment (markdown)'),
+    })).optional().describe('Reviews only: line-anchored comments'),
+    replies: z.array(z.object({
+      commentId: z.number().describe('The numeric id of the review comment being replied to'),
+      body: z.string().describe('The reply (markdown)'),
+    })).optional().describe('reply-with-fixes only: per-thread replies'),
+    commitsReady: z.boolean().optional().describe('reply-with-fixes only: fixes are COMMITTED LOCALLY on the PR branch (do not push — the app pushes on submit)'),
+    repoPath: z.string().optional().describe('reply-with-fixes only: absolute path of the checkout holding the local commits (required with commitsReady)'),
+  },
+  async (payload) => {
+    try {
+      const result = await callHookServer('/github/respond', {
+        ...payload,
+        sessionId: process.env.APP_SESSION_ID || undefined,
+      }) as { status: string; summary: string }
+      return { content: [{ type: 'text', text: `${result.status}: ${result.summary}` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error responding: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
+    }
+  }
+)
+
+server.tool(
+  'github-mark-read',
+  "Mark a GitHub inbox item's notification thread as read — on GitHub itself (GitHub's read-state is the source of truth; the app mirrors it back). Use after handling an item, or when you determine no response is needed.",
+  {
+    itemId: z.string().describe('The inbox item id to mark read'),
+  },
+  async ({ itemId }) => {
+    try {
+      await callHookServer('/github/mark-read', { itemId })
+      return { content: [{ type: 'text', text: `Marked ${itemId} read on GitHub.` }] }
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Error marking read: ${err instanceof Error ? err.message : String(err)}` }], isError: true }
     }
   }
 )
