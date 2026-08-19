@@ -12,16 +12,20 @@
  */
 
 import { join } from 'path'
+import { homedir } from 'os'
+import { appendFileSync, existsSync, readFileSync } from 'fs'
 import { loadSettings } from '../settings-store'
 import { formatHotkey } from '../claude-tips'
 import * as scheduleStore from '../schedule-store'
 import * as notesManager from '../notes-manager'
 import { readNote, writeNote } from '../memory/store'
-import { addToRelatedSection, filenameToWikilink, touchModified } from '../memory/core'
+import {
+  addToRelatedSection, filenameToWikilink, generateNote, NOTE_TYPES, slugify, touchModified,
+  type NoteType,
+} from '../memory/core'
 import { invalidate } from '../memory/index'
 import { syncBacklinks } from '../memory/backlinks'
 import { installSkillCommand } from '../fs-service'
-import { setPatternStatus } from './db'
 import type { SuggestionRow } from './db'
 
 export interface ApplyResult {
@@ -47,6 +51,10 @@ export function applySuggestion(
       case 'skill':          return applySkill(suggestion)
       case 'memory-link':    return applyMemoryLink(suggestion)
       case 'todo-cleanup':   return applyTodoCleanup(suggestion)
+      case 'memory-note':    return applyMemoryNote(suggestion)
+      case 'claude-md':      return applyClaudeMd(suggestion)
+      case 'use-feature':    return applyUseFeature(suggestion)
+      case 'pipeline-candidate': return applyPipelineCandidate(suggestion)
       default:
         return { ok: false, message: `Unknown suggestion kind "${suggestion.kind}"` }
     }
@@ -171,15 +179,68 @@ function applyTodoCleanup(s: SuggestionRow): ApplyResult {
   return { ok: true, message: `Closed todo "${todo.title}"` }
 }
 
-/**
- * Dismissing feeds back into the pattern table so the same observation decays
- * instead of resurfacing: 'dismissed' returns the pattern to the candidate pool
- * but the suggestion history blocks a re-proposal, while 'never' mutes it
- * permanently.
- */
-export function feedbackToPattern(patternId: string | null, verdict: 'dismissed' | 'never'): void {
-  if (!patternId) return
-  setPatternStatus(patternId, verdict === 'never' ? 'muted' : 'candidate')
+function applyMemoryNote(s: SuggestionRow): ApplyResult {
+  const p = s.proposal
+  const title = str(p.title) ?? s.title
+  const content = str(p.content)
+  if (!content) return { ok: false, message: 'Proposal has no note content' }
+  const type: NoteType = (NOTE_TYPES as readonly string[]).includes(String(p.type))
+    ? (p.type as NoteType)
+    : 'context'
+
+  const filename = `${slugify(title)}.md`
+  if (readNote(filename)) {
+    return { ok: false, message: `A note named "${filename}" already exists — dismiss this and edit that note instead` }
+  }
+  // Same scaffold the create-memory MCP tool produces, so the note is
+  // indistinguishable from a hand-written one (sections, frontmatter, graph).
+  const raw = generateNote({ title, type, tags: ['from:observer'], details: content })
+  writeNote(filename, raw)
+  invalidate(filename)
+  return { ok: true, message: `Created memory note "${filename}"` }
+}
+
+function applyClaudeMd(s: SuggestionRow): ApplyResult {
+  const text = str(s.proposal.text)
+  if (!text) return { ok: false, message: 'Proposal has no text' }
+  const claudeMdPath = join(homedir(), '.claude', 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) {
+    // Never create the user's global instructions file on their behalf — a
+    // missing CLAUDE.md means they have not chosen to have one.
+    return { ok: false, message: '~/.claude/CLAUDE.md does not exist — create it first if you want global instructions' }
+  }
+  const current = readFileSync(claudeMdPath, 'utf-8')
+  if (current.includes(text.trim())) {
+    return { ok: true, message: 'That instruction is already in ~/.claude/CLAUDE.md' }
+  }
+  appendFileSync(claudeMdPath, `\n${text.trim()}\n`)
+  return { ok: true, message: 'Appended to ~/.claude/CLAUDE.md — every future session will see it' }
+}
+
+function applyUseFeature(s: SuggestionRow): ApplyResult {
+  // Nothing to install — the suggestion IS the information. Accepting just
+  // acknowledges it; the wiki article named in the proposal is the follow-up.
+  const feature = str(s.proposal.feature)
+  return {
+    ok: true,
+    message: feature
+      ? `Noted — see the "${feature}" wiki article (ask any session to read-wiki-article("${feature}"))`
+      : 'Noted',
+  }
+}
+
+function applyPipelineCandidate(s: SuggestionRow): ApplyResult {
+  const p = s.proposal
+  const title = str(p.title) ?? s.title
+  const tags = Array.isArray(p.tags) ? p.tags.filter((t): t is string => typeof t === 'string') : []
+  // A pipeline candidate is a backlog todo — the user starts it from the ⌘L
+  // board when they're ready; nothing runs on accept.
+  const todo = notesManager.createTodo({
+    title,
+    body: str(p.body) ?? s.rationale,
+    tags: [...new Set([...tags, 'from:observer'])],
+  })
+  return { ok: true, message: `Added "${todo.title}" to the backlog — start it from the pipeline board when ready` }
 }
 
 /** Where an accepted scheduled-task proposal lands when it names no project. */

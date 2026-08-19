@@ -83,6 +83,10 @@ export interface AppSettings {
   archiveInactiveSessions: boolean
   /** Minutes of inactivity before an eligible session is archived (min 5). */
   archiveInactiveMinutes: number
+  /** The observer (session digests + curator + housekeeping). Opt-in, default
+   *  false — v2 is content-aware: it reads the session transcripts Claude Code
+   *  keeps on disk. While off, nothing is digested and no runs are scheduled. */
+  observerEnabled: boolean
   /** GitHub panel: PR-state filter. 'active' hides merged/closed. */
   githubStateFilter?: 'active' | 'all'
   /** GitHub panel: how far back to show items (by notification updatedAt). */
@@ -138,6 +142,7 @@ const defaults: AppSettings = {
   openBranchInSplit: true,
   archiveInactiveSessions: false,
   archiveInactiveMinutes: 30,
+  observerEnabled: false,
   githubStateFilter: 'active',
   githubRangeFilter: 'week',
   githubAutoReview: { ...defaultGithubAutoReview },

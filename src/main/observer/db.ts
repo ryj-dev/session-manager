@@ -1,89 +1,50 @@
 /**
- * Observer store — the append-only event log plus the derived pattern and
- * suggestion tables that back the "continuously curious" background agent.
+ * Observer store — session digests, the digest queue, and the suggestions
+ * inbox that back the "continuously curious" background agent.
+ *
+ * V2: the v1 raw event log and mined pattern tables are GONE (dropped on first
+ * open after upgrade — they were the app's most sensitive data store, and the
+ * curator no longer reads them). The primary signal is now per-session Haiku
+ * digests generated from the transcripts Claude Code already writes to disk;
+ * this module stores the durable digest queue, the digests themselves, and the
+ * suggestion inbox.
  *
  * SQLite (better-sqlite3, already a dependency for memory embeddings) rather
- * than JSON: the event log grows to tens of thousands of rows and the mining
- * pass needs indexed range scans over (project, kind, ts). It lives in its own
- * DB file so it can be deleted independently of the embeddings index.
+ * than JSON: the queue must survive app quits (catch-up at next launch is a
+ * design requirement) and digests accumulate per Claude conversation. It lives
+ * in its own DB file so it can be deleted independently of the embeddings index.
  *
- * PRIVACY: this log records WHAT was done, never WHAT WAS SAID. Tool names,
- * shell command strings, file paths and UI action names are stored; user
- * prompt bodies and assistant output never are (prompts are recorded only as a
- * length). Raw events are pruned after RAW_EVENT_RETENTION_DAYS; the derived
- * patterns and suggestions are aggregates and are kept.
- *
- * Pure module — no electron imports, so the path is passed in and tests (or a
- * future out-of-process miner) can point it anywhere.
+ * Pure module — no electron imports, so the path is passed in and tests can
+ * point it anywhere.
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
 
-/** Raw events older than this are deleted on each maintenance pass. */
-export const RAW_EVENT_RETENTION_DAYS = 60
+export type SuggestionKind =
+  | 'scheduled-task'
+  | 'todo'
+  | 'skill'
+  | 'memory-link'
+  | 'todo-cleanup'
+  // V2 reflective-curator vocabulary:
+  | 'memory-note'
+  | 'claude-md'
+  | 'use-feature'
+  | 'pipeline-candidate'
 
-/** Cap on a stored payload string (a pasted heredoc can be enormous). */
-const MAX_PAYLOAD_CHARS = 2000
+export const SUGGESTION_KINDS: readonly SuggestionKind[] = [
+  'scheduled-task', 'todo', 'skill', 'memory-link', 'todo-cleanup',
+  'memory-note', 'claude-md', 'use-feature', 'pipeline-candidate',
+]
 
-/** Per-field cap applied when the whole payload busts MAX_PAYLOAD_CHARS. */
-const MAX_PAYLOAD_FIELD_CHARS = 400
-
-export type ObserverEventKind =
-  /** A tool the assistant used. payload: { tool, arg? } */
-  | 'tool'
-  /** A user prompt was submitted. payload: { chars } — never the text. */
-  | 'prompt'
-  /** Session lifecycle. payload: { action: 'spawn' | 'end', sessionKind,
-   *  parentSessionId? } — the parent is present only when another session
-   *  spawned this one, which is what distinguishes delegation from a session
-   *  the user opened by hand. */
-  | 'session'
-  /** A renderer UI action. payload: { action, detail? } */
-  | 'ui'
-  /** A call into any MCP server. payload: { server, tool } — the name only,
-   *  never arguments. */
-  | 'mcp'
-
-export interface ObserverEvent {
-  id: number
-  ts: number
-  sessionId: string | null
-  project: string | null
-  kind: ObserverEventKind
-  payload: Record<string, unknown>
-}
-
-export interface PatternRow {
-  id: string
-  project: string | null
-  /** 'frequency' (a single recurring action), 'sequence' (an n-gram),
-   *  'time-of-day' (an action clustered into a daily window), or 'delegation'
-   *  (one session spawning and driving several others — a workflow shape
-   *  rather than an action). */
-  type: 'frequency' | 'sequence' | 'time-of-day' | 'delegation'
-  /** Stable identity of the thing that recurs, e.g. `bash:npm run build`. */
-  signature: string
-  /** Human-readable one-liner for the prompt + UI. */
-  label: string
-  support: number
-  distinctDays: number
-  /** Recent local YYYY-MM-DD dates the pattern was seen on (capped). */
-  days: string[]
-  firstSeen: number
-  lastSeen: number
-  /** candidate → crossed thresholds → 'promoted' → curator judged → 'suggested'.
-   *  'muted' patterns are permanently skipped (user chose never-suggest). */
-  status: 'candidate' | 'promoted' | 'suggested' | 'muted'
-  meta: Record<string, unknown>
-}
-
-export type SuggestionKind = 'scheduled-task' | 'todo' | 'skill' | 'memory-link' | 'todo-cleanup'
 export type SuggestionStatus = 'pending' | 'accepted' | 'dismissed' | 'never'
 
 export interface SuggestionRow {
   id: string
+  /** Vestigial v1 column (mined-pattern provenance). Always null for v2 rows;
+   *  kept so historical rows still render. */
   patternId: string | null
   createdAt: number
   title: string
@@ -97,9 +58,38 @@ export interface SuggestionRow {
   result: string | null
 }
 
-/** Days a pattern keeps in its rolling window. Long enough for the
- *  "≥4 distinct days in 14" promotion rule with slack for a slow reader. */
-const DAYS_WINDOW = 30
+// ── Digest queue + digests ──────────────────────────────────────────────────
+
+export type DigestQueueState = 'open' | 'ready' | 'done' | 'skipped'
+
+export interface DigestQueueRow {
+  /** The app session id (PTY id) — one row per app session sighting. */
+  sessionId: string
+  /** The Claude conversation id — the transcript's identity. Digest watermarks
+   *  key off THIS, so a conversation resumed under a new app session id
+   *  continues its digest instead of starting over. */
+  claudeSessionId: string
+  projectPath: string | null
+  transcriptPath: string
+  /** open → session live · ready → ended, awaiting digest · done/skipped → final. */
+  state: DigestQueueState
+  createdAt: number
+  updatedAt: number
+  endedAt: number | null
+  /** Failed digest attempts; rows are given up as 'skipped' after a few. */
+  attempts: number
+}
+
+export interface DigestRow {
+  claudeSessionId: string
+  project: string | null
+  createdAt: number
+  updatedAt: number
+  /** Transcript turns covered so far — the incremental-digest watermark. */
+  turns: number
+  /** The digest text. Incremental updates append dated paragraphs. */
+  content: string
+}
 
 /**
  * The subset of better-sqlite3 this module actually uses.
@@ -107,9 +97,8 @@ const DAYS_WINDOW = 30
  * Named so the driver can be swapped: better-sqlite3 is a native addon built
  * against ELECTRON's ABI (`electron-builder install-app-deps`), so plain
  * `node --test` cannot load it at all. Tests therefore install an adapter over
- * Node's built-in `node:sqlite`, which is the only way the incremental
- * machinery here — watermarks, day-window promotion, the mining transaction —
- * gets covered outside a running app. Production is untouched.
+ * Node's built-in `node:sqlite` — the only way the queue lifecycle and the
+ * job-debt arithmetic get covered outside a running app. Production untouched.
  */
 export interface SqliteLike {
   pragma(source: string): unknown
@@ -139,33 +128,6 @@ export function initObserverDb(dbPath: string): void {
   db = openDatabase(dbPath)
   db.pragma('journal_mode = WAL')
   db.exec(`
-    CREATE TABLE IF NOT EXISTS events (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      ts           INTEGER NOT NULL,
-      session_id   TEXT,
-      project      TEXT,
-      kind         TEXT NOT NULL,
-      payload_json TEXT NOT NULL DEFAULT '{}'
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_project_kind_ts ON events(project, kind, ts);
-    CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-
-    CREATE TABLE IF NOT EXISTS patterns (
-      id            TEXT PRIMARY KEY,
-      project       TEXT,
-      type          TEXT NOT NULL,
-      signature     TEXT NOT NULL,
-      label         TEXT NOT NULL DEFAULT '',
-      support       INTEGER NOT NULL DEFAULT 0,
-      distinct_days INTEGER NOT NULL DEFAULT 0,
-      days_json     TEXT NOT NULL DEFAULT '[]',
-      first_seen    INTEGER NOT NULL,
-      last_seen     INTEGER NOT NULL,
-      status        TEXT NOT NULL DEFAULT 'candidate',
-      meta_json     TEXT NOT NULL DEFAULT '{}'
-    );
-    CREATE INDEX IF NOT EXISTS idx_patterns_status ON patterns(status, last_seen);
-
     CREATE TABLE IF NOT EXISTS suggestions (
       id            TEXT PRIMARY KEY,
       pattern_id    TEXT,
@@ -180,8 +142,47 @@ export function initObserverDb(dbPath: string): void {
     );
     CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status, created_at);
 
+    CREATE TABLE IF NOT EXISTS digest_queue (
+      session_id         TEXT PRIMARY KEY,
+      claude_session_id  TEXT NOT NULL,
+      project_path       TEXT,
+      transcript_path    TEXT NOT NULL,
+      state              TEXT NOT NULL DEFAULT 'open',
+      created_at         INTEGER NOT NULL,
+      updated_at         INTEGER NOT NULL,
+      ended_at           INTEGER,
+      attempts           INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_digest_queue_state ON digest_queue(state, updated_at);
+
+    CREATE TABLE IF NOT EXISTS digests (
+      claude_session_id  TEXT PRIMARY KEY,
+      project            TEXT,
+      created_at         INTEGER NOT NULL,
+      updated_at         INTEGER NOT NULL,
+      turns              INTEGER NOT NULL DEFAULT 0,
+      content            TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_digests_updated ON digests(updated_at);
+
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `)
+
+  // V1 → V2 upgrade: destroy the raw event log and mined patterns. This was
+  // deliberately destructive by design decision — the event store recorded
+  // shell commands and file paths, and v2 has no reader for any of it.
+  if (getMeta('schema.v2') !== 'done') {
+    try {
+      db.exec('DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS patterns;')
+      // Reclaim the space — the events table dominated the file.
+      try { db.exec('VACUUM') } catch { /* WAL busy — space reclaimed later */ }
+      setMeta('schema.v2', 'done')
+      console.log('[observer] v1 events/patterns tables dropped (v2 schema)')
+    } catch (err) {
+      console.error('[observer] v1 table drop failed (will retry next launch):', err)
+    }
+  }
+
   console.log('[observer] store ready at', dbPath)
 }
 
@@ -189,124 +190,9 @@ export function isObserverDbReady(): boolean {
   return db !== null
 }
 
-/**
- * Run `fn` inside a single SQLite transaction — all of its writes land, or
- * none of them do.
- *
- * The mining pass needs this: it writes pattern counts first and its watermark
- * last, so a crash in between re-processed events that had already been
- * counted, double-counting up to BATCH_LIMIT observations and inflating the
- * support numbers the promotion rule reads. Nothing else about the pass is
- * transactional, and it does not need to be — the writes are the whole state.
- *
- * A no-op passthrough when the store never opened, so callers do not have to
- * branch on it.
- */
-export function inTransaction<T>(fn: () => T): T {
-  if (!db) return fn()
-  return db.transaction(fn)()
-}
-
 export function closeObserverDb(): void {
   try { db?.close() } catch { /* already closed */ }
   db = null
-}
-
-// ── Events ──────────────────────────────────────────────────────────────────
-
-/**
- * Serialise an event payload, keeping it under the size cap WITHOUT ever
- * producing invalid JSON.
- *
- * Slicing the serialised string was a silent tripwire: an oversized payload
- * was cut mid-token, `JSON.parse` threw on read, and rowToEvent's catch turned
- * the row into `{}` — an event with no tool name and no argument, which
- * actionToken then drops. The events most likely to trip it (a pasted heredoc,
- * a very long command) are exactly the ones a size cap is meant to shorten
- * rather than erase.
- *
- * So shrink the VALUES instead, and fall back to an explicit marker rather
- * than to corruption.
- */
-function serializePayload(payload: Record<string, unknown>): string {
-  const json = JSON.stringify(payload)
-  if (json.length <= MAX_PAYLOAD_CHARS) return json
-
-  const shrunk: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(payload)) {
-    shrunk[key] = typeof value === 'string' ? value.slice(0, MAX_PAYLOAD_FIELD_CHARS) : value
-  }
-  const retry = JSON.stringify(shrunk)
-  if (retry.length <= MAX_PAYLOAD_CHARS) return retry
-
-  // Still oversized (many keys, or huge non-string values). Keep the shape
-  // that matters to mining and drop the rest, visibly.
-  return JSON.stringify({
-    tool: typeof payload.tool === 'string' ? payload.tool : undefined,
-    action: typeof payload.action === 'string' ? payload.action : undefined,
-    truncated: true,
-  })
-}
-
-/** Append one event. Never throws — observation must not break the app. */
-export function appendEvent(e: {
-  kind: ObserverEventKind
-  sessionId?: string | null
-  project?: string | null
-  payload?: Record<string, unknown>
-  ts?: number
-}): void {
-  if (!db) return
-  try {
-    const payload = serializePayload(e.payload ?? {})
-    db.prepare(
-      'INSERT INTO events (ts, session_id, project, kind, payload_json) VALUES (?, ?, ?, ?, ?)',
-    ).run(e.ts ?? Date.now(), e.sessionId ?? null, e.project ?? null, e.kind, payload)
-  } catch (err) {
-    console.error('[observer] appendEvent failed:', err)
-  }
-}
-
-function rowToEvent(r: Record<string, unknown>): ObserverEvent {
-  let payload: Record<string, unknown> = {}
-  try { payload = JSON.parse(String(r.payload_json)) } catch { /* corrupt row */ }
-  return {
-    id: Number(r.id),
-    ts: Number(r.ts),
-    sessionId: (r.session_id as string | null) ?? null,
-    project: (r.project as string | null) ?? null,
-    kind: r.kind as ObserverEventKind,
-    payload,
-  }
-}
-
-/** Events with id > afterId, oldest first. The mining watermark reads forward
- *  through this so an interrupted pass resumes exactly where it stopped. */
-export function eventsAfter(afterId: number, limit: number): ObserverEvent[] {
-  if (!db) return []
-  return db
-    .prepare('SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?')
-    .all(afterId, limit)
-    .map((r) => rowToEvent(r as Record<string, unknown>))
-}
-
-export function maxEventId(): number {
-  if (!db) return 0
-  const row = db.prepare('SELECT MAX(id) AS m FROM events').get() as { m: number | null }
-  return row?.m ?? 0
-}
-
-export function countEvents(): number {
-  if (!db) return 0
-  return (db.prepare('SELECT COUNT(*) AS c FROM events').get() as { c: number }).c
-}
-
-/** Delete raw events older than the retention window. Aggregates are kept. */
-export function pruneOldEvents(now: number = Date.now()): number {
-  if (!db) return 0
-  const cutoff = now - RAW_EVENT_RETENTION_DAYS * 86_400_000
-  const info = db.prepare('DELETE FROM events WHERE ts < ?').run(cutoff)
-  return info.changes
 }
 
 // ── Meta (watermarks + job bookkeeping) ─────────────────────────────────────
@@ -334,134 +220,180 @@ export function setMetaNumber(key: string, value: number): void {
   setMeta(key, String(value))
 }
 
-// ── Patterns ────────────────────────────────────────────────────────────────
+// ── Digest queue ────────────────────────────────────────────────────────────
 
-function rowToPattern(r: Record<string, unknown>): PatternRow {
-  const parse = <T,>(raw: unknown, fallback: T): T => {
-    try { return JSON.parse(String(raw)) as T } catch { return fallback }
-  }
+function rowToQueue(r: Record<string, unknown>): DigestQueueRow {
   return {
-    id: String(r.id),
-    project: (r.project as string | null) ?? null,
-    type: r.type as PatternRow['type'],
-    signature: String(r.signature),
-    label: String(r.label ?? ''),
-    support: Number(r.support),
-    distinctDays: Number(r.distinct_days),
-    days: parse<string[]>(r.days_json, []),
-    firstSeen: Number(r.first_seen),
-    lastSeen: Number(r.last_seen),
-    status: r.status as PatternRow['status'],
-    meta: parse<Record<string, unknown>>(r.meta_json, {}),
+    sessionId: String(r.session_id),
+    claudeSessionId: String(r.claude_session_id),
+    projectPath: (r.project_path as string | null) ?? null,
+    transcriptPath: String(r.transcript_path),
+    state: r.state as DigestQueueState,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    endedAt: r.ended_at == null ? null : Number(r.ended_at),
+    attempts: Number(r.attempts ?? 0),
   }
 }
 
 /**
- * Record `count` fresh observations of a pattern on the given days.
- *
- * Idempotency is the caller's job (the miner only feeds it events past the
- * watermark). A muted pattern is still counted — the user muted the SUGGESTION,
- * and silently dropping the observation would make the counts lie — but the
- * status is never reset, so it stays out of promotion.
+ * Record that a live session has a transcript worth digesting. Upserts an
+ * 'open' row keyed by the app session id; the transcript path and Claude id
+ * follow /resume changes. A finalised row ('done'/'skipped') is REOPENED —
+ * an archived session resumed under the same app id keeps talking into the
+ * same transcript, and the per-conversation turn watermark in `digests`
+ * guarantees the already-digested prefix is never digested twice.
  */
-export function upsertPatternObservations(input: {
-  id: string
-  project: string | null
-  type: PatternRow['type']
-  signature: string
-  label: string
-  count: number
-  days: string[]
-  firstSeen: number
-  lastSeen: number
-  meta?: Record<string, unknown>
+export function upsertQueueOpen(input: {
+  sessionId: string
+  claudeSessionId: string
+  projectPath: string | null
+  transcriptPath: string
+  now?: number
 }): void {
   if (!db) return
-  const existing = db.prepare('SELECT * FROM patterns WHERE id = ?').get(input.id) as
+  const now = input.now ?? Date.now()
+  const existing = db.prepare('SELECT * FROM digest_queue WHERE session_id = ?').get(input.sessionId) as
     | Record<string, unknown>
     | undefined
-
   if (!existing) {
-    const days = [...new Set(input.days)].sort().slice(-DAYS_WINDOW)
     db.prepare(`
-      INSERT INTO patterns (id, project, type, signature, label, support, distinct_days,
-                            days_json, first_seen, last_seen, status, meta_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?)
-    `).run(
-      input.id, input.project, input.type, input.signature, input.label,
-      input.count, days.length, JSON.stringify(days),
-      input.firstSeen, input.lastSeen, JSON.stringify(input.meta ?? {}),
-    )
+      INSERT INTO digest_queue (session_id, claude_session_id, project_path, transcript_path, state, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'open', ?, ?)
+    `).run(input.sessionId, input.claudeSessionId, input.projectPath, input.transcriptPath, now, now)
     return
   }
-
-  const prev = rowToPattern(existing)
-  const days = [...new Set([...prev.days, ...input.days])].sort().slice(-DAYS_WINDOW)
+  const conversationChanged = rowToQueue(existing).claudeSessionId !== input.claudeSessionId
   db.prepare(`
-    UPDATE patterns
-       SET support = support + ?, distinct_days = ?, days_json = ?,
-           last_seen = MAX(last_seen, ?), label = ?, meta_json = ?
-     WHERE id = ?
-  `).run(
-    input.count, days.length, JSON.stringify(days), input.lastSeen,
-    input.label, JSON.stringify({ ...prev.meta, ...(input.meta ?? {}) }), input.id,
-  )
+    UPDATE digest_queue
+       SET claude_session_id = ?, project_path = ?, transcript_path = ?,
+           state = 'open', updated_at = ?, ended_at = NULL,
+           attempts = CASE WHEN ? THEN 0 ELSE attempts END
+     WHERE session_id = ?
+  `).run(input.claudeSessionId, input.projectPath, input.transcriptPath, now, conversationChanged ? 1 : 0, input.sessionId)
 }
 
-export function setPatternStatus(id: string, status: PatternRow['status']): void {
+/** Mark a session's queue row ready for digesting (the session ended). A
+ *  no-op for sessions the queue never saw (no transcript = nothing to digest). */
+export function markQueueReady(sessionId: string, now: number = Date.now()): void {
   if (!db) return
-  db.prepare('UPDATE patterns SET status = ? WHERE id = ?').run(status, id)
+  db.prepare(`
+    UPDATE digest_queue SET state = 'ready', ended_at = ?, updated_at = ?
+     WHERE session_id = ? AND state = 'open'
+  `).run(now, now, sessionId)
 }
 
-export function getPattern(id: string): PatternRow | null {
+/** Launch catch-up: every row still 'open' belonged to a previous app run —
+ *  those sessions are gone, so their transcripts are ready to digest. Returns
+ *  how many rows were flipped. */
+export function markStaleOpenReady(now: number = Date.now()): number {
+  if (!db) return 0
+  return db.prepare(`
+    UPDATE digest_queue SET state = 'ready', ended_at = COALESCE(ended_at, ?), updated_at = ?
+     WHERE state = 'open'
+  `).run(now, now).changes
+}
+
+export function setQueueState(sessionId: string, state: DigestQueueState, now: number = Date.now()): void {
+  if (!db) return
+  db.prepare('UPDATE digest_queue SET state = ?, updated_at = ? WHERE session_id = ?')
+    .run(state, now, sessionId)
+}
+
+export function bumpQueueAttempts(sessionId: string): number {
+  if (!db) return 0
+  db.prepare('UPDATE digest_queue SET attempts = attempts + 1 WHERE session_id = ?').run(sessionId)
+  const row = db.prepare('SELECT attempts FROM digest_queue WHERE session_id = ?').get(sessionId) as
+    | { attempts: number }
+    | undefined
+  return row?.attempts ?? 0
+}
+
+export function getQueueRow(sessionId: string): DigestQueueRow | null {
   if (!db) return null
-  const row = db.prepare('SELECT * FROM patterns WHERE id = ?').get(id) as Record<string, unknown> | undefined
-  return row ? rowToPattern(row) : null
+  const row = db.prepare('SELECT * FROM digest_queue WHERE session_id = ?').get(sessionId) as
+    | Record<string, unknown>
+    | undefined
+  return row ? rowToQueue(row) : null
 }
 
-export function countPatterns(): number {
-  if (!db) return 0
-  return (db.prepare('SELECT COUNT(*) AS c FROM patterns').get() as { c: number }).c
-}
-
-export function listPatterns(filter?: { status?: PatternRow['status']; limit?: number }): PatternRow[] {
+export function listQueueRows(filter?: { state?: DigestQueueState; limit?: number }): DigestQueueRow[] {
   if (!db) return []
-  const rows = filter?.status
-    ? db.prepare('SELECT * FROM patterns WHERE status = ? ORDER BY support DESC LIMIT ?')
-        .all(filter.status, filter.limit ?? 100)
-    : db.prepare('SELECT * FROM patterns ORDER BY support DESC LIMIT ?').all(filter?.limit ?? 100)
-  return rows.map((r) => rowToPattern(r as Record<string, unknown>))
+  const rows = filter?.state
+    ? db.prepare('SELECT * FROM digest_queue WHERE state = ? ORDER BY updated_at ASC LIMIT ?')
+        .all(filter.state, filter.limit ?? 100)
+    : db.prepare('SELECT * FROM digest_queue ORDER BY updated_at ASC LIMIT ?').all(filter?.limit ?? 100)
+  return rows.map((r) => rowToQueue(r as Record<string, unknown>))
 }
 
-/**
- * Candidates that have crossed the promotion threshold: seen on at least
- * `minDistinctDays` distinct days inside the last `windowDays`. Day-based
- * rather than raw-count so a single frantic afternoon can't manufacture a
- * "habit" — a real routine shows up across days.
- */
-export function findPromotablePatterns(opts: {
-  minDistinctDays: number
-  windowDays: number
-  limit: number
+export function countQueueByState(state: DigestQueueState): number {
+  if (!db) return 0
+  return (db.prepare('SELECT COUNT(*) AS c FROM digest_queue WHERE state = ?').get(state) as { c: number }).c
+}
+
+/** Finalised queue rows older than the retention window are pruned; digests
+ *  themselves are kept (they are the curator's memory of the period). */
+export function pruneFinishedQueueRows(now: number = Date.now(), retentionDays = 30): number {
+  if (!db) return 0
+  return db
+    .prepare("DELETE FROM digest_queue WHERE state IN ('done','skipped') AND updated_at < ?")
+    .run(now - retentionDays * 86_400_000).changes
+}
+
+// ── Digests ─────────────────────────────────────────────────────────────────
+
+function rowToDigest(r: Record<string, unknown>): DigestRow {
+  return {
+    claudeSessionId: String(r.claude_session_id),
+    project: (r.project as string | null) ?? null,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
+    turns: Number(r.turns ?? 0),
+    content: String(r.content ?? ''),
+  }
+}
+
+export function getDigest(claudeSessionId: string): DigestRow | null {
+  if (!db) return null
+  const row = db.prepare('SELECT * FROM digests WHERE claude_session_id = ?').get(claudeSessionId) as
+    | Record<string, unknown>
+    | undefined
+  return row ? rowToDigest(row) : null
+}
+
+/** Insert or extend a digest. `content` REPLACES the stored text (the caller
+ *  appends its dated paragraph for incremental digests); `turns` moves the
+ *  incremental watermark forward. */
+export function upsertDigest(input: {
+  claudeSessionId: string
+  project: string | null
+  turns: number
+  content: string
   now?: number
-}): PatternRow[] {
-  if (!db) return []
-  const now = opts.now ?? Date.now()
-  const cutoff = new Date(now - opts.windowDays * 86_400_000).toISOString().slice(0, 10)
-  return listPatterns({ status: 'candidate', limit: 500 })
-    .filter((p) => p.days.filter((d) => d >= cutoff).length >= opts.minDistinctDays)
-    .sort((a, b) => b.support - a.support)
-    .slice(0, opts.limit)
+}): void {
+  if (!db) return
+  const now = input.now ?? Date.now()
+  db.prepare(`
+    INSERT INTO digests (claude_session_id, project, created_at, updated_at, turns, content)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(claude_session_id) DO UPDATE SET
+      project = excluded.project, updated_at = excluded.updated_at,
+      turns = excluded.turns, content = excluded.content
+  `).run(input.claudeSessionId, input.project, now, now, input.turns, input.content)
 }
 
-/** Decay: candidates untouched for a long time are dropped so the table can't
- *  grow without bound with one-off noise. Promoted/suggested/muted are kept. */
-export function pruneStalePatterns(now: number = Date.now(), staleDays = 45): number {
+export function listDigests(filter?: { updatedAfter?: number; limit?: number }): DigestRow[] {
+  if (!db) return []
+  const rows = filter?.updatedAfter != null
+    ? db.prepare('SELECT * FROM digests WHERE updated_at > ? ORDER BY updated_at DESC LIMIT ?')
+        .all(filter.updatedAfter, filter?.limit ?? 50)
+    : db.prepare('SELECT * FROM digests ORDER BY updated_at DESC LIMIT ?').all(filter?.limit ?? 50)
+  return rows.map((r) => rowToDigest(r as Record<string, unknown>))
+}
+
+export function countDigests(): number {
   if (!db) return 0
-  const info = db
-    .prepare("DELETE FROM patterns WHERE status = 'candidate' AND last_seen < ? AND support < 5")
-    .run(now - staleDays * 86_400_000)
-  return info.changes
+  return (db.prepare('SELECT COUNT(*) AS c FROM digests').get() as { c: number }).c
 }
 
 // ── Suggestions ─────────────────────────────────────────────────────────────
@@ -485,7 +417,6 @@ function rowToSuggestion(r: Record<string, unknown>): SuggestionRow {
 
 export function insertSuggestion(s: {
   id: string
-  patternId: string | null
   title: string
   rationale: string
   kind: SuggestionKind
@@ -495,12 +426,9 @@ export function insertSuggestion(s: {
   if (!db) return
   db.prepare(`
     INSERT INTO suggestions (id, pattern_id, created_at, title, rationale, kind, proposal_json, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    VALUES (?, NULL, ?, ?, ?, ?, ?, 'pending')
     ON CONFLICT(id) DO NOTHING
-  `).run(
-    s.id, s.patternId, s.createdAt ?? Date.now(), s.title, s.rationale, s.kind,
-    JSON.stringify(s.proposal),
-  )
+  `).run(s.id, s.createdAt ?? Date.now(), s.title, s.rationale, s.kind, JSON.stringify(s.proposal))
 }
 
 export function listSuggestions(filter?: { status?: SuggestionStatus; limit?: number }): SuggestionRow[] {
@@ -529,12 +457,30 @@ export function countPendingSuggestions(): number {
   return (db.prepare("SELECT COUNT(*) AS c FROM suggestions WHERE status = 'pending'").get() as { c: number }).c
 }
 
-/** True when a suggestion for this pattern was already dismissed or muted —
- *  the curator must not re-propose something the user has already said no to. */
-export function patternHasResolvedSuggestion(patternId: string): boolean {
-  if (!db) return false
-  const row = db
-    .prepare("SELECT COUNT(*) AS c FROM suggestions WHERE pattern_id = ? AND status IN ('dismissed','never','accepted')")
-    .get(patternId) as { c: number }
-  return row.c > 0
+/**
+ * Titles the curator must not re-propose: everything the user resolved
+ * recently, plus every 'never' regardless of age. With mined patterns gone,
+ * this list (injected into the curator prompt) plus its own journal is how
+ * "the user already said no" persists across runs.
+ */
+export function recentlyResolvedTitles(opts?: { recentDays?: number; limit?: number }): Array<{
+  title: string
+  kind: SuggestionKind
+  status: SuggestionStatus
+}> {
+  if (!db) return []
+  const cutoff = Date.now() - (opts?.recentDays ?? 45) * 86_400_000
+  const rows = db.prepare(`
+    SELECT title, kind, status FROM suggestions
+     WHERE status = 'never' OR (status IN ('accepted','dismissed') AND resolved_at >= ?)
+     ORDER BY resolved_at DESC LIMIT ?
+  `).all(cutoff, opts?.limit ?? 40) as Array<{ title: string; kind: SuggestionKind; status: SuggestionStatus }>
+  return rows
+}
+
+/** Basename of a project directory — the grouping key digests are tagged with.
+ *  (Moved here from the deleted v1 tokens.ts — the one survivor.) */
+export function projectKey(projectPath: string | null | undefined): string | null {
+  if (!projectPath) return null
+  return projectPath.split(/[\\/]/).filter(Boolean).pop() ?? null
 }

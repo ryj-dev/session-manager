@@ -60,12 +60,12 @@ import { submitDraft as githubSubmitDraft, discardDraft as githubDiscardDraft } 
 import { runGithubAgent } from './hook-server'
 import * as registry from './session-registry'
 import * as archiver from './session-archiver'
-import * as observerCapture from './observer/capture'
 import {
   acceptSuggestion,
   dismissSuggestion,
   getInbox,
   onObserverChanged,
+  readJournal,
   runObserverJobNow,
   setCuratorAttachListeners,
   startObserver,
@@ -885,17 +885,10 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   ipcMain.handle('observer:accept', (_e, id: string) => acceptSuggestion(id))
   ipcMain.handle('observer:dismiss', (_e, id: string, forever: boolean) => dismissSuggestion(id, !!forever))
   ipcMain.handle('observer:runJob', (_e, jobId: string) => runObserverJobNow(jobId))
-
-  // Renderer UI actions — the second event source (after hooks). The renderer
-  // calls this at the meaningful action sites; the payload is an action NAME
-  // plus an optional short detail, never user content.
-  ipcMain.on('observer:ui', (_e, action: string, detail?: string, projectPath?: string) => {
-    try {
-      observerCapture.recordUiAction({ action, detail, projectPath })
-    } catch (err) {
-      console.error('[observer] ui event failed:', err)
-    }
-  })
+  // The curator's observations journal, read-only for the user (Journal tab in
+  // the insights inbox). Writes only ever come from the in-flight curator run,
+  // over the token-gated hook-server endpoint.
+  ipcMain.handle('observer:journal', () => readJournal())
 
   onObserverChanged(() => sendToRenderer('observer:changed'))
 

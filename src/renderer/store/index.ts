@@ -278,6 +278,9 @@ export interface GithubItem {
   draft?: GithubDraft | null
   respondedAt?: string
   respondedSummary?: string
+  /** The (torn-down) agent's resumable conversation — powers "Discuss". */
+  agentClaudeSessionId?: string | null
+  agentCwd?: string
 }
 
 /** Mirrors GithubAutoMode / GithubAutoReviewRules in src/main/settings-store.ts. */
@@ -355,7 +358,9 @@ export interface RegistryEntry {
 // its own SQLite store; the renderer pulls the whole inbox on demand and
 // re-pulls on the 'observer:changed' broadcast.
 
-export type SuggestionKind = 'scheduled-task' | 'todo' | 'skill' | 'memory-link' | 'todo-cleanup'
+export type SuggestionKind =
+  | 'scheduled-task' | 'todo' | 'skill' | 'memory-link' | 'todo-cleanup'
+  | 'memory-note' | 'claude-md' | 'use-feature' | 'pipeline-candidate'
 export type SuggestionStatus = 'pending' | 'accepted' | 'dismissed' | 'never'
 
 export interface Suggestion {
@@ -387,8 +392,10 @@ export interface ObserverInbox {
   statusLine: string
   jobs: ObserverJobStatus[]
   activeSessionId: string | null
-  eventCount: number
-  patternCount: number
+  enabled: boolean
+  digestCount: number
+  queuedCount: number
+  journalUpdatedAt: number | null
 }
 
 // ---- Canvas (per-session UI artifacts) ----
@@ -626,6 +633,9 @@ export interface AppState {
   /** Archive inactive sessions (kill PTY, keep node, resume on click). Opt-in. */
   archiveInactiveSessions: boolean
   setArchiveInactiveSessions: (value: boolean) => void
+  /** Observer (session digests + curator). Opt-in — reads transcripts on disk. */
+  observerEnabled: boolean
+  setObserverEnabled: (value: boolean) => void
   /** Minutes of inactivity before an eligible session archives (min 5). */
   archiveInactiveMinutes: number
   setArchiveInactiveMinutes: (value: number) => void
@@ -855,12 +865,7 @@ export const useStore = create<AppState>((set, get) => ({
   viewMode: 'graph',
   setViewMode: (mode) => set({ viewMode: mode }),
   activePanel: null,
-  setActivePanel: (panel) => {
-    // Observer: panel opens are one of the highest-signal UI actions (they
-    // punctuate what the user is doing). Name only — see observer/capture.ts.
-    if (panel) window.api.observerUi(`panel.open.${panel}`)
-    set({ activePanel: panel })
-  },
+  setActivePanel: (panel) => set({ activePanel: panel }),
   focusedSessionId: null,
   setFocusedSessionId: (id) => set({ focusedSessionId: id }),
   selectedSessionIndex: 0,
@@ -1023,6 +1028,8 @@ export const useStore = create<AppState>((set, get) => ({
   setOpenBranchInSplit: (value) => set({ openBranchInSplit: value }),
   archiveInactiveSessions: false,
   setArchiveInactiveSessions: (value) => set({ archiveInactiveSessions: value }),
+  observerEnabled: false,
+  setObserverEnabled: (value) => set({ observerEnabled: value }),
   archiveInactiveMinutes: 30,
   setArchiveInactiveMinutes: (value) => set({ archiveInactiveMinutes: Math.max(5, Math.round(value) || 5) }),
   archivePinnedSessionIds: [],
@@ -1086,7 +1093,6 @@ export const useStore = create<AppState>((set, get) => ({
       projectPath = match?.projectPath ?? (state.baseProjectsDir ? `${state.baseProjectsDir}/${name}` : undefined)
     }
     if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
-    window.api.observerUi('pipeline.start', name ?? undefined, projectPath)
     void window.api.pipelineStart(todo, state.pipelineDefaultAutonomy, projectPath)
   },
   startPipelineReview: (todo, diffSource) => {
@@ -1101,7 +1107,6 @@ export const useStore = create<AppState>((set, get) => ({
       projectPath = match?.projectPath ?? (state.baseProjectsDir ? `${state.baseProjectsDir}/${name}` : undefined)
     }
     if (!projectPath) projectPath = state.baseProjectsDir ?? undefined
-    window.api.observerUi('pipeline.startReview', name ?? undefined, projectPath)
     void window.api.pipelineStartReview(todo, state.pipelineDefaultAutonomy, diffSource, projectPath)
   },
   setPipelineStage: (id, stage) => window.api.pipelineSetStage(id, stage) as Promise<PipelineTask[]>,
@@ -1116,17 +1121,11 @@ export const useStore = create<AppState>((set, get) => ({
   // 'schedules:changed' broadcast (wired in App.tsx). Mirrors the pipeline block.
   scheduledTasks: [],
   setScheduledTasks: (tasks) => set({ scheduledTasks: tasks }),
-  createScheduledTask: (data) => {
-    window.api.observerUi('schedule.create')
-    return window.api.schedulesCreate(data) as Promise<ScheduledTask>
-  },
+  createScheduledTask: (data) => window.api.schedulesCreate(data) as Promise<ScheduledTask>,
   updateScheduledTask: (id, patch) => { void window.api.schedulesUpdate(id, patch) },
   deleteScheduledTask: (id) => { void window.api.schedulesDelete(id) },
   setScheduledTaskEnabled: (id, enabled) => { void window.api.schedulesSetEnabled(id, enabled) },
-  runScheduledTaskNow: (id) => {
-    window.api.observerUi('schedule.runNow')
-    return window.api.schedulesRunNow(id)
-  },
+  runScheduledTaskNow: (id) => window.api.schedulesRunNow(id),
 
   // GitHub integration
   githubItems: [],

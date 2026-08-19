@@ -49,7 +49,7 @@ export function buildTips(hotkeys: Record<string, string>): string[] {
     // Automation
     `${fh('togglePipeline')} opens the agentic pipeline — a backlog todo becomes plan → implement → review in an isolated worktree`,
     `${fh('toggleScheduled')} schedules recurring Claude runs — daily, on an interval, or first launch of the day`,
-    `A background observer mines your usage for patterns — review its suggestions in the insights inbox (${fh('openOverview')})`,
+    `An opt-in observer digests your finished sessions and proposes automations — review them in the insights inbox (${fh('openOverview')})`,
     // Canvas + sharing
     `Ask for results "on the canvas" — sortable tables, reports, and annotated screenshots beside the terminal (${fh('toggleCanvas')})`,
     `${fh('shareTurn')} exports the current turn (prompt, tool calls, result) as markdown`,

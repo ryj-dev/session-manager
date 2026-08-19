@@ -18,8 +18,10 @@ import { validateCanvasArtifact, scaleAnnotationsToNatural, annotationBoundsErro
 import type { CanvasArtifact, CanvasArtifactPayload, CanvasArtifactSource } from './canvas-types'
 import { deriveRoleTools, stripOrchestratorOnlyTools, clampToRole } from './pipeline-roles'
 import * as registry from './session-registry'
-import * as observer from './observer/capture'
-import { authorizeSuggestRequest, endCuratorRun, ingestSuggestion, isCuratorSession } from './observer'
+import {
+  authorizeSuggestRequest, endCuratorRun, ingestSuggestion, isCuratorSession,
+  noteSessionTranscript, readJournal, writeJournal,
+} from './observer'
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 import { buildMemoryInjection } from './memory-injection'
 import * as githubStore from './github-store'
@@ -126,6 +128,7 @@ export function cleanupSession(appSessionId: string): void {
   sessionStatus.delete(appSessionId)
   awaitingPermission.delete(appSessionId)
   sessionTranscriptPath.delete(appSessionId)
+  lastDigestNote.delete(appSessionId)
   lastPtyActivity.delete(appSessionId)
   lastProjectTodoCount.delete(appSessionId)
   sessionTurnCount.delete(appSessionId)
@@ -177,6 +180,41 @@ interface HookPayload {
 /** Last transcript path seen per app session — survives /resume id changes
  *  because every hook event carries the current path. */
 const sessionTranscriptPath = new Map<string, string>()
+
+/**
+ * Feed the observer's digest queue: this session has a transcript at this
+ * path. Hook events arrive per tool call, so the SQLite upsert is throttled —
+ * re-noted only when the identity (claude id / path) changes or a few minutes
+ * have passed (which keeps the queue row's updated_at honest enough).
+ *
+ * Filtered at the source to observed session kinds (registry) so the curator's
+ * own run and drawer previews never enter the queue. Best-effort: must never
+ * break status tracking.
+ */
+const lastDigestNote = new Map<string, { key: string; at: number }>()
+const DIGEST_NOTE_THROTTLE_MS = 3 * 60_000
+
+function noteTranscriptForDigest(appSessionId: string, payload: HookPayload): void {
+  try {
+    if (!payload.transcript_path || !registry.shouldObserveSession(appSessionId)) return
+    const session = getSession(appSessionId)
+    const claudeSessionId = session?.claudeSessionId ?? payload.session_id
+    if (!claudeSessionId) return
+    const key = `${claudeSessionId}\n${payload.transcript_path}`
+    const prev = lastDigestNote.get(appSessionId)
+    const now = Date.now()
+    if (prev && prev.key === key && now - prev.at < DIGEST_NOTE_THROTTLE_MS) return
+    lastDigestNote.set(appSessionId, { key, at: now })
+    noteSessionTranscript({
+      sessionId: appSessionId,
+      claudeSessionId,
+      projectPath: session?.projectPath ?? null,
+      transcriptPath: payload.transcript_path,
+    })
+  } catch (err) {
+    console.error('[observer] transcript note failed:', err)
+  }
+}
 
 export function getTranscriptPath(appSessionId: string): string | null {
   return sessionTranscriptPath.get(appSessionId) ?? null
@@ -269,7 +307,7 @@ const GUARDED = new Set([
   '/pipeline/merge-worktree', '/pipeline/put-artifact',
   '/schedules/create', '/schedules/update', '/schedules/set-enabled', '/schedules/delete',
   '/canvas/emit', '/canvas/focus', '/canvas/inspect',
-  '/observer/suggest',
+  '/observer/suggest', '/observer/journal-read', '/observer/journal-write',
 ])
 
 export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<number> {
@@ -345,10 +383,10 @@ export function startHookServer(opts: { skipInstall?: boolean } = {}): Promise<n
         if (url.pathname === '/canvas/list')    { handleCanvasList(body, res); return }
         if (url.pathname === '/canvas/inspect') { handleCanvasInspect(body, res); return }
 
-        // ── Observer endpoint (called by the observer-suggest MCP tool) ──
-        // There is no tool-usage endpoint: MCP calls are captured from the
-        // PreToolUse hook like every other tool, in one place.
+        // ── Observer endpoints (called by the curator-only MCP tools) ──
         if (url.pathname === '/observer/suggest') { handleObserverSuggest(req, body, res); return }
+        if (url.pathname === '/observer/journal-read') { handleObserverJournal(req, body, res, 'read'); return }
+        if (url.pathname === '/observer/journal-write') { handleObserverJournal(req, body, res, 'write'); return }
 
         // ── Synchronous hook endpoint — may inject additionalContext ──
         if (url.pathname === '/hook-sync') {
@@ -789,6 +827,12 @@ export function runScheduledTask(schedule: scheduleStore.ScheduledTask): string 
 // alive is skipped (the running agent will see the newer activity itself).
 const githubItemSessions = new Map<string, string>()
 
+// Agent sessions that have delivered their github-respond, keyed by session id
+// → item id. When such a session's Stop hook fires, its PTY is torn down (same
+// path as scheduled runs) so finished review agents don't linger on the graph;
+// the conversation stays resumable via the item's agentClaudeSessionId.
+const githubRespondedSessions = new Map<string, string>()
+
 /** The kind-specific brief. Both kinds respond through the github-respond MCP
  *  tool — the draft-gate is enforced by the app (github-actions), so the agent
  *  is TOLD it cannot post directly and gh is for reading only. */
@@ -797,7 +841,9 @@ function githubAgentPrompt(item: githubStore.GithubItem, repoPath: string): stri
     `When your response is ready, call the \`mcp__session-manager__github-respond\` MCP tool with itemId "${item.id}". ` +
     `The app decides whether it is stored as a draft for the user to approve or submitted immediately — that is not your choice. ` +
     `NEVER post reviews, comments, or pushes to GitHub yourself (no \`gh pr review\`, no \`gh api\` writes, no \`git push\`) — ` +
-    `the \`gh\` CLI is for READING only. If you have nothing worth responding to, say so and stop without calling the tool.`
+    `the \`gh\` CLI is for READING only. If you have nothing worth responding to, say so and stop without calling the tool. ` +
+    `This session closes automatically when you finish (the user can re-open the conversation from the GitHub panel to discuss), ` +
+    `so end your turn after calling the tool — do not wait for user input.`
 
   if (item.kind === 'my-pr-activity') {
     return (
@@ -976,6 +1022,17 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
       createdAt: new Date().toISOString(),
     }
     githubPutDraft(payload.itemId, draft)
+
+    // Capture the agent's conversation for the panel's "Discuss" button, and
+    // flag the session for teardown on its Stop hook — finished review agents
+    // don't linger on the graph; the conversation stays resumable.
+    if (payload.sessionId) {
+      const live = getSession(payload.sessionId)
+      if (live) {
+        githubStore.setAgentSession(payload.itemId, live.claudeSessionId ?? null, live.projectPath)
+        githubRespondedSessions.set(payload.sessionId, payload.itemId)
+      }
+    }
 
     // The MODE decides what happens next — the calling agent does not.
     // 'auto' → submit right now; 'draft' and 'off' → stored, user approves.
@@ -2918,6 +2975,7 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   }
   if (payload.transcript_path) {
     sessionTranscriptPath.set(appSessionId, payload.transcript_path)
+    noteTranscriptForDigest(appSessionId, payload)
   }
 
   // Archiver: any hook traffic from a waking session proves the resumed
@@ -2925,35 +2983,6 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
   archiver.noteSessionHookEvent(appSessionId)
 
   const event = payload.hook_event_name
-
-  // ── Observer capture ──────────────────────────────────────────────────
-  // The installed hook commands already forward Claude's full stdin payload
-  // (`curl -d @-`), so PreToolUse carries tool_name + tool_input with no hook
-  // reinstall needed. Recording is best-effort and must never break status
-  // tracking, hence the try/catch around the whole block.
-  //
-  // Sessions the observer does not observe (its own curator run, drawer
-  // previews) are filtered here, at the source, so nothing downstream has to
-  // remember: an observer that mines its own reads manufactures a flawless
-  // daily "habit" out of the fact that it ran.
-  try {
-    if (registry.shouldObserveSession(appSessionId)) {
-      const projectPath = getSession(appSessionId)?.projectPath ?? null
-      if (event === 'PreToolUse' && payload.tool_name) {
-        observer.recordToolUse({
-          sessionId: appSessionId,
-          projectPath,
-          tool: payload.tool_name,
-          toolInput: payload.tool_input,
-        })
-      } else if (event === 'UserPromptSubmit') {
-        // Length only — the prompt body never reaches the store.
-        observer.recordPrompt({ sessionId: appSessionId, projectPath, promptText: payload.prompt })
-      }
-    }
-  } catch (err) {
-    console.error('[observer] hook capture failed:', err)
-  }
 
   if (event === 'Notification') {
     switch (payload.notification_type) {
@@ -2991,9 +3020,27 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
       scheduleSessionTeardown(appSessionId)
     }
 
-    // Curator completion. The run is an interactive `claude` (no -p), so when
-    // it finishes it just sits at its prompt forever: without this it leaks one
-    // Haiku process per launch, and — worse — `activeSessionId` never clears,
+    // GitHub agent completion: once its github-respond has been delivered and
+    // the turn ends, tear the PTY down (same path as scheduled runs). The
+    // claudeSessionId was captured on the item at respond time — re-read it
+    // here in case /resume changed it — so the panel's "Discuss" can re-open
+    // the conversation.
+    const githubItemId = githubRespondedSessions.get(appSessionId)
+    if (githubItemId) {
+      githubRespondedSessions.delete(appSessionId)
+      githubItemSessions.delete(githubItemId)
+      const live = getSession(appSessionId)
+      if (live?.claudeSessionId) {
+        githubStore.setAgentSession(githubItemId, live.claudeSessionId, live.projectPath)
+        win.webContents.send('github:changed', githubStore.getItems())
+      }
+      scheduleSessionTeardown(appSessionId)
+    }
+
+    // Observer-run completion (curator or housekeeping). The run is an
+    // interactive `claude` (no -p), so when it finishes it just sits at its
+    // prompt forever: without this it leaks one process per launch, and —
+    // worse — `activeSessionId` never clears,
     // so every later curator run is skipped as "already in flight" AFTER its
     // debt was zeroed. Same teardown path as a scheduled run; the run token and
     // in-flight marker are burned here rather than waiting on process exit.
@@ -3047,6 +3094,41 @@ function handleObserverSuggest(
   try {
     const payload = readJson<Parameters<typeof ingestSuggestion>[0]>(body)
     const result = ingestSuggestion(payload)
+    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(result))
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: String(err) }))
+  }
+}
+
+/**
+ * The curator's private journal, over the SAME token boundary as
+ * observer-suggest: only the in-flight run can read or replace it. The journal
+ * is curator memory, not a user surface — the user views it read-only from the
+ * insights inbox (IPC, not this endpoint).
+ */
+function handleObserverJournal(
+  req: IncomingMessage,
+  body: string,
+  res: import('http').ServerResponse,
+  mode: 'read' | 'write',
+): void {
+  const auth = authorizeSuggestRequest(req.headers)
+  if (!auth.ok) {
+    res.writeHead(403, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(auth))
+    return
+  }
+  try {
+    if (mode === 'read') {
+      const journal = readJournal()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, content: journal.content, chars: journal.chars }))
+      return
+    }
+    const payload = readJson<{ content?: unknown }>(body)
+    const result = writeJournal(payload.content)
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(result))
   } catch (err) {

@@ -24,16 +24,21 @@
  */
 
 /**
- * The session-manager MCP tools a curator run may use: read-only, plus the one
- * write path back into the inbox.
+ * The session-manager MCP tools an observer run (curator or housekeeping) may
+ * use: read-only, plus the one write path back into the inbox, plus the
+ * curator's private journal.
  *
  * `list-tags` is here so proposed todos carry correctly-cased `project:<name>`
  * tags rather than invented ones; `search-wiki` / `read-wiki-article` are here
  * so the curator can check the app's own feature docs before proposing a skill
- * that duplicates something the app already does natively.
+ * that duplicates something the app already does natively. The journal tools
+ * are the curator's cross-run memory (observer/journal.ts) — reads and writes
+ * go over the same token-gated HTTP boundary as observer-suggest.
  */
 export const CURATOR_MCP_TOOLS = [
   'observer-suggest',
+  'observer-journal-read',
+  'observer-journal-write',
   'list-todos',
   'read-todo',
   'list-tags',
@@ -46,7 +51,11 @@ export const CURATOR_MCP_TOOLS = [
 ] as const
 
 /** Tools no ordinary session gets, whatever else it is allowed to do. */
-export const OBSERVER_ONLY_TOOLS: readonly string[] = ['observer-suggest']
+export const OBSERVER_ONLY_TOOLS: readonly string[] = [
+  'observer-suggest',
+  'observer-journal-read',
+  'observer-journal-write',
+]
 
 const CURATOR_TOOL_SET: ReadonlySet<string> = new Set<string>(CURATOR_MCP_TOOLS)
 const OBSERVER_ONLY_SET: ReadonlySet<string> = new Set(OBSERVER_ONLY_TOOLS)

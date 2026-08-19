@@ -1,13 +1,24 @@
 /**
  * Observer entry point — wiring, not logic.
  *
- * Starts the store, registers the two staleness jobs, and exposes the small
+ * Starts the store, registers the three staleness jobs, and exposes the small
  * surface the IPC layer and the hook server call into. Everything substantive
- * lives in db / capture / mining / curator / apply.
+ * lives in db / digests / journal / curator / apply.
  *
- * Two jobs, both debt-based and idle-gated (see jobs.ts):
- *   - `mining`  — every ~2h of app-open time. Cheap, in-process, no LLM.
- *   - `curator` — every ~24h of app-open time. Spawns one headless Haiku run.
+ * Three jobs, all debt-based and idle-gated (see jobs.ts):
+ *   - `digests`      — every ~15min of app-open time. Drains the durable
+ *                      digest queue: one Haiku `claude -p` child per ended
+ *                      session, no PTY, no graph presence.
+ *   - `curator`      — every ~24h. Spawns one headless Sonnet run that reads
+ *                      the new digests + its own journal and reflects.
+ *   - `housekeeping` — every ~72h. Spawns one headless Haiku run for memory
+ *                      wikilinks, stale todos, and note hygiene.
+ *
+ * THE TOGGLE. The whole observer is opt-in behind `settings.observerEnabled`
+ * (default OFF — v2 reads session transcript content, which v1 never did).
+ * While disabled: no queue rows are written, no digests are generated, and no
+ * runs are scheduled. The store still opens so the inbox renders and past
+ * suggestions stay actionable.
  */
 
 import { app } from 'electron'
@@ -15,50 +26,58 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
   closeObserverDb,
-  countEvents,
+  countDigests,
   countPendingSuggestions,
+  countQueueByState,
   getSuggestion,
   initObserverDb,
   insertSuggestion,
   isObserverDbReady,
-  countPatterns,
   listSuggestions,
   resolveSuggestion,
+  SUGGESTION_KINDS,
   type SuggestionKind,
   type SuggestionRow,
 } from './db'
-import { hasMiningBacklog, lastMiningRunAt, runMiningPass } from './mining'
+import { observerEnabled } from './queue'
+import { catchUpDigestQueue, drainDigestQueue, hasDigestBacklog, setSessionQuietGate } from './digests'
+import { initJournal, readJournal } from './journal'
 import {
   jobStatuses, registerJob, setIdleGate, startJobRunner, stopJobRunner, triggerJobNow,
   type JobStatus,
 } from './jobs'
-import { allSessionsIdle, msSinceLastActivity } from '../session-registry'
+import { allSessionsIdle, getStatus, msSinceLastActivity } from '../session-registry'
 import {
   activeCuratorSessionId,
   endCuratorRun,
   isCuratorSession,
-  markPatternSuggested,
   runCurator,
+  runHousekeeping,
   setCuratorAttachListeners,
 } from './curator'
 import { authorizeSuggestRequest } from './curator-token'
-import { applySuggestion, defaultProjectPathFrom, feedbackToPattern } from './apply'
+import { applySuggestion, defaultProjectPathFrom } from './apply'
 import { loadSettings } from '../settings-store'
 import type { PtySession } from '../pty-manager'
 
 export { setCuratorAttachListeners }
-// The curator-run boundary, consumed by the hook server: token validation for
-// /observer/suggest, and the Stop-hook teardown hand-off.
+// The run boundary, consumed by the hook server: token validation for the
+// /observer/* endpoints, and the Stop-hook teardown hand-off.
 export { authorizeSuggestRequest, endCuratorRun, isCuratorSession }
+export { readJournal, writeJournal } from './journal'
+// Queue capture points (separate module so session-registry can import them
+// without a cycle).
+export { noteSessionTranscript, noteSessionEnded } from './queue'
 
-const MINING_EVERY_HOURS = 2
+const DIGESTS_EVERY_HOURS = 0.25
 const CURATOR_EVERY_HOURS = 24
+const HOUSEKEEPING_EVERY_HOURS = 72
 
-/** Quiet period required before a job may fire. Mining is cheap and invisible
- *  so it needs only a short gap; the curator spawns a real session, so it waits
- *  for a longer, more convincing lull. */
-const MINING_QUIET_MS = 60_000
-const CURATOR_QUIET_MS = 5 * 60_000
+/** Quiet period required before a job may fire. Digest drains are invisible
+ *  (child process, no UI) so they need only a short gap; the curator and
+ *  housekeeper spawn real sessions, so they wait for a convincing lull. */
+const DIGESTS_QUIET_MS = 60_000
+const RUN_QUIET_MS = 5 * 60_000
 
 /** Notified whenever the inbox changes, so the renderer badge stays live. */
 type ChangeListener = () => void
@@ -81,40 +100,66 @@ export function startObserver(): void {
     console.error('[observer] failed to initialise; observation disabled:', err)
     return
   }
+  initJournal(join(app.getPath('userData'), 'observer-journal.md'))
 
   // jobs.ts is kept free of the pty-manager/electron import chain so its debt
-  // arithmetic is unit-testable; the real idle gate is injected here.
+  // arithmetic is unit-testable; the real idle gate is injected here. Same for
+  // the incremental-digest quiet check.
   setIdleGate({ allSessionsIdle, msSinceLastActivity })
+  setSessionQuietGate((id) => getStatus(id) !== 'working')
+
+  // Catch-up: sessions that were live when the app last quit never hit a
+  // teardown path, so their queue rows are still 'open'. Flip them now.
+  if (observerEnabled()) catchUpDigestQueue()
 
   registerJob({
-    id: 'mining',
-    everyHours: MINING_EVERY_HOURS,
-    quietMs: MINING_QUIET_MS,
-    run: () => {
-      // Drain a backlog across a few passes rather than waiting a full
-      // interval per BATCH_LIMIT chunk (matters after a long busy stretch).
-      for (let i = 0; i < 5; i++) {
-        const result = runMiningPass()
-        if (result.processed === 0 || !hasMiningBacklog()) break
+    id: 'digests',
+    everyHours: DIGESTS_EVERY_HOURS,
+    quietMs: DIGESTS_QUIET_MS,
+    run: async () => {
+      if (!observerEnabled()) return false // keep the debt; fires when enabled
+      const result = await drainDigestQueue()
+      if (result.digested > 0) notify()
+      // Always a real run, never a skip — even an empty pass prunes finished
+      // queue rows. Reporting a no-op would hold the debt above the interval
+      // and re-fire the drain every single tick.
+      if (hasDigestBacklog()) {
+        // More 'ready' rows than one batch: come back next interval rather
+        // than looping here — each drain already serialises its model calls.
+        console.log('[observer] digest backlog remains after drain')
       }
-      // Always a real run, never a skip — even with no new events the pass
-      // settles finished delegations and prunes. Reporting a no-op here would
-      // hold the debt above the interval and re-fire mining every single tick.
+      return true
     },
   })
 
   registerJob({
     id: 'curator',
     everyHours: CURATOR_EVERY_HOURS,
-    quietMs: CURATOR_QUIET_MS,
+    quietMs: RUN_QUIET_MS,
     run: () => {
+      if (!observerEnabled()) return false
       const projectPath = loadSettings().baseProjectsDir || app.getPath('home')
       const result = runCurator({ projectPath })
       if (result.status === 'skipped') {
         console.log('[observer] curator skipped —', result.reason)
-        // A skip spawned nothing. Zeroing the debt here — which "Run curator
-        // now" also did — pushed the next automatic run out by a full 24h of
-        // app-open time in exchange for no work at all.
+        // A skip spawned nothing; zeroing the debt would push the next
+        // automatic run out by a full 24h of app-open time for no work.
+        return false
+      }
+      return true
+    },
+  })
+
+  registerJob({
+    id: 'housekeeping',
+    everyHours: HOUSEKEEPING_EVERY_HOURS,
+    quietMs: RUN_QUIET_MS,
+    run: () => {
+      if (!observerEnabled()) return false
+      const projectPath = loadSettings().baseProjectsDir || app.getPath('home')
+      const result = runHousekeeping({ projectPath })
+      if (result.status === 'skipped') {
+        console.log('[observer] housekeeping skipped —', result.reason)
         return false
       }
       return true
@@ -131,11 +176,10 @@ export function stopObserver(): void {
 
 // ── Suggestion ingest (called from the hook server's /observer/suggest) ─────
 
-/** Validated ingest of one curator proposal. Returns the stored id, or an
- *  error string when the payload is unusable — the curator sees the error and
- *  can correct itself rather than silently producing nothing. */
+/** Validated ingest of one observer-run proposal. Returns the stored id, or an
+ *  error string when the payload is unusable — the run sees the error and can
+ *  correct itself rather than silently producing nothing. */
 export function ingestSuggestion(input: {
-  patternId?: string | null
   title?: string
   rationale?: string
   kind?: string
@@ -143,10 +187,9 @@ export function ingestSuggestion(input: {
 }): { ok: true; id: string } | { ok: false; error: string } {
   if (!isObserverDbReady()) return { ok: false, error: 'observer store is not available' }
 
-  const VALID: SuggestionKind[] = ['scheduled-task', 'todo', 'skill', 'memory-link', 'todo-cleanup']
   const kind = input.kind as SuggestionKind
-  if (!VALID.includes(kind)) {
-    return { ok: false, error: `kind must be one of: ${VALID.join(', ')}` }
+  if (!SUGGESTION_KINDS.includes(kind)) {
+    return { ok: false, error: `kind must be one of: ${SUGGESTION_KINDS.join(', ')}` }
   }
   const title = typeof input.title === 'string' ? input.title.trim() : ''
   if (!title) return { ok: false, error: 'title is required' }
@@ -157,13 +200,11 @@ export function ingestSuggestion(input: {
   const id = randomUUID()
   insertSuggestion({
     id,
-    patternId: input.patternId?.trim() || null,
     title: title.slice(0, 200),
     rationale: (typeof input.rationale === 'string' ? input.rationale : '').slice(0, 2000),
     kind,
     proposal,
   })
-  if (input.patternId) markPatternSuggested(input.patternId)
   notify()
   return { ok: true, id }
 }
@@ -177,8 +218,10 @@ export interface ObserverInbox {
   statusLine: string
   jobs: JobStatus[]
   activeSessionId: string | null
-  eventCount: number
-  patternCount: number
+  enabled: boolean
+  digestCount: number
+  queuedCount: number
+  journalUpdatedAt: number | null
 }
 
 function fmtHours(ms: number): string {
@@ -188,35 +231,38 @@ function fmtHours(ms: number): string {
 }
 
 export function getInbox(): ObserverInbox {
+  const enabled = observerEnabled()
   if (!isObserverDbReady()) {
     return {
       suggestions: [], pendingCount: 0, jobs: [], activeSessionId: null,
-      eventCount: 0, patternCount: 0,
+      enabled, digestCount: 0, queuedCount: 0, journalUpdatedAt: null,
       statusLine: 'Observer is disabled — its store could not be opened.',
     }
   }
   const jobs = jobStatuses()
   const curator = jobs.find((j) => j.id === 'curator')
   const active = activeCuratorSessionId()
-  const eventCount = countEvents()
-  const patternCount = countPatterns()
+  const digestCount = countDigests()
+  const queuedCount = countQueueByState('ready')
+  const journal = readJournal()
 
-  const statusLine = active
-    ? `Curator is running now — judging patterns and reviewing your notes.`
-    : curator
-      ? [
-          `Watching ${eventCount.toLocaleString()} recorded actions · ${patternCount} candidate pattern${patternCount === 1 ? '' : 's'}.`,
-          curator.lastRunAt
-            ? `Last curator run ${new Date(curator.lastRunAt).toLocaleString()}.`
-            : 'The curator has not run yet.',
-          curator.remainingMs > 0
-            ? `Next after ${fmtHours(curator.remainingMs)} more app-open time.`
-            : curator.blockedBy === 'busy' || curator.blockedBy === 'quiet'
-              ? 'Due now — waiting for a quiet moment.'
-              : 'Due now.',
-          lastMiningRunAt() ? `Mining last ran ${new Date(lastMiningRunAt()).toLocaleTimeString()}.` : '',
-        ].filter(Boolean).join(' ')
-      : 'Observer starting up.'
+  const statusLine = !enabled
+    ? 'Observer is off. Enable it in Settings to digest finished sessions and get curator suggestions.'
+    : active
+      ? 'An observer run is in flight — reflecting on your recent sessions.'
+      : curator
+        ? [
+            `${digestCount.toLocaleString()} session digest${digestCount === 1 ? '' : 's'}${queuedCount > 0 ? ` · ${queuedCount} awaiting digest` : ''}.`,
+            curator.lastRunAt
+              ? `Last curator run ${new Date(curator.lastRunAt).toLocaleString()}.`
+              : 'The curator has not run yet.',
+            curator.remainingMs > 0
+              ? `Next after ${fmtHours(curator.remainingMs)} more app-open time.`
+              : curator.blockedBy === 'busy' || curator.blockedBy === 'quiet'
+                ? 'Due now — waiting for a quiet moment.'
+                : 'Due now.',
+          ].filter(Boolean).join(' ')
+        : 'Observer starting up.'
 
   return {
     suggestions: listSuggestions({ limit: 50 }),
@@ -224,8 +270,10 @@ export function getInbox(): ObserverInbox {
     statusLine,
     jobs,
     activeSessionId: active,
-    eventCount,
-    patternCount,
+    enabled,
+    digestCount,
+    queuedCount,
+    journalUpdatedAt: journal.updatedAt,
   }
 }
 
@@ -252,8 +300,10 @@ export function dismissSuggestion(id: string, forever: boolean): { ok: boolean; 
   const suggestion = getSuggestion(id)
   if (!suggestion) return { ok: false, message: 'Suggestion not found' }
   const status = forever ? 'never' : 'dismissed'
+  // 'never' rows are injected into every future curator prompt as
+  // do-not-re-propose context (db.recentlyResolvedTitles) — that, plus the
+  // curator's journal, replaces v1's pattern muting.
   resolveSuggestion(id, status, null)
-  feedbackToPattern(suggestion.patternId, status)
   notify()
   return { ok: true, message: forever ? 'Muted — this will not be suggested again' : 'Dismissed' }
 }

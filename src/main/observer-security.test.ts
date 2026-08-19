@@ -34,12 +34,15 @@ test('a curator session gets its read tools and nothing else', () => {
   }
 })
 
-test('observer-suggest is withheld from every ordinary session', () => {
+test('observer-suggest and the journal tools are withheld from ordinary sessions', () => {
   // The other half of the gate: without it, any session could file suggestions
-  // straight into the user's inbox.
-  assert.equal(isToolAllowedForRole('observer-suggest', null), false)
-  assert.equal(isToolAllowedForRole('observer-suggest', undefined), false)
-  assert.equal(isToolAllowedForRole('observer-suggest', ''), false)
+  // straight into the user's inbox — or read/rewrite the curator's private
+  // journal, which would let one session poison what the curator "remembers".
+  for (const tool of ['observer-suggest', 'observer-journal-read', 'observer-journal-write']) {
+    assert.equal(isToolAllowedForRole(tool, null), false, `${tool} must be curator-only`)
+    assert.equal(isToolAllowedForRole(tool, undefined), false)
+    assert.equal(isToolAllowedForRole(tool, ''), false)
+  }
 })
 
 test('an ordinary session keeps everything else', () => {
@@ -60,8 +63,12 @@ test('an unrecognised role fails closed rather than open', () => {
 
 test('the curator list covers what the prompt tells it to use', () => {
   // list-tags for correctly-cased project: tags on todo proposals; the wiki
-  // tools so it does not propose a skill duplicating a built-in feature.
-  for (const tool of ['list-tags', 'search-wiki', 'read-wiki-article', 'observer-suggest']) {
+  // tools so it does not propose a skill duplicating a built-in feature; the
+  // journal tools because the reflective prompt REQUIRES a journal rewrite.
+  for (const tool of [
+    'list-tags', 'search-wiki', 'read-wiki-article', 'observer-suggest',
+    'observer-journal-read', 'observer-journal-write',
+  ]) {
     assert.ok((CURATOR_MCP_TOOLS as readonly string[]).includes(tool), `${tool} missing`)
   }
 })

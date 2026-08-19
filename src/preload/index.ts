@@ -156,10 +156,10 @@ const api = {
     ipcRenderer.send('splitGroups:save', groups),
 
   // Settings
-  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; archiveInactiveSessions?: boolean; archiveInactiveMinutes?: number; }> =>
+  loadSettings: (): Promise<{ baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys?: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; archiveInactiveSessions?: boolean; archiveInactiveMinutes?: number; observerEnabled?: boolean; }> =>
     ipcRenderer.invoke('settings:load'),
 
-  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; archiveInactiveSessions?: boolean; archiveInactiveMinutes?: number; }): Promise<void> =>
+  saveSettings: (settings: { baseProjectsDir: string | null; autoFocusOnSpawn: boolean; persistExplorerPath: boolean; explorerFollowsProject: boolean; colorExplorerByProject?: boolean; hotkeys: Record<string, string>; messagePopup?: string; messagePopupSeconds?: number; todosShowCompleted?: boolean; todosSelectedTags?: string[]; todosDetailWidth?: number; autoModeForChildSessions?: boolean; autoModeForManualSessions?: boolean; autoModeForRestoredSessions?: boolean; ambientTodoNudge?: boolean; injectSpinnerTips?: boolean; memoryInjectionMode?: 'off' | 'first' | 'every'; memoryInjectionSessionCap?: number | null; memoryInjectionThreshold?: 'super-strict' | 'strict' | 'balanced' | 'lenient'; spawnIntoCurrentSplit?: boolean; terminalPairingMode?: 'off' | 'split' | 'overlay'; turnExportFolder?: string | null; turnShareDefaults?: { prompt: boolean; tool: boolean; result: boolean; toolLevel: 'summary' | 'commands' | 'full' }; openBranchInSplit?: boolean; archiveInactiveSessions?: boolean; archiveInactiveMinutes?: number; observerEnabled?: boolean; }): Promise<void> =>
     ipcRenderer.invoke('settings:save', settings),
 
   // Share Turn
@@ -446,11 +446,9 @@ const api = {
     ipcRenderer.on('observer:changed', handler)
     return (): void => { ipcRenderer.removeListener('observer:changed', handler) }
   },
-  /** Record a renderer-side user action for the observer. Fire-and-forget;
-   *  action NAMES and short details only, never user content. */
-  observerUi: (action: string, detail?: string, projectPath?: string): void =>
-    ipcRenderer.send('observer:ui', action, detail, projectPath),
-
+  /** The curator's observations journal (read-only for the user). */
+  observerJournal: (): Promise<{ exists: boolean; content: string; updatedAt: number | null; chars: number }> =>
+    ipcRenderer.invoke('observer:journal'),
   sendSessionMessage: (targetSessionId: string, message: string, fromSessionId?: string | null):
     Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('session:sendMessage', targetSessionId, message, fromSessionId),

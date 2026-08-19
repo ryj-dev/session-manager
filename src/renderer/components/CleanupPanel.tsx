@@ -153,8 +153,8 @@ const ROWS: RowDef[] = [
   },
   {
     key: 'observer',
-    title: 'Observer activity log',
-    description: 'Usage events, mined patterns and suggestions in userData/observer.db',
+    title: 'Observer store',
+    description: 'Session digests, digest queue and suggestions in userData/observer.db',
     destructive: true,
     status: (s) => ({
       label: s.observer.exists ? fmtBytes(s.observer.bytes) : 'Empty',
@@ -163,7 +163,7 @@ const ROWS: RowDef[] = [
     }),
     remove: () => window.api.cleanupRemoveObserver(),
     confirmTitle: 'Delete the observer activity log?',
-    confirmBody: (s) => `Permanently deletes ${fmtBytes(s.observer.bytes)} of recorded actions, mined patterns and suggestions (including your "never suggest this" mutes). Observation restarts from empty. This cannot be undone.`,
+    confirmBody: (s) => `Permanently deletes ${fmtBytes(s.observer.bytes)} of session digests and suggestions (including your "never suggest this" mutes). The observer restarts from empty. This cannot be undone.`,
   },
   {
     key: 'memoryInjection',

@@ -8,8 +8,8 @@
  * "everything alive right now, tagged by what owns it".
  *
  * Design constraints:
- *  - It imports only pty-manager (the PTY table) and the observer's capture
- *    funnel (a leaf module). Everything else pushes into it — hook-server
+ *  - It imports only pty-manager (the PTY table) and the observer's digest
+ *    queue notifier (a leaf module). Everything else pushes into it — hook-server
  *    writes origins + status, ipc.ts writes origins for user-initiated spawns.
  *    That keeps it free of the hook-server/pipeline/schedule import cycle.
  *  - It is derived state: pty-manager is the source of truth for liveness. An
@@ -21,7 +21,7 @@
  */
 
 import { getAllSessions, getSession, type PtySession } from './pty-manager'
-import { recordSessionLifecycle } from './observer/capture'
+import { noteSessionEnded } from './observer/queue'
 
 /** What kind of thing owns a live session. */
 export type SessionKind =
@@ -45,8 +45,8 @@ export type SessionKind =
    * Deliberately not 'user': these are not sessions the user started, they are
    * a rendering of one that already happened. Tagging them 'user' put them in
    * the graph-sessions list of the ⌘P overview (a list the graph itself does
-   * not contain), and fed a spawn/end pair per drawer-open into the observer's
-   * event log, where they read as real session activity and skewed mining.
+   * not contain), and made each drawer-open read to the observer as real
+   * session activity.
    */
   | 'preview'
 
@@ -102,23 +102,26 @@ const origins = new Map<string, SessionOrigin>()
 const statuses = new Map<string, RegistryStatus>()
 
 /**
- * Session kinds the observer does NOT record activity for.
+ * Session kinds the observer does NOT digest.
  *
  * 'preview' — a drawer re-rendering an old conversation is not the user doing
- * something; counting it would make "opened the pipeline drawer" look like a
- * daily session habit.
+ * something new; its transcript belongs to the session that already ran.
  *
- * 'observer' — the curator's own run. Its reads (list-memories, read-todo,
- * search-wiki, the Grep/Read it does to check evidence) went into the same log
- * it is judging, so it observed itself: a perfectly regular once-a-day
- * "habit", by construction present on every day the curator ran, feeding its
- * own mining a pattern only it produces. The observer is not a user.
+ * 'observer' — the curator's own run. Digesting it would feed the curator a
+ * summary of itself every day, by construction. The observer is not a user.
+ *
+ * 'pipeline' / 'scheduled' — automated runs whose intent is already known (the
+ * task brief, the schedule prompt). Digests exist to recover the USER's intent
+ * and friction; summarising automation output would drown that signal and
+ * multiply the Haiku spend for nothing the curator can act on.
  */
-const UNOBSERVED_KINDS: ReadonlySet<SessionKind> = new Set<SessionKind>(['preview', 'observer'])
+const UNOBSERVED_KINDS: ReadonlySet<SessionKind> = new Set<SessionKind>([
+  'preview', 'observer', 'pipeline', 'scheduled',
+])
 
-/** True when this session's activity belongs in the observer's event log.
- *  Untagged sessions are observed — the default has to be "record it", or a
- *  future spawn path that forgets to tag itself would go silently unmined. */
+/** True when this session's transcript belongs in the observer's digest queue.
+ *  Untagged sessions are observed — the default has to be "digest it", or a
+ *  future spawn path that forgets to tag itself would go silently undigested. */
 export function shouldObserveSession(id: string): boolean {
   const kind = origins.get(id)?.kind
   return kind === undefined || !UNOBSERVED_KINDS.has(kind)
@@ -152,20 +155,6 @@ function notify(): void {
 export function setOrigin(id: string, origin: SessionOrigin): void {
   const prev = origins.get(id)
   origins.set(id, prev ? { ...prev, ...origin } : origin)
-  // The registry is the one choke point every spawn path already goes through,
-  // so it is also where the observer learns a session began. Only the FIRST
-  // tag emits — later calls refine an existing origin, they aren't new sessions
-  // — and only for kinds whose activity is the user's own (see UNOBSERVED_KINDS).
-  if (!prev && !UNOBSERVED_KINDS.has(origin.kind)) {
-    recordSessionLifecycle({
-      sessionId: id,
-      projectPath: getSession(id)?.projectPath ?? null,
-      action: 'spawn',
-      sessionKind: origin.kind,
-      parentSessionId: origin.parentSessionId ?? null,
-      agentName: origin.agentName ?? null,
-    })
-  }
   notify()
 }
 
@@ -193,25 +182,20 @@ export function setStatus(id: string, status: RegistryStatus): void {
 
 /** Drop all registry state for a session (call alongside PTY teardown). */
 export function forget(id: string): void {
-  const origin = origins.get(id)
   origins.delete(id)
   statuses.delete(id)
-  if (!origin) return
-  // Close the pair in the event log — but only for the kinds whose 'spawn' we
-  // recorded in the first place, or the log accumulates unmatched ends.
-  if (!UNOBSERVED_KINDS.has(origin.kind)) {
-    // Teardown usually kills the PTY first, so projectPath is often already
-    // gone — the session id is enough to close the pair in the event log.
-    recordSessionLifecycle({
-      sessionId: id,
-      projectPath: getSession(id)?.projectPath ?? null,
-      action: 'end',
-      sessionKind: origin.kind,
-      parentSessionId: origin.parentSessionId ?? null,
-      agentName: origin.agentName ?? null,
-    })
-  }
+  // The registry is the one choke point every teardown path goes through —
+  // ⌘⇧W close, kill, PTY exit, archive — so it is where the observer's digest
+  // queue learns a session ended. A no-op for sessions the queue never saw
+  // (unobserved kinds never get a queue row; see hook-server's capture filter).
+  noteSessionEnded(id)
   notify()
+}
+
+/** The latest hook-derived status for a session, or undefined if none was
+ *  ever reported. Used by the observer's incremental-digest quiet gate. */
+export function getStatus(id: string): RegistryStatus | undefined {
+  return statuses.get(id)
 }
 
 function projectNameFromPath(p: string): string {

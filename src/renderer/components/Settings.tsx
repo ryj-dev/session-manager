@@ -60,6 +60,8 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
   const setTurnExportFolder = useStore((s) => s.setTurnExportFolder)
   const turnShareDefaults = useStore((s) => s.turnShareDefaults)
   const setTurnShareDefaults = useStore((s) => s.setTurnShareDefaults)
+  const observerEnabled = useStore((s) => s.observerEnabled)
+  const setObserverEnabled = useStore((s) => s.setObserverEnabled)
   const archiveInactiveSessions = useStore((s) => s.archiveInactiveSessions)
   const setArchiveInactiveSessions = useStore((s) => s.setArchiveInactiveSessions)
   const archiveInactiveMinutes = useStore((s) => s.archiveInactiveMinutes)
@@ -306,6 +308,26 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
                   <span className="text-xs text-zinc-500">minutes of inactivity (min 5)</span>
                 </div>
               )}
+            </div>
+
+            {/* Observer */}
+            <div className="mb-6">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Observer</div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={observerEnabled}
+                  onChange={(e) => setObserverEnabled(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-800 accent-blue-500"
+                />
+                <span className="text-xs text-zinc-300">Enable the observer &amp; curator</span>
+              </label>
+              <p className="text-[10px] text-zinc-600 mt-1 ml-5">
+                Digests each finished session (one Haiku paragraph of intent &amp; friction, read from the
+                session transcripts Claude Code keeps on disk) and runs a daily curator that proposes
+                automations, memory notes and cleanups to your insights inbox. Nothing happens until you
+                accept a suggestion. While off, no transcripts are read and no background runs are scheduled.
+              </p>
             </div>
 
             {/* Completed-item filter */}

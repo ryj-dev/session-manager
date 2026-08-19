@@ -1948,17 +1948,16 @@ server.tool(
   'Propose ONE automation or curation action to the user\'s insights inbox. You do not perform the action — the user accepts or dismisses it. Use this only when you can describe a concrete, genuinely useful change; rejecting a pattern is the expected outcome for most of them.',
   {
     title: z.string().describe('One line the user reads in their inbox, e.g. "Run the morning repo health check automatically".'),
-    kind: z.enum(['scheduled-task', 'todo', 'skill', 'memory-link', 'todo-cleanup'])
+    kind: z.enum(['scheduled-task', 'todo', 'skill', 'memory-link', 'todo-cleanup', 'memory-note', 'claude-md', 'use-feature', 'pipeline-candidate'])
       .describe('What kind of thing you are proposing. Determines the required shape of `proposal`.'),
-    proposal: z.record(z.string(), z.unknown()).describe('The concrete proposal. scheduled-task: { name, prompt, projectPath, recurrence:{kind,minutes?|hour?,minute?}, launch, model? }. skill: { name, description, body }. todo: { title, body, tags }. memory-link: { from, to }. todo-cleanup: { todoId, action:"close" }.'),
-    rationale: z.string().optional().describe('1-3 sentences: what you observed and why this helps. Cite the actual counts you were given.'),
-    patternId: z.string().optional().describe('The patternId this came from, when it came from a mined usage pattern. Omit for housekeeping proposals.'),
+    proposal: z.record(z.string(), z.unknown()).describe('The concrete proposal. scheduled-task: { name, prompt, projectPath, recurrence:{kind,minutes?|hour?,minute?}, launch, model? }. skill: { name, description, body }. todo: { title, body, tags }. memory-link: { from, to }. todo-cleanup: { todoId, action:"close" }. memory-note: { title, type, content }. claude-md: { text }. use-feature: { feature:"<wiki slug>", why }. pipeline-candidate: { title, body, tags }.'),
+    rationale: z.string().optional().describe('1-3 sentences: what you observed and why this helps. Cite the digests or evidence you saw.'),
   },
-  async ({ title, kind, proposal, rationale, patternId }) => {
+  async ({ title, kind, proposal, rationale }) => {
     try {
       const result = await callHookServer(
         '/observer/suggest',
-        { title, kind, proposal, rationale, patternId },
+        { title, kind, proposal, rationale },
         CURATOR_TOKEN ? { 'X-Curator-Token': CURATOR_TOKEN } : {},
       ) as { ok: boolean; id?: string; error?: string }
       if (!result.ok) {
@@ -1968,6 +1967,62 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: 'text', text: `Error filing suggestion: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      }
+    }
+  }
+)
+
+// ── observer-journal-read / observer-journal-write ─────────────────────────
+// The curator's private cross-run memory. Registration-gated to observer runs
+// (same as observer-suggest) and re-checked against the per-run token by the
+// app, so no ordinary session can read or rewrite the curator's journal.
+
+server.tool(
+  'observer-journal-read',
+  'Read your observations journal — your own notes from previous curator runs (hypotheses, evidence counts, rejected ideas, what to watch for). Call this FIRST, before judging anything.',
+  {},
+  async () => {
+    try {
+      const result = await callHookServer(
+        '/observer/journal-read',
+        {},
+        CURATOR_TOKEN ? { 'X-Curator-Token': CURATOR_TOKEN } : {},
+      ) as { ok: boolean; content?: string; error?: string }
+      if (!result.ok) {
+        return { content: [{ type: 'text', text: `Journal read failed: ${result.error}` }], isError: true }
+      }
+      const text = result.content?.trim()
+      return { content: [{ type: 'text', text: text ? text : '(journal is empty — this is your first run)' }] }
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error reading journal: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      }
+    }
+  }
+)
+
+server.tool(
+  'observer-journal-write',
+  'Replace your observations journal with an updated version. Call this ONCE at the end of every run, even if you suggested nothing — it is the only memory you carry into the next run. Whole-document replace: include everything worth keeping, compact ruthlessly.',
+  {
+    content: z.string().describe('The full new journal (markdown). Capped at ~64k characters — if rejected as too large, compact and retry.'),
+  },
+  async ({ content }) => {
+    try {
+      const result = await callHookServer(
+        '/observer/journal-write',
+        { content },
+        CURATOR_TOKEN ? { 'X-Curator-Token': CURATOR_TOKEN } : {},
+      ) as { ok: boolean; error?: string }
+      if (!result.ok) {
+        return { content: [{ type: 'text', text: `Journal write rejected: ${result.error}` }], isError: true }
+      }
+      return { content: [{ type: 'text', text: `Journal updated (${content.length} chars).` }] }
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error writing journal: ${err instanceof Error ? err.message : String(err)}` }],
         isError: true,
       }
     }
