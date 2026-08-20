@@ -39,6 +39,10 @@ A `401` mid-flight (rotated/revoked token) never goes silently stale: the poller
 
 Under **draft** mode (and for all manual starts) the response lands on the item as a **"Draft ready"** block — view it, then **Submit** (the app posts the review, or pushes the commits + posts the replies, using your token) or **Discard**. Under **auto** mode the app submits immediately. A pending draft is never hidden by filters; failed submissions keep the draft for retry; submitted items show a "✓ responded" record.
 
+**"Nothing to do" is a real outcome.** Plenty of activity doesn't deserve a reply — a Linear/CI bot comment, colleagues talking to each other, an approval with no questions. The agent closes those out by calling `github-respond` with type **`none`** and a one-line reason; the item gets a muted **"⊘ no action needed — <reason>"** record, the thread is marked read, and **nothing is posted to GitHub**. The reasoning stays resumable via **Discuss**, same as any response.
+
+This is mandatory, not optional: an agent that simply ends its turn without calling `github-respond` leaves the item **stuck** — it can neither finish nor re-trigger, because the one-agent-per-item guard still believes a session is running. As a backstop the app now tears down *any* finished GitHub agent (crashed or silent included) and releases that guard, so a misbehaving agent costs you one missed response rather than a permanently frozen item.
+
 **Agents run in the background, off the graph** (like scheduled runs); mid-run they're visible in the ⌘P overview under "GitHub agents", and their panel card shows a pulsing **Watch live** button that opens the working terminal. Results surface via the amber **"N drafts ready"** pill in the graph's corner (like the insights pill) — no native notifications.
 
 **Session lifecycle** (focus-aware):
@@ -53,7 +57,7 @@ The agent's **model** is configurable in Settings → GitHub auto-review (haiku/
 
 ### Auto-start rules (Settings → GitHub auto-review)
 
-Per event kind — review requests / mentions / comments on my PRs — choose **Off** (manual buttons only, the default), **Draft** (auto-spawn, you approve the result), or **Auto** (auto-spawn and post directly). Safeguards: one active agent per item, self-echo suppression (activity authored by your own login never triggers a spawn), and only open/draft PRs qualify. An approval with no comments generates no response — it just sits in Unread activity until seen.
+Per event kind — review requests / mentions / comments on my PRs — choose **Off** (manual buttons only, the default), **Draft** (auto-spawn, you approve the result), or **Auto** (auto-spawn and post directly). Safeguards: one active agent per item, self-echo suppression (activity authored by your own login never triggers a spawn), and only open/draft PRs qualify. Something with nothing to answer (an approval carrying no comments, a bot notice) is closed out as "⊘ no action needed" rather than generating a response.
 
 ### MCP tools (agent visibility)
 
@@ -61,7 +65,7 @@ Per event kind — review requests / mentions / comments on my PRs — choose **
 |------|---------|
 | `github-inbox` | The triaged inbox with filters (kind/unread/state/repo/since) + counts envelope (unread per kind, active, drafts pending) |
 | `github-get-item` | One item in full, including its pending draft |
-| `github-respond` | Hand over a prepared response — the app stores it as a draft or submits it, per the rules; agents never choose |
+| `github-respond` | Close out an item: hand over a prepared response (the app stores it as a draft or submits it, per the rules — agents never choose), or record type `none` when no response is warranted |
 | `github-mark-read` | Clear a thread on GitHub after handling it |
 
 PR content (diffs, comments, checkouts) stays on the gh CLI — these tools only cover the app's triage and the response gate.

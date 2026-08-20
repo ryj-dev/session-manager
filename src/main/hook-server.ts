@@ -918,7 +918,10 @@ function githubAgentPrompt(item: githubStore.GithubItem, repoPath: string): stri
     `When your response is ready, call the \`mcp__session-manager__github-respond\` MCP tool with itemId "${item.id}". ` +
     `The app decides whether it is stored as a draft for the user to approve or submitted immediately — that is not your choice. ` +
     `NEVER post reviews, comments, or pushes to GitHub yourself (no \`gh pr review\`, no \`gh api\` writes, no \`git push\`) — ` +
-    `the \`gh\` CLI is for READING only. If you have nothing worth responding to, say so and stop without calling the tool. ` +
+    `the \`gh\` CLI is for READING only. ` +
+    `You MUST call github-respond exactly once, EVEN IF the answer is "nothing to do" — in that case pass type "none" with ` +
+    `a one-line \`body\` saying why (e.g. "Linear bot comment, nothing actionable", "colleague discussion, not addressed to me"). ` +
+    `Deciding not to respond is a valid outcome; ending your turn without calling the tool is not, and leaves the item stuck. ` +
     `This session closes automatically when you finish (the user can re-open the conversation from the GitHub panel to discuss), ` +
     `so end your turn after calling the tool — do not wait for user input.`
 
@@ -1083,7 +1086,7 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
   try {
     const payload = readJson<{
       itemId: string
-      type: 'review' | 'reply-with-fixes'
+      type: 'review' | 'reply-with-fixes' | 'none'
       verdict?: 'approve' | 'request-changes' | 'comment'
       body: string
       comments?: { path: string; line: number; body: string }[]
@@ -1098,6 +1101,38 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
       res.end(JSON.stringify({ error: `GitHub item ${payload.itemId} not found` }))
       return
     }
+    // Capture the agent's conversation for the panel's "Discuss" button, and
+    // flag the session for teardown on its Stop hook — finished review agents
+    // don't linger on the graph; the conversation stays resumable. Applies to
+    // EVERY outcome including 'none': deciding not to respond is still a
+    // finished run, and the user may well want to ask why.
+    if (payload.sessionId) {
+      const live = getSession(payload.sessionId)
+      if (live) {
+        githubStore.setAgentSession(payload.itemId, live.claudeSessionId ?? null, live.projectPath)
+        githubRespondedSessions.set(payload.sessionId, payload.itemId)
+      }
+    }
+
+    // 'none' — the agent read the activity and judged that no response is
+    // warranted (a bot comment, colleague chatter, nothing actionable). Record
+    // the decision and clear the thread. This exists because the alternative
+    // (end the turn without calling the tool) is indistinguishable from a crash:
+    // the item keeps its per-item guard and its "Watch live" marker forever, so
+    // it can neither finish nor re-trigger. Nothing is posted to GitHub.
+    if (payload.type === 'none') {
+      const reason = payload.body?.trim() || 'No response needed'
+      githubStore.markDismissed(payload.itemId, reason)
+      broadcastGithubItems()
+      void githubMarkThreadRead(payload.itemId)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        status: 'dismissed',
+        summary: `Recorded "no response needed" — ${reason}. Nothing was posted to GitHub; the thread is marked read. End your turn.`,
+      }))
+      return
+    }
+
     const draft: githubStore.GithubDraft = {
       type: payload.type,
       verdict: payload.verdict,
@@ -1110,17 +1145,6 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
       createdAt: new Date().toISOString(),
     }
     githubPutDraft(payload.itemId, draft)
-
-    // Capture the agent's conversation for the panel's "Discuss" button, and
-    // flag the session for teardown on its Stop hook — finished review agents
-    // don't linger on the graph; the conversation stays resumable.
-    if (payload.sessionId) {
-      const live = getSession(payload.sessionId)
-      if (live) {
-        githubStore.setAgentSession(payload.itemId, live.claudeSessionId ?? null, live.projectPath)
-        githubRespondedSessions.set(payload.sessionId, payload.itemId)
-      }
-    }
 
     // The MODE decides what happens next — the calling agent does not.
     // 'auto' → submit right now; 'draft' and 'off' → stored, user approves.
@@ -3115,7 +3139,14 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     // it); otherwise tear the PTY down (same path as scheduled runs). The
     // conversation id was captured at respond time and is re-read in the
     // finalizer, so the panel's "Discuss" can always re-open it.
-    const githubItemId = githubRespondedSessions.get(appSessionId)
+    // The fallback to githubAgentBySession matters: an agent that ends WITHOUT
+    // calling github-respond (crash, confusion, or a model that just stops)
+    // used to leave the item wedged forever — PTY unreclaimed, "Watch live"
+    // pulsing, and the per-item guard permanently reporting "still running" so
+    // it could never re-trigger either. Any finished github agent gets torn
+    // down now. Safe against a mid-work Stop: if the user is watching, the
+    // deferred path below keeps the terminal open for them anyway.
+    const githubItemId = githubRespondedSessions.get(appSessionId) ?? githubAgentBySession.get(appSessionId)
     if (githubItemId) {
       githubRespondedSessions.delete(appSessionId)
       githubItemSessions.delete(githubItemId)

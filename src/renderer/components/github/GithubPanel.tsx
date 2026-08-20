@@ -612,10 +612,18 @@ function ItemCard({
         </div>
       )}
 
-      {/* Submission record. */}
+      {/* Close-out record: a submitted response (green) or an agent's explicit
+          "no response needed" decision (muted — nothing was posted). */}
       {!item.draft && item.respondedAt && (
-        <p className="mt-1.5 flex items-center gap-2 text-[10px] text-green-400/70">
-          <span>✓ {item.respondedSummary} · {fmtAgo(item.respondedAt)}</span>
+        <p
+          className={`mt-1.5 flex items-center gap-2 text-[10px] ${
+            item.respondedKind === 'dismissed' ? 'text-zinc-500' : 'text-green-400/70'
+          }`}
+        >
+          <span>
+            {item.respondedKind === 'dismissed' ? '⊘ no action needed' : '✓'} {item.respondedSummary} ·{' '}
+            {fmtAgo(item.respondedAt)}
+          </span>
           {canDiscuss && (
             <button
               onClick={onDiscuss}

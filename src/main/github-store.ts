@@ -75,10 +75,17 @@ export interface GithubItem {
    *  open because the user is watching it) — powers the panel's "Watch live"
    *  button. Cleared when the PTY is finally torn down. */
   agentSessionId?: string | null
-  /** ISO timestamp of the last submitted response, with a one-line summary —
-   *  set by github-actions on successful submit. */
+  /** ISO timestamp of the last time this item was BROUGHT TO A CLOSE, with a
+   *  one-line summary. Either a response was submitted (github-actions, on
+   *  success) or an agent explicitly determined none was warranted — see
+   *  respondedKind. */
   respondedAt?: string
   respondedSummary?: string
+  /** How the item was closed out: 'submitted' = a response went to GitHub,
+   *  'dismissed' = an agent judged no response warranted (github-respond with
+   *  type 'none'). Absent on items closed out before this field existed —
+   *  treat missing as 'submitted'. */
+  respondedKind?: 'submitted' | 'dismissed'
 }
 
 interface GithubData {
@@ -135,6 +142,7 @@ export function upsertItems(incoming: GithubItem[]): GithubItem[] {
             draft: prev.draft,
             respondedAt: prev.respondedAt,
             respondedSummary: prev.respondedSummary,
+            respondedKind: prev.respondedKind,
             agentClaudeSessionId: prev.agentClaudeSessionId,
             agentCwd: prev.agentCwd,
             agentSessionId: prev.agentSessionId,
@@ -181,7 +189,24 @@ export function setAgentSession(id: string, claudeSessionId: string | null, cwd:
 export function markResponded(id: string, summary: string): GithubItem[] {
   return persist(
     getItems().map((i) =>
-      i.id === id ? { ...i, draft: null, respondedAt: new Date().toISOString(), respondedSummary: summary } : i,
+      i.id === id
+        ? { ...i, draft: null, respondedAt: new Date().toISOString(), respondedSummary: summary, respondedKind: 'submitted' as const }
+        : i,
+    ),
+  )
+}
+
+/** An agent judged that NO response is warranted (github-respond type 'none').
+ *  Closes the item out exactly like a submission — same timestamp field, so the
+ *  panel and every respondedAt consumer keep working — but recorded as
+ *  'dismissed' so the UI can say "no action needed" rather than "responded".
+ *  Nothing is posted to GitHub. */
+export function markDismissed(id: string, reason: string): GithubItem[] {
+  return persist(
+    getItems().map((i) =>
+      i.id === id
+        ? { ...i, draft: null, respondedAt: new Date().toISOString(), respondedSummary: reason, respondedKind: 'dismissed' as const }
+        : i,
     ),
   )
 }

@@ -278,6 +278,9 @@ export interface GithubItem {
   draft?: GithubDraft | null
   respondedAt?: string
   respondedSummary?: string
+  /** 'submitted' = a response went to GitHub; 'dismissed' = an agent judged
+   *  none was warranted. Missing on items closed out before this existed. */
+  respondedKind?: 'submitted' | 'dismissed'
   /** The (torn-down) agent's resumable conversation — powers "Discuss". */
   agentClaudeSessionId?: string | null
   agentCwd?: string

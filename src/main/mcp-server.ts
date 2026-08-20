@@ -229,7 +229,7 @@ Statuses in v1: \`not-started\` and \`completed\` only. Assignment and agent dis
 
 ## GitHub inbox (Cmd+G panel)
 
-The app polls the user's GitHub PR notifications into a triaged inbox. **github-inbox** lists what needs attention (with unread/active/draft counts), **github-get-item** fetches one item incl. its pending draft, **github-mark-read** clears a thread on GitHub (GitHub's read-state is the source of truth). To respond to an item, prepare the response and hand it over with **github-respond** — the APP decides whether it becomes a user-approved draft or is submitted immediately; never post reviews/replies to GitHub directly (gh CLI is for reading PR content only) and never \`git push\` fix commits (commit locally, set commitsReady, the app pushes on submit).
+The app polls the user's GitHub PR notifications into a triaged inbox. **github-inbox** lists what needs attention (with unread/active/draft counts), **github-get-item** fetches one item incl. its pending draft, **github-mark-read** clears a thread on GitHub (GitHub's read-state is the source of truth). To respond to an item, prepare the response and hand it over with **github-respond** — the APP decides whether it becomes a user-approved draft or is submitted immediately; never post reviews/replies to GitHub directly (gh CLI is for reading PR content only) and never \`git push\` fix commits (commit locally, set commitsReady, the app pushes on submit). If an item turns out to need no response at all, still call **github-respond** with type \`none\` and a one-line reason — that is how an item is closed out cleanly.
 
 Memory notes stored in: ${MEMORIES_DIR}`
   }
@@ -978,12 +978,12 @@ server.tool(
 
 server.tool(
   'github-respond',
-  "Hand a prepared response for a GitHub inbox item to the app. THE APP decides what happens: under draft mode it is stored for the user to approve and submit from the panel; under auto mode it is posted to GitHub immediately. You do not choose — never try to post to GitHub directly instead (no gh pr review / gh api writes / git push). For type 'review' provide verdict + body + optional line comments. For type 'reply-with-fixes' provide per-thread replies and, if you committed fixes locally (never push yourself), commitsReady + repoPath.",
+  "Close out a GitHub inbox item: hand over a prepared response, or record that none is warranted. THE APP decides what happens to a response: under draft mode it is stored for the user to approve and submit from the panel; under auto mode it is posted to GitHub immediately. You do not choose — never try to post to GitHub directly instead (no gh pr review / gh api writes / git push). For type 'review' provide verdict + body + optional line comments. For type 'reply-with-fixes' provide per-thread replies and, if you committed fixes locally (never push yourself), commitsReady + repoPath. For type 'none' provide just a one-line body explaining why nothing is needed. ALWAYS call this exactly once before ending your turn — an item you leave without calling it gets stuck (it can neither finish nor re-trigger), so 'none' is the correct exit when there is nothing to say.",
   {
     itemId: z.string().describe('The inbox item id this responds to'),
-    type: z.enum(['review', 'reply-with-fixes']).describe("'review' = a PR review (requests/mentions). 'reply-with-fixes' = replies (and optional local commits) on the user's own PR."),
+    type: z.enum(['review', 'reply-with-fixes', 'none']).describe("'review' = a PR review (requests/mentions). 'reply-with-fixes' = replies (and optional local commits) on the user's own PR. 'none' = no response is warranted (bot comment, chatter, nothing actionable) — records the decision, marks the thread read, posts nothing."),
     verdict: z.enum(['approve', 'request-changes', 'comment']).optional().describe('Reviews only: the review event'),
-    body: z.string().describe('Review summary / overview comment (markdown)'),
+    body: z.string().describe("Review summary / overview comment (markdown). For type 'none': a one-line reason why no response is needed."),
     comments: z.array(z.object({
       path: z.string().describe('File path in the repo'),
       line: z.number().describe('Line number in the diff'),
