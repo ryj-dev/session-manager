@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from '../store'
 import { useHotkeyDisplay } from '../lib/hotkeys'
+import { requestGraphRelayout } from '../hooks/useSimulation'
 
 interface SettingsProps {
   visible: boolean
@@ -13,6 +14,11 @@ interface SettingsProps {
 
 export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, onOpenCleanup }: SettingsProps): JSX.Element {
   const baseProjectsDir = useStore((s) => s.baseProjectsDir)
+  const viewMode = useStore((s) => s.viewMode)
+  const setViewMode = useStore((s) => s.setViewMode)
+  const focusedSessionId = useStore((s) => s.focusedSessionId)
+  const setFocusedSessionId = useStore((s) => s.setFocusedSessionId)
+  const markSessionSeen = useStore((s) => s.markSessionSeen)
   const setBaseProjectsDir = useStore((s) => s.setBaseProjectsDir)
   const autoFocusOnSpawn = useStore((s) => s.autoFocusOnSpawn)
   const setAutoFocusOnSpawn = useStore((s) => s.setAutoFocusOnSpawn)
@@ -192,6 +198,41 @@ export function Settings({ visible, onClose, onOpenShortcuts, onOpenStatusline, 
               </label>
               <p className="text-[10px] text-zinc-600 mt-1 ml-5">
                 Automatically enter a session after spawning it
+              </p>
+            </div>
+
+            {/* Graph layout */}
+            <div className="mb-6">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Graph layout</div>
+              <button
+                onClick={() => {
+                  requestGraphRelayout()
+                  // Show the result: return to the graph if we're inside a session.
+                  if (viewMode !== 'graph') {
+                    if (focusedSessionId) markSessionSeen(focusedSessionId)
+                    setFocusedSessionId(null)
+                    setViewMode('graph')
+                  }
+                  onClose()
+                }}
+                className="w-full flex items-center justify-between px-3 py-2.5 bg-zinc-800 hover:bg-zinc-750 border border-zinc-700 hover:border-zinc-600 rounded-lg transition-colors group"
+              >
+                <div className="flex items-center gap-2.5">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="text-zinc-400">
+                    <circle cx="7" cy="7" r="1.6" stroke="currentColor" strokeWidth="1.2" />
+                    <circle cx="2.5" cy="3" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                    <circle cx="11.5" cy="3" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                    <circle cx="2.5" cy="11" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                    <circle cx="11.5" cy="11" r="1.3" stroke="currentColor" strokeWidth="1.1" />
+                    <path d="M5.8 6L3.6 3.9M8.2 6l2.2-2.1M5.8 8l-2.2 2.1M8.2 8l2.2 2.1" stroke="currentColor" strokeWidth="0.9" strokeLinecap="round" />
+                  </svg>
+                  <span className="text-xs text-zinc-300">Re-layout graph</span>
+                </div>
+                <span className="text-[10px] text-zinc-600 group-hover:text-zinc-400 transition-colors">Tidy</span>
+              </button>
+              <p className="text-[10px] text-zinc-600 mt-1.5">
+                Forget where projects were placed and solve a fresh, compact layout. Normally the graph
+                only moves a project to clear an overlap or to gently close a gap after sessions end.
               </p>
             </div>
 

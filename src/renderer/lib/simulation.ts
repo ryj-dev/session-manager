@@ -2,8 +2,6 @@ import {
   forceSimulation,
   forceManyBody,
   forceCollide,
-  forceX,
-  forceY,
   type Simulation,
   type SimulationNodeDatum
 } from 'd3-force'
@@ -15,6 +13,20 @@ export interface HubNode extends SimulationNodeDatum {
   projectName: string
   color: string
   sessionCount: number
+  /**
+   * Soft anchor: the position this hub settled at last time. Anchored hubs are
+   * pulled back toward it (instead of being hard-pinned via fx/fy) so the
+   * collision force can still shove them just far enough to clear an overlap.
+   * Cleared to let a hub participate in a fresh layout / compaction pass.
+   */
+  anchorX?: number
+  anchorY?: number
+  /**
+   * Actual footprint radius from the spokes currently laid out around this
+   * hub (see clusterExtent). Falls back to clusterRadius(sessionCount), the
+   * worst-case estimate, when unset.
+   */
+  radius?: number
 }
 
 export interface SpokeTarget {
@@ -135,6 +147,37 @@ export const THUMB_HEIGHT = 120
 const MIN_SPOKE_SPACING = 30 // min gap between thumbnail edges
 export const BASE_RADIUS = 200
 export const RING_GAP = 180
+/** Tighter first ring for one- or two-session projects so a lone thumbnail
+ *  doesn't reserve a 600px-wide collision circle around its hub. */
+const SMALL_CLUSTER_RADIUS = 150
+const SMALL_CLUSTER_MAX = 2
+
+/** Radius of ring `ring` (0-based) for a project with `sessionCount` sessions. */
+function ringRadius(ring: number, sessionCount: number): number {
+  if (ring === 0 && sessionCount <= SMALL_CLUSTER_MAX) return SMALL_CLUSTER_RADIUS
+  return BASE_RADIUS + ring * RING_GAP
+}
+
+// The hub pill and the thumbnail are both wide, flat rectangles, so a fixed
+// centre-to-centre radius leaves almost no visible edge when the spoke runs
+// sideways (pill half-width + thumb half-width ≈ the whole radius) while
+// wasting space when it runs up or down. Enforce the gap between the two
+// rectangles' perimeters along the spoke direction instead.
+const HUB_PILL_HALF_W = 120 // generous: long project names render ~240px wide
+const HUB_PILL_HALF_H = 16
+const MIN_EDGE_GAP = 56 // visible edge length between pill and thumbnail
+
+/** Smallest hub→thumbnail centre distance at `angle` that keeps MIN_EDGE_GAP of visible edge. */
+function minSpokeDistance(angle: number): number {
+  const dx = Math.cos(angle)
+  const dy = Math.sin(angle)
+  const pill = rectEdgePoint(0, 0, dx, dy, HUB_PILL_HALF_W, HUB_PILL_HALF_H)
+  const thumb = rectEdgePoint(0, 0, dx, dy, THUMB_WIDTH / 2, THUMB_HEIGHT / 2)
+  return Math.hypot(pill.x, pill.y) + Math.hypot(thumb.x, thumb.y) + MIN_EDGE_GAP
+}
+
+/** Upper bound of minSpokeDistance over all angles (the sideways case). */
+const MAX_MIN_SPOKE_DISTANCE = HUB_PILL_HALF_W + THUMB_WIDTH / 2 + MIN_EDGE_GAP
 
 /**
  * Stable, well-distributed hash → 32-bit unsigned integer.
@@ -162,13 +205,90 @@ export function clusterRadius(sessionCount: number): number {
   let placed = 0
   let ring = 0
   while (placed < sessionCount) {
-    const radius = BASE_RADIUS + ring * RING_GAP
-    placed += spokeCapacity(radius)
+    placed += spokeCapacity(ringRadius(ring, sessionCount))
     ring++
   }
-  // Outermost ring radius + half a thumbnail for the node extent
-  const outerRing = BASE_RADIUS + (ring - 1) * RING_GAP
+  // Outermost ring radius (or the sideways edge-gap floor, whichever is
+  // larger) + half a thumbnail for the node extent
+  const outerRing = Math.max(ringRadius(ring - 1, sessionCount), MAX_MIN_SPOKE_DISTANCE)
   return outerRing + Math.max(THUMB_WIDTH, THUMB_HEIGHT) / 2
+}
+
+/**
+ * Footprint radius of a laid-out cluster: the farthest spoke centre plus half a
+ * thumbnail. Tighter than clusterRadius() because it uses the real angles —
+ * a lone thumbnail hanging below its hub needs far less room than one beside it.
+ */
+export function clusterExtent(targets: SpokeTarget[]): number {
+  let max = 0
+  for (const t of targets) {
+    max = Math.max(max, Math.hypot(t.offsetX, t.offsetY))
+  }
+  return max + Math.max(THUMB_WIDTH, THUMB_HEIGHT) / 2
+}
+
+// Anchor pull for settled hubs. Strong enough to hold a hub where the user
+// last saw it against the residual many-body repulsion, weak enough that the
+// collision force (which ignores alpha) wins when two clusters overlap.
+const ANCHOR_STRENGTH = 0.3
+// Centering pull for hubs that have no anchor yet (new / relayout / compaction).
+const CENTER_STRENGTH = 0.08
+
+interface LayoutForce {
+  (alpha: number): void
+  initialize?: (nodes: HubNode[]) => void
+  setCenter: (width: number, height: number) => void
+}
+
+/**
+ * Combined anchor + centering force.
+ *
+ * - Anchored hubs are pulled toward their anchor and feel NO centering pull.
+ *   (Centering an anchored hub would ratchet it toward the middle a little on
+ *   every reheat, since each settle re-anchors at the drifted position.)
+ * - Unanchored hubs are pulled toward the viewport center. The pull is
+ *   aspect-aware: weaker along the long axis of the viewport, so the
+ *   equilibrium stretches to fill a wide window instead of forming a blob
+ *   (which, with a handful of hubs, tends to line up vertically).
+ */
+function forceLayout(width: number, height: number): LayoutForce {
+  let nodes: HubNode[] = []
+  let cx = width / 2
+  let cy = height / 2
+  let sx = CENTER_STRENGTH
+  let sy = CENTER_STRENGTH
+
+  const force = ((alpha: number): void => {
+    for (const n of nodes) {
+      const x = n.x ?? 0
+      const y = n.y ?? 0
+      if (n.anchorX != null && n.anchorY != null) {
+        n.vx = (n.vx ?? 0) + (n.anchorX - x) * ANCHOR_STRENGTH * alpha
+        n.vy = (n.vy ?? 0) + (n.anchorY - y) * ANCHOR_STRENGTH * alpha
+      } else {
+        n.vx = (n.vx ?? 0) + (cx - x) * sx * alpha
+        n.vy = (n.vy ?? 0) + (cy - y) * sy * alpha
+      }
+    }
+  }) as LayoutForce
+
+  force.initialize = (ns: HubNode[]): void => {
+    nodes = ns
+  }
+  force.setCenter = (w: number, h: number): void => {
+    cx = w / 2
+    cy = h / 2
+    // Long axis gets the weaker pull, short axis the stronger, both scaled by
+    // the aspect ratio. The contrast has to be large: with a few hubs the
+    // layout is a collision packing, and only a clear energy difference
+    // between "row along the long axis" and "diamond" breaks the symmetry.
+    const aspect = w > 0 && h > 0 ? w / h : 1
+    const clamp = (v: number): number => Math.max(CENTER_STRENGTH * 0.3, Math.min(CENTER_STRENGTH * 3, v))
+    sx = clamp(CENTER_STRENGTH / aspect)
+    sy = clamp(CENTER_STRENGTH * aspect)
+  }
+  force.setCenter(width, height)
+  return force
 }
 
 export function createHubSimulation(
@@ -180,14 +300,40 @@ export function createHubSimulation(
     .force(
       'collide',
       forceCollide<HubNode>()
-        .radius((d) => clusterRadius(d.sessionCount) + 20)
+        .radius((d) => (d.radius ?? clusterRadius(d.sessionCount)) + 20)
         .strength(1)
+        .iterations(2)
     )
-    .force('centerX', forceX(width / 2).strength(0.08))
-    .force('centerY', forceY(height / 2).strength(0.08))
+    .force('layout', forceLayout(width, height))
     .alphaDecay(0.04)
     .velocityDecay(0.5)
     .alphaMin(0.001)
+}
+
+/** Re-target the centering pull after a viewport resize, without rebuilding the sim. */
+export function setSimulationCenter(
+  sim: Simulation<HubNode, never>,
+  width: number,
+  height: number
+): void {
+  const f = sim.force('layout') as LayoutForce | undefined
+  f?.setCenter(width, height)
+}
+
+/** Anchor every hub at its current position (call once the sim has settled). */
+export function anchorHubs(nodes: HubNode[]): void {
+  for (const n of nodes) {
+    n.anchorX = n.x
+    n.anchorY = n.y
+  }
+}
+
+/** Release every hub so it takes part in the next layout pass. */
+export function releaseHubs(nodes: HubNode[]): void {
+  for (const n of nodes) {
+    n.anchorX = undefined
+    n.anchorY = undefined
+  }
 }
 
 // ── Spoke layout (deterministic ring positions) ────────────────────────
@@ -216,7 +362,7 @@ export function computeSpokeOffsets(
   let ring = 0
 
   while (placed < count) {
-    const radius = BASE_RADIUS + ring * RING_GAP
+    const radius = ringRadius(ring, count)
     const capacity = spokeCapacity(radius)
     const onThisRing = Math.min(capacity, count - placed)
 
@@ -230,7 +376,7 @@ export function computeSpokeOffsets(
       const radiusJitter = (rng() - 0.5) * 30   // ±15px
 
       const finalAngle = angle + ringOffset + angleJitter
-      const jitteredRadius = radius + radiusJitter
+      const jitteredRadius = Math.max(radius + radiusJitter, minSpokeDistance(finalAngle))
       const oX = Math.cos(finalAngle) * jitteredRadius
       const oY = Math.sin(finalAngle) * jitteredRadius
 

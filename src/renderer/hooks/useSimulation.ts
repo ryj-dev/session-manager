@@ -1,8 +1,11 @@
 import { useRef, useEffect, useState, useMemo } from 'react'
 import type { Simulation } from 'd3-force'
-import { forceX, forceY } from 'd3-force'
 import {
   createHubSimulation,
+  setSimulationCenter,
+  anchorHubs,
+  releaseHubs,
+  clusterExtent,
   computeSpokeOffsets,
   stepSprings,
   projectColor,
@@ -77,6 +80,40 @@ interface SimulationResult {
   edges: EdgeData[]
   contentBounds: ContentBounds | null
   nudge: (sessionId: string, mouseX: number, mouseY: number) => void
+}
+
+// ── Layout passes ──────────────────────────────────────────────────────
+//
+// Hubs are soft-anchored where they settled (see HubNode.anchorX). Three
+// things move them:
+//   - overlap: collision runs every reheat and wins against the anchor pull,
+//     so a growing cluster shoves its neighbours just far enough to clear;
+//   - compaction: after sessions/projects close, anchors are released for one
+//     gentle low-alpha pass so hubs drift inward and re-fill the vacated
+//     space, keeping their relative arrangement (neighbours stay neighbours);
+//   - relayout: an explicit user action (Settings) that drops every anchor
+//     and solves from a high alpha for a fresh, dense layout.
+//
+// Compaction is deferred a beat so the user sees the close first, then a
+// smooth slide — never a jump. If the graph is unmounted before it fires
+// (user focused a session), the request is kept and runs when the graph
+// remounts, before they've built a mental map of the stale layout.
+
+const COMPACT_DELAY_MS = 1200
+const COMPACT_ALPHA = 0.6
+const RELAYOUT_ALPHA = 1
+const RELAYOUT_EVENT = 'graph:relayout'
+
+let pendingPass: 'compact' | 'relayout' | null = null
+
+/**
+ * Ask the graph to re-solve its layout from scratch (drops every hub anchor).
+ * Safe to call from anywhere in the renderer — if the graph isn't mounted the
+ * request is applied when it next mounts.
+ */
+export function requestGraphRelayout(): void {
+  pendingPass = 'relayout'
+  window.dispatchEvent(new Event(RELAYOUT_EVENT))
 }
 
 // Extended spring node that knows its hub and spoke offset
@@ -466,13 +503,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
     if (!spokesSettled || !compositesSettled || hubActive) {
       rafRef.current = requestAnimationFrame(() => tickRef.current())
     } else {
-      // Pin hubs at their settled positions so future low-alpha ticks
-      // (triggered by unrelated sessions-array mutations) can't nudge them.
-      // Unpinned again only when a hub is added or removed.
-      for (const hub of hubNodes) {
-        hub.fx = hub.x ?? null
-        hub.fy = hub.y ?? null
-      }
+      // Anchor hubs at their settled positions so future low-alpha ticks
+      // (triggered by unrelated sessions-array mutations) can't drift them.
+      // Released again only by a compaction or relayout pass.
+      anchorHubs(hubNodes)
       // Persist the settled positions so they survive renderer reloads
       // (e.g. GPU crashes during screen lock). Drop cached entries for
       // projects that no longer have a hub — otherwise the cache grows
@@ -522,9 +556,67 @@ export function useSimulation(width: number, height: number): SimulationResult {
   useEffect(() => {
     const sim = hubSimRef.current
     if (!sim || width === 0 || height === 0) return
-    sim.force('centerX', forceX(width / 2).strength(0.08))
-    sim.force('centerY', forceY(height / 2).strength(0.08))
+    setSimulationCenter(sim, width, height)
   }, [width, height])
+
+  // ── Layout passes (compaction / relayout) ──────────────────────────
+
+  const compactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function runLayoutPass(kind: 'compact' | 'relayout'): void {
+    const sim = hubSimRef.current
+    if (!sim) {
+      // Graph not mounted — remember the request for the next mount.
+      pendingPass = kind
+      return
+    }
+    if (compactTimerRef.current) {
+      clearTimeout(compactTimerRef.current)
+      compactTimerRef.current = null
+    }
+    pendingPass = null
+    releaseHubs(hubNodesRef.current)
+    if (kind === 'relayout') {
+      // Forget where things were: the point is a fresh, dense solve.
+      hubPositionCache.clear()
+      sim.alpha(RELAYOUT_ALPHA)
+    } else {
+      sim.alpha(COMPACT_ALPHA)
+    }
+    startAnimation()
+  }
+
+  function scheduleCompaction(): void {
+    if (pendingPass === 'relayout') return // stronger pass already queued
+    pendingPass = 'compact'
+    if (compactTimerRef.current) clearTimeout(compactTimerRef.current)
+    compactTimerRef.current = setTimeout(() => {
+      compactTimerRef.current = null
+      if (pendingPass === 'compact') runLayoutPass('compact')
+    }, COMPACT_DELAY_MS)
+  }
+
+  // Explicit relayout requests (Settings button) + any pass left over from a
+  // previous mount. Runs after the sessions sync effect below on mount, so
+  // the hub nodes exist by the time it fires.
+  useEffect(() => {
+    const onRelayout = (): void => runLayoutPass('relayout')
+    window.addEventListener(RELAYOUT_EVENT, onRelayout)
+    if (pendingPass) {
+      const kind = pendingPass
+      const t = setTimeout(() => runLayoutPass(kind), 50)
+      return () => {
+        clearTimeout(t)
+        window.removeEventListener(RELAYOUT_EVENT, onRelayout)
+      }
+    }
+    return () => window.removeEventListener(RELAYOUT_EVENT, onRelayout)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [width, height])
+
+  useEffect(() => () => {
+    if (compactTimerRef.current) clearTimeout(compactTimerRef.current)
+  }, [])
 
   // ── Sync sessions → hub nodes + spoke springs ─────────────────────
 
@@ -553,6 +645,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
     const newHubNodes: HubNode[] = []
     const newHubMap = new Map<string, HubNode>()
 
+    // Did any surviving cluster's footprint shrink? (A 5→4 close within the
+    // same ring frees no space, so it shouldn't trigger a compaction pass.)
+    let clusterShrank = false
+
     for (const [projectPath, group] of groups) {
       const existing = existingHubMap.get(projectPath)
       if (existing) {
@@ -562,7 +658,7 @@ export function useSimulation(width: number, height: number): SimulationResult {
         newHubMap.set(projectPath, existing)
       } else {
         // Restore from cache if available, otherwise random position.
-        // Cached hubs are pinned immediately so initial centering forces
+        // Cached hubs are anchored immediately so initial centering forces
         // can't drift them from their previous settled position.
         const cached = hubPositionCache.get(projectPath)
         const node: HubNode = {
@@ -574,8 +670,8 @@ export function useSimulation(width: number, height: number): SimulationResult {
           y: cached?.y ?? height / 2 + (Math.random() - 0.5) * 100
         }
         if (cached) {
-          node.fx = cached.x
-          node.fy = cached.y
+          node.anchorX = cached.x
+          node.anchorY = cached.y
         }
         newHubNodes.push(node)
         newHubMap.set(projectPath, node)
@@ -584,7 +680,6 @@ export function useSimulation(width: number, height: number): SimulationResult {
 
     hubNodesRef.current = newHubNodes
     hubMapRef.current = newHubMap
-    sim.nodes(newHubNodes)
 
     // Detect dissolved composites (in history but not in active list). Their
     // members get an elastic-restore start position from the composite's last
@@ -611,6 +706,17 @@ export function useSimulation(width: number, height: number): SimulationResult {
       const hub = newHubMap.get(projectPath)!
       const hubX = hub.x ?? width / 2
       const hubY = hub.y ?? height / 2
+
+      // Real footprint for collision. A single-hub composite sits outside the
+      // spoke ring, so it widens the footprint when present.
+      let extent = clusterExtent(offsets)
+      for (const c of activeComposites) {
+        if (c.hubIds.length === 1 && c.hubIds[0] === projectPath) {
+          extent = Math.max(extent, BASE_RADIUS + RING_GAP * 0.85 + COMPOSITE_WIDTH / 2)
+        }
+      }
+      if (hub.radius != null && extent < hub.radius - 1) clusterShrank = true
+      hub.radius = extent
 
       for (const offset of offsets) {
         const existing = existingSprings.get(offset.id)
@@ -675,6 +781,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
 
     spokeSpringsRef.current = newSprings
 
+    // Hand the hub set to d3 now that each hub's footprint radius is known
+    // (forceCollide samples its radius accessor when nodes are assigned).
+    sim.nodes(newHubNodes)
+
     // Sync composite springs (one per active group)
     const existingComposites = compositeSpringsRef.current
     const newComposites = new Map<string, CompositeSpring>()
@@ -726,27 +836,30 @@ export function useSimulation(width: number, height: number): SimulationResult {
     const hadCachedPositions = newHubNodes.some((h) => hubPositionCache.has(h.id))
     prevSessionCountRef.current = sessions.length
 
+    const hubRemoved = existingHubMap.size > 0 && newHubNodes.length < existingHubMap.size
+
     if (hubCountChanged) {
       // Hub set changed (added/removed project, OR first sync after a
-      // renderer reload when existingHubMap was empty). Only unpin hubs
-      // that aren't restored from cache — pinned cached hubs should stay
-      // exactly where the user last saw them. New hubs without a cached
-      // position participate in the d3 layout to find a spot.
-      let hasUncachedNew = false
-      for (const h of newHubNodes) {
-        if (!hubPositionCache.has(h.id)) {
-          h.fx = null
-          h.fy = null
-          hasUncachedNew = true
-        }
-      }
+      // renderer reload when existingHubMap was empty). Anchored (cached)
+      // hubs stay where the user last saw them; new hubs without a cached
+      // position have no anchor and participate in the d3 layout to find a
+      // spot. Collision still applies to everyone, so a new cluster can't
+      // land on top of an existing one.
+      const hasUncachedNew = newHubNodes.some((h) => h.anchorX == null)
       if (hasUncachedNew) {
-        sim.alpha(hadCachedPositions ? 0.05 : 0.3)
+        sim.alpha(hadCachedPositions ? 0.1 : 0.3)
+      } else if (!hubRemoved) {
+        sim.alpha(0.05)
       }
     } else if (countChanged) {
-      // Same projects, different spoke counts — nudge, don't uproot.
+      // Same projects, different spoke counts. Collision radii changed, so
+      // let collision (alpha-independent) resolve any new overlap while the
+      // anchors keep everything else put.
       sim.alpha(0.05)
     }
+
+    // Space was vacated — re-fill it with a deferred, gentle compaction.
+    if (hubRemoved || clusterShrank) scheduleCompaction()
 
     // If composites changed (formed/dissolved), kick the spring system into life
     // even if d3-force hasn't reheated. The repulsion + elastic-restore needs at
