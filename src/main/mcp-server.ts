@@ -891,7 +891,7 @@ server.tool(
     prompt: z.string().describe('The initial prompt to send to the new session. Include full context — the new session has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the new session. Defaults to the current working directory.'),
     allowedTools: z.array(z.string()).optional().describe('Restrict the session to specific tools (e.g. ["Read", "Write", "Edit", "Bash"])'),
-    reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): child must report back findings. "done": child sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
+    reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): child must report back findings. "done": child sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue. Also shapes the graph: "true"/"done" children hang off your node as a spawn tree, the rest sit on the project hub.'),
     pipelineTaskId: z.string().optional().describe('Agentic pipeline: link this session into the given task\'s tree. Only set when spawning a pipeline stage/worker.'),
     pipelineRole: z.enum(['orchestrator', 'plan', 'implement', 'review']).optional().describe('Agentic pipeline: this session\'s role in the task tree. Required with pipelineTaskId.'),
     pipelineLabel: z.string().optional().describe('Agentic pipeline: short label for the tree node (e.g. "Research · auth flow", "worktree: feat/export-ui").'),
@@ -917,6 +917,9 @@ server.tool(
         isolate,
         // The spawner becomes the parent node in the tree.
         parentSessionId: process.env.APP_SESSION_ID || undefined,
+        // Recorded on the origin: children the parent is waiting on hang off
+        // the parent in the graph, the rest hang off the project hub.
+        reportBack,
       }) as { id: string; projectPath: string }
 
       return {
@@ -1121,7 +1124,7 @@ server.tool(
     agentName: z.string().describe('Name of the agent to spawn (from list-agents)'),
     prompt: z.string().describe('The task prompt for the agent. Include full context — the agent has no conversation history.'),
     projectPath: z.string().optional().describe('Project directory for the session. Defaults to the current working directory.'),
-    reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): agent must report back findings. "done": agent sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue.'),
+    reportBack: z.enum(['true', 'done', 'optional', 'false']).optional().default('true').describe('Controls report-back behavior. "true" (default): agent must report back findings. "done": agent sends a brief completion notification (no details). "optional": reporting is mentioned but not required. "false": do NOT report back unless blocked by an issue. Also shapes the graph: "true"/"done" agents hang off your node as a spawn tree, the rest sit on the project hub.'),
     modelId: z.string().optional().describe('Model for this agent: alias "opus" | "sonnet" | "haiku" | "fable" (resolved to the latest version by the claude CLI), or a full model id. Omit to inherit the user default.'),
   },
   async ({ agentName, prompt, projectPath, reportBack, modelId }) => {
@@ -1133,6 +1136,8 @@ server.tool(
         prompt: prompt + parentContext,
         projectPath: cwd,
         modelId,
+        parentSessionId: process.env.APP_SESSION_ID || undefined,
+        reportBack,
       }) as { id: string; projectPath: string; agent: string }
 
       return {

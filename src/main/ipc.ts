@@ -1547,6 +1547,8 @@ The built-in \`Agent\` tool is an internal implementation detail — fine when Y
 
 When in doubt, default to \`"true"\` — an unnecessary report is low-cost; a missing one is frustrating.
 
+\`reportBack\` also shapes the graph: \`"true"\` and \`"done"\` children hang off *your* node as a spawn tree (dashed edge), so the user can see what you're waiting on. \`"optional"\` and \`"false"\` children sit on the project hub as ordinary sessions.
+
 ### Other session tools
 
 - \`spawn-agent\` — spawn a specialised agent. Run \`list-agents\` first to see what's available and their tool sets.

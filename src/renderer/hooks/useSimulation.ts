@@ -18,6 +18,7 @@ import {
   type HubNode,
   type SpringNode
 } from '../lib/simulation'
+import { buildSpawnForest, recordLineage, type TreeNode } from '../lib/spawn-tree'
 import { useStore } from '../store'
 
 // ── Public types ───────────────────────────────────────────────────────
@@ -47,6 +48,12 @@ export interface EdgeData {
   hubId: string
   /** True when the spoke endpoint is a composite (split-group) node, not a session. */
   isComposite?: boolean
+  /**
+   * Session this edge runs *from*, when it is a spawn link rather than a hub
+   * spoke. `hubX`/`hubY` then carry the point on that parent's perimeter facing
+   * the child, already computed — the renderer draws from there as-is.
+   */
+  parentId?: string
 }
 
 export interface CompositePosition {
@@ -119,11 +126,67 @@ export function requestGraphRelayout(): void {
 // Extended spring node that knows its hub and spoke offset
 interface SpokeSpring extends SpringNode {
   hubId: string
+  /** Set when this session hangs off another session rather than the hub. */
+  parentId?: string
   offsetX: number
   offsetY: number
   anchorOffsetX: number // fixed edge attachment relative to spoke center
   anchorOffsetY: number
 }
+
+/** Padding beyond the parent thumbnail's perimeter where a spawn edge starts. */
+const PARENT_EDGE_GAP = 5
+
+/**
+ * Edge from a session to whatever it hangs off. Spawn children run from a point
+ * on their parent thumbnail's perimeter; everything else runs from its hub,
+ * whose pill attachment the renderer works out (it owns the pill's width).
+ * Returns null when neither endpoint is laid out yet.
+ */
+function spokeEdge(
+  spring: SpokeSpring,
+  hubMap: Map<string, HubNode>,
+  springById: Map<string, SpokeSpring>
+): EdgeData | null {
+  const spokeAnchorX = spring.x + spring.anchorOffsetX
+  const spokeAnchorY = spring.y + spring.anchorOffsetY
+
+  if (spring.parentId) {
+    const parent = springById.get(spring.parentId)
+    if (parent) {
+      const from = rectEdgePoint(
+        parent.x, parent.y,
+        spring.x, spring.y,
+        THUMB_WIDTH / 2 + PARENT_EDGE_GAP,
+        THUMB_HEIGHT / 2 + PARENT_EDGE_GAP
+      )
+      return {
+        hubX: from.x,
+        hubY: from.y,
+        spokeX: spring.x,
+        spokeY: spring.y,
+        spokeAnchorX,
+        spokeAnchorY,
+        hubId: spring.hubId,
+        parentId: spring.parentId,
+      }
+    }
+    // Parent gone this frame — fall back to the hub rather than dropping the edge.
+  }
+
+  const hub = hubMap.get(spring.hubId)
+  if (!hub) return null
+  return {
+    hubX: hub.x ?? 0,
+    hubY: hub.y ?? 0,
+    spokeX: spring.x,
+    spokeY: spring.y,
+    spokeAnchorX,
+    spokeAnchorY,
+    hubId: spring.hubId,
+  }
+}
+
 
 // Composite spring node — multi-hub, target = centroid of hub positions.
 interface CompositeSpring extends SpringNode {
@@ -208,6 +271,14 @@ function saveSpokeCache(cache: Map<string, SpokeSpring>): void {
 const hubPositionCache = loadHubCache()
 const spokePositionCache = loadSpokeCache()
 const spokeSpringCache = new Map<string, SpokeSpring>()
+
+/**
+ * Every spawn link seen this run (child id → spawner id), including sessions
+ * that have since closed. Lets a child climb to a live *grand*parent when its
+ * own parent exits, instead of dropping to the hub. In-memory only: spawn
+ * linkage isn't persisted, so an app restart flattens existing trees.
+ */
+const spawnLineage = new Map<string, string>()
 
 // Seed the in-memory spring cache from persisted positions so the very first
 // sync after a renderer reload restores spokes instead of re-springing them
@@ -418,19 +489,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
     }))
 
     const edgeData: EdgeData[] = []
+    const springById = new Map(springArray.map((s) => [s.id, s]))
     for (const spring of springArray) {
-      const hub = hubMap.get(spring.hubId)
-      if (hub) {
-        edgeData.push({
-          hubX: hub.x ?? 0,
-          hubY: hub.y ?? 0,
-          spokeX: spring.x,
-          spokeY: spring.y,
-          spokeAnchorX: spring.x + spring.anchorOffsetX,
-          spokeAnchorY: spring.y + spring.anchorOffsetY,
-          hubId: spring.hubId
-        })
-      }
+      const edge = spokeEdge(spring, hubMap, springById)
+      if (edge) edgeData.push(edge)
     }
     // One edge per (composite, hub) — perimeter anchor faces the source hub.
     for (const c of compositeArray) {
@@ -695,14 +757,36 @@ export function useSimulation(width: number, height: number): SimulationResult {
       }
     }
 
-    // Sync spoke springs — skip member sessions (those are inside composites)
+    // Sync spoke springs — skip member sessions (those are inside composites).
+    // Sessions their spawner is waiting on hang off that spawner instead of the
+    // hub; buildSpawnForest resolves that (including re-attaching orphans to a
+    // live ancestor) from the sessions that actually get a graph node.
     const existingSprings = spokeSpringsRef.current
     const newSprings = new Map<string, SpokeSpring>()
+
+    const spawnInput = sessions.map((x) => ({
+      id: x.id,
+      projectPath: x.projectPath,
+      spawnParentId: x.spawnParentId,
+      reportBack: x.reportBack,
+    }))
+    // Lineage records every session, composite members included — a hidden
+    // member is still a real link in a chain its children need to climb.
+    recordLineage(spawnLineage, spawnInput)
+    const forest = buildSpawnForest(spawnInput.filter((x) => !memberIdSet.has(x.id)), spawnLineage)
 
     for (const [projectPath, group] of groups) {
       const visibleIds = group.sessionIds.filter((id) => !memberIdSet.has(id))
       if (visibleIds.length === 0) continue
-      const offsets = computeSpokeOffsets(visibleIds, projectPath)
+      const roots: TreeNode[] = forest.byProject.get(projectPath) ?? []
+      let offsets = computeSpokeOffsets(roots, projectPath)
+      // Safety net: a session missing from the forest would have no spring and
+      // would silently disappear from the graph. The topology is meant to make
+      // that impossible, so fall back to the flat ring rather than dropping it.
+      if (offsets.length !== visibleIds.length) {
+        console.warn('[graph] spawn forest dropped sessions — falling back to the ring layout')
+        offsets = computeSpokeOffsets(visibleIds.map((id) => ({ id, children: [] })), projectPath)
+      }
       const hub = newHubMap.get(projectPath)!
       const hubX = hub.x ?? width / 2
       const hubY = hub.y ?? height / 2
@@ -722,6 +806,7 @@ export function useSimulation(width: number, height: number): SimulationResult {
         const existing = existingSprings.get(offset.id)
         if (existing) {
           existing.hubId = projectPath
+          existing.parentId = offset.parentId
           existing.offsetX = offset.offsetX
           existing.offsetY = offset.offsetY
           existing.anchorOffsetX = offset.anchorOffsetX
@@ -764,6 +849,7 @@ export function useSimulation(width: number, height: number): SimulationResult {
           newSprings.set(offset.id, {
             id: offset.id,
             hubId: projectPath,
+            parentId: offset.parentId,
             offsetX: offset.offsetX,
             offsetY: offset.offsetY,
             anchorOffsetX: offset.anchorOffsetX,
@@ -906,18 +992,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
         y: c.y,
       }))
       const edgeData: EdgeData[] = []
+      const springById = new Map(springArray.map((s) => [s.id, s]))
       for (const spring of springArray) {
-        const hub = hubMap.get(spring.hubId)
-        if (!hub) continue
-        edgeData.push({
-          hubX: hub.x ?? 0,
-          hubY: hub.y ?? 0,
-          spokeX: spring.x,
-          spokeY: spring.y,
-          spokeAnchorX: spring.x + spring.anchorOffsetX,
-          spokeAnchorY: spring.y + spring.anchorOffsetY,
-          hubId: spring.hubId,
-        })
+        const edge = spokeEdge(spring, hubMap, springById)
+        if (edge) edgeData.push(edge)
       }
       for (const c of compositeArray) {
         for (const hubId of c.hubIds) {

@@ -5,6 +5,7 @@ import {
   type Simulation,
   type SimulationNodeDatum
 } from 'd3-force'
+import type { TreeNode } from './spawn-tree'
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -36,6 +37,11 @@ export interface SpokeTarget {
   offsetY: number
   anchorOffsetX: number // fixed edge attachment point relative to spoke center
   anchorOffsetY: number
+  /** Session this node hangs off, when it is a spawn child rather than a
+   *  hub spoke. Its edge runs to that session instead of to the hub. */
+  parentId?: string
+  /** 0 for hub spokes, 1 for their children, and so on. */
+  depth: number
 }
 
 export interface SpringNode {
@@ -346,7 +352,28 @@ function spokeCapacity(radius: number): number {
   return Math.max(1, Math.floor(circumference / (THUMB_WIDTH + MIN_SPOKE_SPACING)))
 }
 
+/**
+ * Lay out a project's sessions around its hub.
+ *
+ * `roots` is the project's spawn forest (see lib/spawn-tree): sessions that sit
+ * on the hub, each carrying the awaited children that hang off it. With no
+ * children anywhere — the common case — this is the original ring packing,
+ * unchanged. With children, it switches to a radial tree: each root owns an
+ * angular sector sized to fit its whole subtree, and descendants are placed
+ * further out inside that sector, so no subtree can overlap its neighbours and
+ * no parent→child edge crosses back over the hub.
+ */
 export function computeSpokeOffsets(
+  roots: TreeNode[],
+  projectPath: string
+): SpokeTarget[] {
+  if (roots.length === 0) return []
+  return roots.some((r) => r.children.length > 0)
+    ? computeTreeOffsets(roots, projectPath)
+    : computeRingOffsets(roots.map((r) => r.id), projectPath)
+}
+
+function computeRingOffsets(
   sessionIds: string[],
   projectPath: string
 ): SpokeTarget[] {
@@ -376,7 +403,11 @@ export function computeSpokeOffsets(
       const radiusJitter = (rng() - 0.5) * 30   // ±15px
 
       const finalAngle = angle + ringOffset + angleJitter
-      const jitteredRadius = Math.max(radius + radiusJitter, minSpokeDistance(finalAngle))
+      const jitteredRadius = Math.max(
+        radius + radiusJitter,
+        minSpokeDistance(finalAngle),
+        hubClearanceDistance(finalAngle)
+      )
       const oX = Math.cos(finalAngle) * jitteredRadius
       const oY = Math.sin(finalAngle) * jitteredRadius
 
@@ -389,7 +420,8 @@ export function computeSpokeOffsets(
         offsetX: oX,
         offsetY: oY,
         anchorOffsetX: anchor.x,
-        anchorOffsetY: anchor.y
+        anchorOffsetY: anchor.y,
+        depth: 0,
       })
       placed++
     }
@@ -397,6 +429,174 @@ export function computeSpokeOffsets(
   }
 
   return targets
+}
+
+// ── Radial tree layout (spawn children hang off their parent) ──────────
+
+/** Visible gap between a parent thumbnail and its child, along the spoke. */
+const MIN_CHILD_EDGE_GAP = 44
+/** Don't let a crowded tree push its ring out past this (px). */
+const MAX_TREE_RING_RADIUS = 4000
+/** Iterations allowed to grow the root ring until every subtree fits. */
+const RING_FIT_ITERATIONS = 8
+
+/**
+ * Radial step from a parent thumbnail to its children.
+ *
+ * Deliberately direction-independent. A tempting optimisation is to measure the
+ * gap along the subtree's own angle — two stacked thumbnails need far less room
+ * than two side by side — but a child is also offset *angularly* from its
+ * parent, so the line between them is not the radial one. Sizing the step for
+ * the radial direction lets a near-vertical subtree place a child close enough
+ * to overlap its parent diagonally.
+ *
+ * Two rectangles clear each other whenever their centres are at least
+ * hypot(width, height) apart in any direction, and a child's radial step is a
+ * lower bound on its distance from its parent, so one worst-case constant is
+ * both correct and cheap.
+ */
+const CHILD_RING_GAP =
+  2 * Math.hypot(THUMB_WIDTH / 2, THUMB_HEIGHT / 2) + MIN_CHILD_EDGE_GAP
+
+/**
+ * Centre-to-centre distance at which two thumbnails clear each other whatever
+ * direction they lie in, plus breathing room. Same role as CHILD_RING_GAP, for
+ * neighbours on a ring rather than a parent and its child.
+ */
+const SIBLING_CLEARANCE = Math.hypot(THUMB_WIDTH, THUMB_HEIGHT) + MIN_SPOKE_SPACING
+
+/**
+ * The angle a node must keep to itself at `radius` so its neighbour's centre is
+ * SIBLING_CLEARANCE away. Neighbours are separated by the *chord* between them,
+ * not the arc, and the two diverge sharply on a small ring — a fan-out placed
+ * by arc length sits closer together than it thinks and overlaps.
+ */
+function selfNeed(radius: number): number {
+  return 2 * Math.asin(Math.min(SIBLING_CLEARANCE / (2 * Math.max(radius, 1)), 1))
+}
+
+/**
+ * How much of the hub circle a subtree needs, in radians, when its own node
+ * sits at `radius`. A leaf needs room for itself; a parent needs whichever is
+ * wider — itself, or all of its children side by side one level further out.
+ */
+function angularNeed(node: TreeNode, radius: number, gap: number): number {
+  const self = selfNeed(radius)
+  if (node.children.length === 0) return Math.min(self, Math.PI * 2)
+  const childRadius = radius + gap
+  let children = 0
+  for (const child of node.children) children += angularNeed(child, childRadius, gap)
+  return Math.min(Math.max(self, children), Math.PI * 2)
+}
+
+/**
+ * Smallest hub→thumbnail distance at `angle` where the two bounding boxes come
+ * apart. `minSpokeDistance` measures the gap along the spoke, which is not the
+ * same thing: on a shallow diagonal the ray leaves both rectangles early and
+ * the boxes still overlap. Roots take whichever floor is larger.
+ */
+function hubClearanceDistance(angle: number): number {
+  const dx = Math.abs(Math.cos(angle))
+  const dy = Math.abs(Math.sin(angle))
+  const alongX = dx > 1e-6 ? (HUB_PILL_HALF_W + THUMB_WIDTH / 2) / dx : Infinity
+  const alongY = dy > 1e-6 ? (HUB_PILL_HALF_H + THUMB_HEIGHT / 2) / dy : Infinity
+  return Math.min(alongX, alongY)
+}
+
+function computeTreeOffsets(roots: TreeNode[], projectPath: string): SpokeTarget[] {
+  // Same per-project rotation as the ring layout, so a project doesn't spin
+  // when its first child appears.
+  const rng = seededRandom(hashString(projectPath))
+  const baseAngle = rng() * Math.PI * 2
+
+  // Grow the root ring until every subtree fits around it. Needs shrink as the
+  // radius grows (same arc, bigger circle), so a couple of passes converge.
+  let radius = Math.max(ringRadius(0, roots.length), MAX_MIN_SPOKE_DISTANCE)
+  for (let i = 0; i < RING_FIT_ITERATIONS; i++) {
+    const total = totalNeed(roots, radius, CHILD_RING_GAP)
+    if (total <= Math.PI * 2 || radius >= MAX_TREE_RING_RADIUS) break
+    radius = Math.min(radius * (total / (Math.PI * 2)) * 1.02, MAX_TREE_RING_RADIUS)
+  }
+
+  // Hand each root a sector proportional to what it needs. Scaling by
+  // 2π/total both compresses an over-full ring and spreads a sparse one, so a
+  // two-session project still sits on opposite sides of its hub.
+  const total = totalNeed(roots, radius, CHILD_RING_GAP)
+  const scale = total > 0 ? (Math.PI * 2) / total : 0
+
+  const targets: SpokeTarget[] = []
+  let cursor = baseAngle
+  for (const root of roots) {
+    const width = angularNeed(root, radius, CHILD_RING_GAP) * scale
+    placeSubtree(root, cursor, width, radius, projectPath, null, 0, 0, 0, targets)
+    cursor += width
+  }
+  return targets
+}
+
+function totalNeed(roots: TreeNode[], radius: number, gap: number): number {
+  let total = 0
+  for (const root of roots) total += angularNeed(root, radius, gap)
+  return total
+}
+
+/**
+ * Place `node` at the middle of its sector and recurse into its children,
+ * subdividing the sector between them. Children are packed around the parent's
+ * own angle rather than spread to the sector edges, so a subtree reads as one
+ * group and its edges stay short.
+ */
+function placeSubtree(
+  node: TreeNode,
+  sectorStart: number,
+  sectorWidth: number,
+  radius: number,
+  projectPath: string,
+  parentId: string | null,
+  parentX: number,
+  parentY: number,
+  depth: number,
+  targets: SpokeTarget[]
+): void {
+  const angle = sectorStart + sectorWidth / 2
+  // Roots must still clear the hub pill; children are already placed a full
+  // thumbnail gap beyond their parent. Pushing a root outward only widens the
+  // arc its sector covers, so it can never crowd a neighbour.
+  const r = parentId === null
+    ? Math.max(radius, minSpokeDistance(angle), hubClearanceDistance(angle))
+    : radius
+  const offsetX = Math.cos(angle) * r
+  const offsetY = Math.sin(angle) * r
+
+  // The edge leaves this node's perimeter facing whatever it hangs off: the
+  // hub at the origin for a root, the parent thumbnail otherwise.
+  const anchor = rectEdgePoint(
+    0, 0,
+    parentX - offsetX, parentY - offsetY,
+    THUMB_WIDTH / 2, THUMB_HEIGHT / 2
+  )
+
+  targets.push({
+    id: node.id,
+    hubId: projectPath,
+    offsetX,
+    offsetY,
+    anchorOffsetX: anchor.x,
+    anchorOffsetY: anchor.y,
+    parentId: parentId ?? undefined,
+    depth,
+  })
+
+  if (node.children.length === 0) return
+
+  const childRadius = r + CHILD_RING_GAP
+  const childTotal = totalNeed(node.children, childRadius, CHILD_RING_GAP)
+  let cursor = angle - childTotal / 2
+  for (const child of node.children) {
+    const width = angularNeed(child, childRadius, CHILD_RING_GAP)
+    placeSubtree(child, cursor, width, childRadius, projectPath, node.id, offsetX, offsetY, depth + 1, targets)
+    cursor += width
+  }
 }
 
 // ── Spring physics ─────────────────────────────────────────────────────

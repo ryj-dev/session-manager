@@ -18,12 +18,16 @@ const HUB_PILL_HEIGHT = 28
 const HUB_EDGE_GAP = 8 // intentional gap between hub pill and edge start
 
 function curvedEdgePath(edge: EdgeData, hubHalfW: number): string {
-  // Hub attachment: point on hub pill perimeter + gap (gap baked into hubHalfW)
-  const hubPt = rectEdgePoint(
-    edge.hubX, edge.hubY,
-    edge.spokeAnchorX, edge.spokeAnchorY,
-    hubHalfW, HUB_PILL_HEIGHT / 2 + HUB_EDGE_GAP
-  )
+  // Source attachment. Spawn edges arrive with their start point already on the
+  // parent thumbnail's perimeter; hub edges need the pill perimeter, whose
+  // width only this component knows.
+  const hubPt = edge.parentId
+    ? { x: edge.hubX, y: edge.hubY }
+    : rectEdgePoint(
+        edge.hubX, edge.hubY,
+        edge.spokeAnchorX, edge.spokeAnchorY,
+        hubHalfW, HUB_PILL_HEIGHT / 2 + HUB_EDGE_GAP
+      )
 
   // Spoke attachment: fixed precomputed anchor point (moves rigidly with terminal)
   const spokePt = { x: edge.spokeAnchorX, y: edge.spokeAnchorY }
@@ -510,7 +514,11 @@ export function GraphView(): JSX.Element {
               stroke={projectColorMid(edge.hubId)}
               strokeWidth={1.5 / viewport.scale}
               fill="none"
-              opacity={0.6}
+              /* Spawn links are dashed and brighter: this child exists because
+                 its parent is waiting on it, which is a different relationship
+                 from "belongs to this project". */
+              strokeDasharray={edge.parentId ? `${5 / viewport.scale} ${4 / viewport.scale}` : undefined}
+              opacity={edge.parentId ? 0.85 : 0.6}
             />
           ))}
         </svg>

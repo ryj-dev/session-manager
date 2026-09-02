@@ -1,3 +1,5 @@
+import type { ReportBackMode } from '../lib/spawn-tree'
+export type { ReportBackMode }
 import { create } from 'zustand'
 import { defaultHotkeysFor, type HotkeyMap } from '../../shared/hotkeys'
 import {
@@ -342,6 +344,7 @@ export interface SessionOrigin {
   agentName?: string
   observerJob?: string
   parentSessionId?: string
+  reportBack?: ReportBackMode
   label?: string
 }
 
@@ -506,12 +509,20 @@ export interface Session {
    *  terminal session attached to this one. Null on attached sessions and on
    *  Claude sessions without an attachment. */
   attachedTerminalId: string | null
+  /** App session id of the session that spawned this one (spawn-session /
+   *  spawn-agent), when known. Null for sessions the user opened themselves and
+   *  for sessions restored after an app restart — spawn linkage is in-memory. */
+  spawnParentId: string | null
+  /** The spawner's report-back contract. 'true' / 'done' mean the parent is
+   *  waiting on this child, which is what makes the graph hang it off the
+   *  parent instead of the project hub. */
+  reportBack: ReportBackMode | null
 }
 
 export interface AppState {
   // Sessions
   sessions: Session[]
-  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean; isScheduled?: boolean; isGithub?: boolean }) => void
+  addSession: (id: string, projectPath: string, claudeSessionId?: string | null, opts?: { isAttached?: boolean; isPipeline?: boolean; isScheduled?: boolean; isGithub?: boolean; spawnParentId?: string | null; reportBack?: ReportBackMode | null }) => void
   removeSession: (id: string) => void
   updateSessionStatus: (id: string, status: SessionStatus) => void
   markSessionSeen: (id: string) => void
@@ -833,6 +844,8 @@ export const useStore = create<AppState>((set, get) => ({
             isScheduled: !!opts?.isScheduled,
             isGithub: !!opts?.isGithub,
             attachedTerminalId: null,
+            spawnParentId: opts?.spawnParentId ?? null,
+            reportBack: opts?.reportBack ?? null,
           }
         ]
       }

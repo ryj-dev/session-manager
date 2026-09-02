@@ -16,7 +16,7 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "test": "node --import ./scripts/register-ts-resolve.mjs --test 'src/main/*.test.ts'",
+    "test": "node --import ./scripts/register-ts-resolve.mjs --test 'src/main/*.test.ts' 'src/renderer/lib/*.test.ts'",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "postinstall": "electron-builder install-app-deps",

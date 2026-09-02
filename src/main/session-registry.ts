@@ -78,6 +78,11 @@ export interface SessionOrigin {
   observerJob?: string
   /** App session id of the spawner, when one is known. */
   parentSessionId?: string
+  /** The spawner's report-back contract with this child, as passed to
+   *  spawn-session / spawn-agent. 'true' and 'done' mean the parent is
+   *  expecting something back, which is what makes the child a graph child
+   *  of its spawner rather than a plain session on the project hub. */
+  reportBack?: 'true' | 'done' | 'optional' | 'false'
   /** Human label preferred over the terminal title when present. */
   label?: string
 }

@@ -498,6 +498,9 @@ interface SpawnRequest {
   pipelineRole?: 'orchestrator' | 'plan' | 'implement' | 'review'
   /** Parent node (app session id) to attach under. Usually the spawner. */
   parentSessionId?: string
+  /** The spawner's report-back contract with the child. Recorded on the origin
+   *  so the graph can draw awaited children under their spawner. */
+  reportBack?: 'true' | 'done' | 'optional' | 'false'
   pipelineLabel?: string
   fanoutKind?: string
   /** Model for this session: alias "opus"|"sonnet"|"haiku" or a full model id.
@@ -659,14 +662,22 @@ function handleSpawnRequest(body: string, res: import('http').ServerResponse): v
           pipelineLabel: payload.pipelineLabel ?? payload.pipelineRole,
           label: payload.pipelineLabel ?? payload.pipelineRole,
           parentSessionId: payload.parentSessionId,
+          reportBack: payload.reportBack,
         }
-      : { kind: 'user', parentSessionId: payload.parentSessionId })
+      : { kind: 'user', parentSessionId: payload.parentSessionId, reportBack: payload.reportBack })
 
     // Notify the renderer to add this session to the UI. Pipeline-linked spawns
     // are flagged so the graph view excludes them (they live in the board).
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) {
-      win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null, isPipeline: !!payload.pipelineTaskId })
+      win.webContents.send('session:spawned', {
+        id,
+        projectPath: cwd,
+        claudeSessionId: session.claudeSessionId ?? null,
+        isPipeline: !!payload.pipelineTaskId,
+        spawnParentId: payload.parentSessionId,
+        reportBack: payload.reportBack,
+      })
     }
 
     // Register into the pipeline tree if this spawn is part of a task.
@@ -2888,8 +2899,15 @@ function handleListAgents(res: import('http').ServerResponse): void {
 
 function handleSpawnAgent(body: string, res: import('http').ServerResponse): void {
   try {
-    const { agentName, prompt, projectPath, modelId: modelIdRaw } = JSON.parse(body) as {
-      agentName: string; prompt: string; projectPath?: string; modelId?: string
+    const { agentName, prompt, projectPath, modelId: modelIdRaw, parentSessionId, reportBack } = JSON.parse(body) as {
+      agentName: string
+      prompt: string
+      projectPath?: string
+      modelId?: string
+      /** Spawner's app session id. Sent by the caller — main's own env has no
+       *  APP_SESSION_ID, so reading it here would always yield undefined. */
+      parentSessionId?: string
+      reportBack?: 'true' | 'done' | 'optional' | 'false'
     }
 
     if (!agentName || !prompt) {
@@ -2936,12 +2954,19 @@ function handleSpawnAgent(body: string, res: import('http').ServerResponse): voi
       kind: 'agent',
       agentName: agent.name,
       label: agent.name,
-      parentSessionId: process.env.APP_SESSION_ID || undefined,
+      parentSessionId,
+      reportBack,
     })
 
     const win = BrowserWindow.getAllWindows()[0]
     if (win && !win.isDestroyed()) {
-      win.webContents.send('session:spawned', { id, projectPath: cwd, claudeSessionId: session.claudeSessionId ?? null })
+      win.webContents.send('session:spawned', {
+        id,
+        projectPath: cwd,
+        claudeSessionId: session.claudeSessionId ?? null,
+        spawnParentId: parentSessionId,
+        reportBack,
+      })
     }
 
     console.log(`[hook-server] spawned agent "${agent.name}" session ${id} in ${cwd}`)

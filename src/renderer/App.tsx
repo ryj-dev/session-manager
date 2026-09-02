@@ -1362,8 +1362,14 @@ export function App(): JSX.Element {
 
   // Listen for sessions spawned externally (via MCP)
   useEffect(() => {
-    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline, isScheduled, isGithub }) => {
-      addSession(id, projectPath, claudeSessionId ?? null, { isPipeline: !!isPipeline, isScheduled: !!isScheduled, isGithub: !!isGithub })
+    const unsubscribe = window.api.onSessionSpawned(({ id, projectPath, claudeSessionId, isPipeline, isScheduled, isGithub, spawnParentId, reportBack }) => {
+      addSession(id, projectPath, claudeSessionId ?? null, {
+        isPipeline: !!isPipeline,
+        isScheduled: !!isScheduled,
+        isGithub: !!isGithub,
+        spawnParentId: spawnParentId ?? null,
+        reportBack: reportBack ?? null,
+      })
     })
     return unsubscribe
   }, [addSession])
