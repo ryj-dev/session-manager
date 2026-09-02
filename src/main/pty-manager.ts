@@ -115,10 +115,17 @@ export function spawnSession(
   // Expand ~ to home directory (pty.spawn doesn't do shell expansion)
   const resolvedCwd = cwd.startsWith('~') ? cwd.replace('~', homedir()) : cwd
 
-  // Create inbox file for the monitor-based message bus
+  // Create inbox file for the monitor-based message bus. TRUNCATE: the plugin's
+  // `tail -f` replays the file's last 10 lines before following, so any line
+  // surviving from a previous life of this id (archive/resume, crash recovery,
+  // restart restore — all respawn under the ORIGINAL id) would be re-delivered
+  // as a "new" message on every wake. Safe to clear here because
+  // deliverSessionMessage only appends once getSession(id) is live, i.e. strictly
+  // after this point; messages for an archived target are held in the archiver's
+  // queue and appended after resume, never written behind our back.
   const inboxPath = join(app.getPath('userData'), 'messages', id, 'inbox.txt')
   mkdirSync(dirname(inboxPath), { recursive: true })
-  writeFileSync(inboxPath, '', { flag: 'a' }) // create if missing, don't truncate
+  writeFileSync(inboxPath, '')
 
   const rawCommand = command
   command = resolveCommand(command)

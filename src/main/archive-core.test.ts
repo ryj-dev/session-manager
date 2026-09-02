@@ -14,6 +14,7 @@ import {
   noteOutput,
   notePostToolUse,
   noteUserPrompt,
+  parseClaudeSessionState,
   parsePsOutput,
   sweepActivity,
   DEFAULT_NOISE_BYTES_PER_SWEEP,
@@ -46,9 +47,60 @@ test('gate 1: only hook status idle is archivable', () => {
   assert.equal(evaluateGates(idleActivity(), CONFIG, PAST_THRESHOLD).archivable, true)
 })
 
-test('gate 1: a session that never produced hooks never archives', () => {
+test('gate 1: with no process status, a session that never produced hooks blocks', () => {
   const a = createActivity(T0)
   assert.equal(evaluateGates(a, CONFIG, PAST_THRESHOLD).archivable, false)
+})
+
+// ── Gate 1: Claude Code's own process status ─────────────────────────────────
+
+test('gate 1: process status overrides a stale idle hook status', () => {
+  for (const status of ['busy', 'waiting'] as const) {
+    const v = evaluateGates(idleActivity(), CONFIG, PAST_THRESHOLD, status)
+    assert.equal(v.archivable, false, `process status ${status} must block`)
+  }
+})
+
+test('gate 1: process status rescues a session whose hooks were never seen', () => {
+  // The restored-after-restart case: hookStatus is stuck at 'unknown', but the
+  // CLI's own state file proves the session is not mid-turn.
+  for (const status of ['idle', 'shell'] as const) {
+    const a = createActivity(T0) // hookStatus 'unknown'
+    const v = evaluateGates(a, CONFIG, PAST_THRESHOLD, status)
+    assert.equal(v.archivable, true, `process status ${status} must archive`)
+  }
+})
+
+test("gate 1: 'shell' does not block — the message-bus monitor pins it there", () => {
+  const a = createActivity(T0)
+  noteHookStatus(a, 'idle', T0)
+  assert.equal(evaluateGates(a, CONFIG, PAST_THRESHOLD, 'shell').archivable, true)
+})
+
+test('gate 1: process status does not bypass the other gates', () => {
+  const a = idleActivity()
+  // Quiet clock not yet elapsed…
+  assert.equal(evaluateGates(a, CONFIG, T0, 'idle').archivable, false)
+  // …and pending background work still blocks.
+  const b = idleActivity()
+  notePostToolUse(b, 'ScheduleWakeup')
+  assert.equal(evaluateGates(b, CONFIG, PAST_THRESHOLD, 'idle').archivable, false)
+})
+
+test('parseClaudeSessionState reads the status and guards against PID reuse', () => {
+  const file = JSON.stringify({ pid: 24787, sessionId: 'abc-123', status: 'idle', kind: 'interactive' })
+  assert.equal(parseClaudeSessionState(file, 'abc-123'), 'idle')
+  assert.equal(parseClaudeSessionState(file, null), 'idle')
+  // A recycled PID now hosting a different conversation must not be trusted.
+  assert.equal(parseClaudeSessionState(file, 'other-session'), null)
+})
+
+test('parseClaudeSessionState rejects unusable files', () => {
+  assert.equal(parseClaudeSessionState('not json', null), null)
+  assert.equal(parseClaudeSessionState('null', null), null)
+  assert.equal(parseClaudeSessionState('"a string"', null), null)
+  assert.equal(parseClaudeSessionState(JSON.stringify({ status: 'compacting' }), null), null)
+  assert.equal(parseClaudeSessionState(JSON.stringify({ pid: 1 }), null), null)
 })
 
 // ── Gate 2: quiet threshold ──────────────────────────────────────────────────
@@ -99,30 +151,30 @@ test('gate 2: sweeps consume the byte counter (noise does not accumulate)', () =
 
 // ── Gate 4: pending background work (turn-ending wakeup tools) ───────────────
 
-test('wakeup detection: turn-ending tools flag; ordinary tools do not', () => {
-  assert.equal(isWakeupToolUse('ScheduleWakeup', {}), true)
-  assert.equal(isWakeupToolUse('Monitor', {}), true)
-  assert.equal(isWakeupToolUse('Workflow', {}), true)
-  assert.equal(isWakeupToolUse('TaskCreate', {}), true)
-  assert.equal(isWakeupToolUse('Read', {}), false)
-  assert.equal(isWakeupToolUse('Edit', {}), false)
-  assert.equal(isWakeupToolUse(undefined, {}), false)
+test('wakeup detection: harness-timer tools flag; ordinary tools do not', () => {
+  assert.equal(isWakeupToolUse('ScheduleWakeup'), true)
+  assert.equal(isWakeupToolUse('Monitor'), true)
+  assert.equal(isWakeupToolUse('RemoteTrigger'), true)
+  assert.equal(isWakeupToolUse('Workflow'), true)
+  assert.equal(isWakeupToolUse('Read'), false)
+  assert.equal(isWakeupToolUse('Edit'), false)
+  assert.equal(isWakeupToolUse(undefined), false)
 })
 
-test('wakeup detection: Agent defaults to background; explicit foreground does not flag', () => {
-  assert.equal(isWakeupToolUse('Agent', {}), true)
-  assert.equal(isWakeupToolUse('Agent', { run_in_background: true }), true)
-  assert.equal(isWakeupToolUse('Agent', { run_in_background: false }), false)
-})
-
-test('wakeup detection: Bash flags only when explicitly backgrounded', () => {
-  assert.equal(isWakeupToolUse('Bash', { command: 'ls' }), false)
-  assert.equal(isWakeupToolUse('Bash', { command: 'npm run dev', run_in_background: true }), true)
+test('wakeup detection: tools covered by other gates do NOT set the sticky flag', () => {
+  // The flag has no expiry, so anything observable elsewhere must stay off it.
+  // Agent/Task: the CLI reports 'busy' for the whole background run (gate 1).
+  assert.equal(isWakeupToolUse('Agent'), false)
+  assert.equal(isWakeupToolUse('Task'), false)
+  // Backgrounded Bash: gate 3's process scan sees the shell.
+  assert.equal(isWakeupToolUse('Bash'), false)
+  // TaskCreate is the todo-list tool — it never re-invokes the session.
+  assert.equal(isWakeupToolUse('TaskCreate'), false)
 })
 
 test('gate 4: wakeup PostToolUse blocks; next user prompt clears', () => {
   const a = idleActivity()
-  notePostToolUse(a, 'ScheduleWakeup', {})
+  notePostToolUse(a, 'ScheduleWakeup')
   assert.equal(evaluateGates(a, CONFIG, PAST_THRESHOLD).archivable, false)
   const promptAt = T0 + 60_000
   noteUserPrompt(a, promptAt)

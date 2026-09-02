@@ -41,3 +41,4 @@ Under the hood the skill file is installed to `~/.claude/commands/sm-<name>.md` 
 - All `sm-*` commands are wiped and reinstalled on app startup — don't hand-edit files under `~/.claude/commands/sm-*`; change `resources/skills/` instead.
 - A skill only shapes behavior via its prompt; unlike agents it does not restrict tools.
 - Injecting a skill into a busy session queues the slash command as terminal input — it takes effect on the next turn.
+- Injection restarts Claude Code so the new process discovers the command. A session that has already taken a turn is restarted with `claude --resume` so its history survives; one that hasn't (no transcript written yet) is restarted as a **fresh spawn** instead — resuming an id the CLI has never saved fails with "session not found" and the process exits immediately.

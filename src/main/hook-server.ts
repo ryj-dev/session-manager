@@ -2764,8 +2764,10 @@ export function deliverSessionMessage(
   // Archived target → queue server-side and trigger a silent resume; the queue
   // flushes into this same function once the session is ready. Waking target
   // (PTY alive, plugin monitor possibly not yet) → queue without re-resuming.
-  // Queued rather than appended now: the inbox is wiped on exit and a fresh
-  // `tail -f` starts at EOF, so an early append would be silently lost.
+  // Queued rather than appended now: an archived session has no monitor running,
+  // and the inbox is truncated when the resumed PTY spawns, so an append made
+  // before the resume would be thrown away. The 10-line replay a fresh `tail -f`
+  // does covers the reverse race (flush landing just before the monitor is up).
   if (archiver.isArchived(targetSessionId) || archiver.isWaking(targetSessionId)) {
     return archiver.queueMessageForArchived(targetSessionId, message, fromSessionId)
   }
@@ -3175,7 +3177,7 @@ function handleHookEvent(appSessionId: string, payload: HookPayload): void {
     // Archiver gates: working resets the quiet clock; a turn-ending wakeup tool
     // in PostToolUse flags pending background work; a user prompt clears it.
     archiver.noteSessionHookStatus(appSessionId, 'working')
-    if (event === 'PostToolUse') archiver.noteSessionPostToolUse(appSessionId, payload.tool_name, payload.tool_input)
+    if (event === 'PostToolUse') archiver.noteSessionPostToolUse(appSessionId, payload.tool_name)
     if (event === 'UserPromptSubmit') {
       archiver.noteSessionUserPrompt(appSessionId)
       // A real user prompt to a GitHub agent adopts it (the spawn prompt is

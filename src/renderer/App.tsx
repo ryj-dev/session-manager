@@ -422,15 +422,28 @@ export function App(): JSX.Element {
   // On startup: reconnect to active PTY sessions (renderer crash recovery),
   // then check for saved sessions from a previous clean quit.
   useEffect(() => {
-    // First, check if the main process has live PTY sessions we lost track of
-    window.api.listActiveSessions().then((active) => {
-      if (active.length > 0) {
-        console.log(`[recovery] reconnecting to ${active.length} active PTY sessions`)
+    // First, check if the main process has sessions we lost track of — live
+    // PTYs plus archived sessions (no PTY, only a record in the archiver).
+    Promise.all([
+      window.api.listActiveSessions(),
+      window.api.listArchivedSessions().catch(() => []),
+    ]).then(([active, archivedSessions]) => {
+      if (active.length > 0 || archivedSessions.length > 0) {
+        console.log(`[recovery] reconnecting to ${active.length} active + ${archivedSessions.length} archived sessions`)
         for (const s of active) {
           addSession(s.id, s.projectPath, s.claudeSessionId)
           if (s.terminalTitle) {
             updateSessionTitle(s.id, s.terminalTitle)
           }
+        }
+        // Archived sessions get a frozen node, no terminal — clicking one
+        // resumes it through the normal archive:resume path.
+        for (const s of archivedSessions) {
+          addSession(s.id, s.projectPath, s.claudeSessionId)
+          if (s.terminalTitle) {
+            updateSessionTitle(s.id, s.terminalTitle)
+          }
+          updateSessionStatus(s.id, 'archived')
         }
 
         // Force screen redraws so recovered terminals aren't blank.
@@ -448,7 +461,7 @@ export function App(): JSX.Element {
           }, 50)
         }, 500)
 
-        // Active sessions found — skip the saved-sessions restore prompt.
+        // Sessions found — skip the saved-sessions restore prompt.
         // Composite groups were lost when the renderer crashed; rebuild
         // them from the persisted disk state by mapping claudeSessionIds.
         restoreSplitGroups()

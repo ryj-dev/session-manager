@@ -7,7 +7,8 @@
  * teardown/resume, broadcasts).
  *
  * Gate order (cheapest first — the caller runs 1/2/4 here, then the ps scan):
- *   1. Hook status must be 'idle' (mid-turn / permission-wait never archives).
+ *   1. Not mid-turn: Claude Code's own per-process status (busy/waiting block),
+ *      falling back to our hook status when that file is unreadable.
  *   2. Quiet for the threshold: no PTY input, no 'working' hook events, and
  *      near-zero PTY output (byte-per-sweep noise floor absorbs title/statusline
  *      redraw chatter; real output — a dev server, a background task's logs —
@@ -70,29 +71,33 @@ export function noteUserPrompt(a: SessionActivity, now: number): void {
 
 /**
  * Turn-ending wakeup tools: the turn ends (Stop fires, session reads idle) but
- * the harness re-invokes the session later — no descendant process, no PTY
- * traffic, nothing the other gates can see. Flag on PostToolUse; cleared on the
- * next user prompt.
+ * the harness re-invokes the session later on a timer — no descendant process,
+ * no PTY traffic, and nothing on disk that any other gate can see. Flagged on
+ * PostToolUse; cleared on the next user prompt.
  *
- * Agent/Task default to background (run_in_background !== false blocks);
- * Bash only blocks when explicitly backgrounded (foreground Bash is covered by
- * the working status + the process scan).
+ * This list is deliberately SHORT, because a sticky flag with no expiry makes a
+ * session unarchivable until the user types into it again. Only tools whose
+ * pending work is genuinely unobservable belong here. Measured exclusions:
+ *  - Agent/Task: a background subagent runs in-process and Claude Code reports
+ *    the session as 'busy' for the whole run (measured: idle main loop + running
+ *    teammate held 'busy' for 155s, dropping to 'shell' the moment it finished),
+ *    so gate 1 already covers it. These fire on most working turns — flagging
+ *    them made every exploration turn poison the session permanently.
+ *  - Bash with run_in_background: gate 3's process scan sees the shell.
+ *  - TaskCreate: the todo-list tool ({subject, description} →
+ *    ~/.claude/tasks/<session>/N.json). It never re-invokes anything.
+ * Workflow stays until its in-process agents are measured the way Agent's were.
  */
 export const WAKEUP_TOOLS: ReadonlySet<string> = new Set([
-  'ScheduleWakeup', 'Monitor', 'RemoteTrigger', 'Workflow', 'TaskCreate',
+  'ScheduleWakeup', 'Monitor', 'RemoteTrigger', 'Workflow',
 ])
 
-export function isWakeupToolUse(toolName: string | undefined, toolInput: unknown): boolean {
-  if (!toolName) return false
-  if (WAKEUP_TOOLS.has(toolName)) return true
-  const bg = (toolInput as { run_in_background?: unknown } | null | undefined)?.run_in_background
-  if (toolName === 'Agent' || toolName === 'Task') return bg !== false
-  if (toolName === 'Bash') return bg === true
-  return false
+export function isWakeupToolUse(toolName: string | undefined): boolean {
+  return !!toolName && WAKEUP_TOOLS.has(toolName)
 }
 
-export function notePostToolUse(a: SessionActivity, toolName: string | undefined, toolInput: unknown): void {
-  if (isWakeupToolUse(toolName, toolInput)) a.pendingBackgroundWork = true
+export function notePostToolUse(a: SessionActivity, toolName: string | undefined): void {
+  if (isWakeupToolUse(toolName)) a.pendingBackgroundWork = true
 }
 
 /** Consume the output counter for one sweep window: above-noise output counts
@@ -103,12 +108,77 @@ export function sweepActivity(a: SessionActivity, config: ArchiveGateConfig, now
   a.bytesSinceSweep = 0
 }
 
+// ── Claude Code's own session state (~/.claude/sessions/<pid>.json) ──────────
+
+/** The status vocabulary Claude Code writes into its per-process state file
+ *  (verified against 2.1.220: the validator accepts exactly these four). */
+export type ClaudeProcessStatus = 'busy' | 'shell' | 'idle' | 'waiting'
+
+const CLAUDE_PROCESS_STATUSES = new Set(['busy', 'shell', 'idle', 'waiting'])
+
+/**
+ * Parse `~/.claude/sessions/<pid>.json` — Claude Code's own liveness record for
+ * a running process. Preferred over our hook-derived status because it is
+ * maintained by the CLI itself, so it is correct even for a session whose hooks
+ * we never saw (restored after an app restart, adopted, etc.).
+ *
+ * The file is keyed by PID, which the OS recycles, so a caller that knows which
+ * conversation it expects passes `expectedClaudeSessionId` and gets null on
+ * mismatch rather than another session's status.
+ *
+ * Returns null whenever the file can't be trusted — callers fall back to the
+ * hook status.
+ */
+export function parseClaudeSessionState(
+  json: string,
+  expectedClaudeSessionId: string | null,
+): ClaudeProcessStatus | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const rec = parsed as Record<string, unknown>
+  if (expectedClaudeSessionId && rec.sessionId !== expectedClaudeSessionId) return null
+  const status = rec.status
+  if (typeof status !== 'string' || !CLAUDE_PROCESS_STATUSES.has(status)) return null
+  return status as ClaudeProcessStatus
+}
+
 export type GateVerdict = { archivable: true } | { archivable: false; reason: string }
 
-/** Gates 1, 2 and 4. Gate 3 (process scan) is asynchronous and runs in the
- *  archiver only for sessions that pass these. */
-export function evaluateGates(a: SessionActivity, config: ArchiveGateConfig, now: number): GateVerdict {
-  if (a.hookStatus !== 'idle') return { archivable: false, reason: `hook status is ${a.hookStatus}` }
+/**
+ * Gates 1, 2 and 4. Gate 3 (process scan) is asynchronous and runs in the
+ * archiver only for sessions that pass these.
+ *
+ * `processStatus` is Claude Code's own status for the session when we could read
+ * it (see parseClaudeSessionState); null means fall back to the hook status.
+ */
+export function evaluateGates(
+  a: SessionActivity,
+  config: ArchiveGateConfig,
+  now: number,
+  processStatus: ClaudeProcessStatus | null = null,
+): GateVerdict {
+  // Gate 1. The CLI's own status wins when we have it: it is current even if a
+  // hook was missed, and it is the ONLY signal available for a session restored
+  // after an app restart, whose hookStatus is stuck at 'unknown' forever.
+  //
+  // 'shell' passes deliberately. It does not mean "a Bash tool is running" (a
+  // session stays 'busy' for the whole of a foreground Bash call); it means a
+  // background shell is attached — and the bundled message-bus monitor is a
+  // background shell that lives as long as the session, so EVERY app-spawned
+  // session reports 'shell' permanently. Treating it as work would block
+  // archiving on every session forever. Gate 3's ps scan is what actually tells
+  // our monitor apart from a real Bash workload.
+  if (processStatus === 'busy' || processStatus === 'waiting') {
+    return { archivable: false, reason: `claude process is ${processStatus}` }
+  }
+  if (processStatus === null && a.hookStatus !== 'idle') {
+    return { archivable: false, reason: `hook status is ${a.hookStatus}` }
+  }
   if (a.pendingBackgroundWork) return { archivable: false, reason: 'pending background work (wakeup tool)' }
   const quietMs = now - a.lastActiveAt
   if (quietMs < config.thresholdMs) return { archivable: false, reason: `only quiet for ${quietMs}ms` }
@@ -202,9 +272,9 @@ export interface QueuedArchivedMessage {
 }
 
 /** Server-side queue for messages sent to an archived (or still-waking) session.
- *  Queued here rather than pre-written to the inbox because the inbox is wiped
- *  on PTY exit and a fresh `tail -f` starts at EOF anyway — lines appended
- *  before the resumed monitor is running would be silently lost. */
+ *  Queued here rather than pre-written to the inbox because the inbox is
+ *  truncated when the resumed PTY spawns (pty-manager) — a line appended while
+ *  the session is archived would be wiped before its monitor ever saw it. */
 export class ArchivedMessageQueue {
   private queues = new Map<string, QueuedArchivedMessage[]>()
 

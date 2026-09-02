@@ -86,6 +86,11 @@ const api = {
   archiveSetVisible: (ids: string[]): void =>
     ipcRenderer.send('archive:setVisible', ids),
 
+  listArchivedSessions: (): Promise<Array<{
+    id: string; claudeSessionId: string; projectPath: string
+    terminalTitle: string | null; archivedAt: number
+  }>> => ipcRenderer.invoke('archive:list'),
+
   onSessionArchived: (callback: (data: { id: string }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { id: string }) => callback(data)
     ipcRenderer.on('session:archived', handler)

@@ -43,5 +43,5 @@ Messages longer than ~400 characters are written to a `msg-<uuid>.md` file inste
 
 - Delivery is instant, **not queued-until-idle** — the target sees the message as a notification even mid-task. Don't expect it to wait for a turn boundary.
 - Messaging requires the target to be a live session **spawned by this app** (it needs the inbox env var and the monitor plugin); unknown session ids return an error.
-- Inboxes are wiped on session exit, app startup, and shutdown — messages are transient, not a durable mailbox. Put anything that must persist into a todo or memory note instead.
+- Inboxes are wiped on session exit, app startup, shutdown, and whenever a PTY spawns — messages are transient, not a durable mailbox. (The spawn-time wipe is what stops an archived-then-resumed session from re-reading messages it already answered: `tail -f` replays a file's last lines, so a surviving inbox would redeliver on every wake.) Put anything that must persist into a todo or memory note instead.
 - Monitors require a recent Claude Code (~2.1.113+). If messages stop arriving, check that the `session-manager-local` plugin is installed and enabled.

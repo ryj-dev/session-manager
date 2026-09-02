@@ -63,6 +63,13 @@ export interface GithubItem {
   /** API url of the newest comment/review on the thread, when GitHub provides
    *  one — gives "Address comments" a concrete starting point. */
   latestCommentUrl: string | null
+  /** Whether the connected login is CURRENTLY in the PR's requested_reviewers,
+   *  captured at hydrate time. GitHub removes you when you submit a review and
+   *  re-adds you on an explicit re-request, so this distinguishes "review was
+   *  re-requested" from mere thread activity (the notification's reason stays
+   *  `review_requested` forever). Undefined = unknown (login unavailable) —
+   *  consumers must fail open. */
+  reviewRequested?: boolean
   /** Prepared response awaiting submission (draft mode) — see GithubDraft. */
   draft?: GithubDraft | null
   /** The agent's Claude conversation id + cwd, captured when it hands over its

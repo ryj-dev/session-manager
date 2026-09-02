@@ -18,6 +18,9 @@
 
 import { BrowserWindow } from 'electron'
 import { execFile } from 'child_process'
+import { readFileSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
 import {
   spawnSession,
   getSession,
@@ -36,9 +39,11 @@ import {
   noteOutput,
   notePostToolUse,
   noteUserPrompt,
+  parseClaudeSessionState,
   parsePsOutput,
   sweepActivity,
   DEFAULT_NOISE_BYTES_PER_SWEEP,
+  type ClaudeProcessStatus,
   type SessionActivity,
 } from './archive-core'
 
@@ -138,8 +143,8 @@ export function noteSessionHookStatus(id: string, status: 'working' | 'idle' | '
   noteHookStatus(activityFor(id), status, Date.now())
 }
 
-export function noteSessionPostToolUse(id: string, toolName: string | undefined, toolInput: unknown): void {
-  notePostToolUse(activityFor(id), toolName, toolInput)
+export function noteSessionPostToolUse(id: string, toolName: string | undefined): void {
+  notePostToolUse(activityFor(id), toolName)
 }
 
 export function noteSessionUserPrompt(id: string): void {
@@ -191,6 +196,7 @@ export function forgetSession(id: string): void {
   activity.delete(id)
   archived.delete(id)
   pinnedSessions.delete(id)
+  lastBlockReason.delete(id)
   queue.forget(id)
   const w = waking.get(id)
   if (w) {
@@ -231,6 +237,28 @@ function isEligible(id: string): boolean {
   return true
 }
 
+/** Claude Code's own status for a live session, or null when its state file is
+ *  missing/unreadable//belongs to a recycled PID — callers fall back to hooks. */
+function readClaudeProcessStatus(pid: number | undefined, claudeSessionId: string | null): ClaudeProcessStatus | null {
+  if (!pid) return null
+  try {
+    const raw = readFileSync(join(homedir(), '.claude', 'sessions', `${pid}.json`), 'utf-8')
+    return parseClaudeSessionState(raw, claudeSessionId)
+  } catch {
+    return null // not written yet, or an older CLI that has no state file
+  }
+}
+
+/** Last logged block reason per session, so the sweep can report WHY a session
+ *  isn't archiving without spamming the log every 30s while nothing changes. */
+const lastBlockReason = new Map<string, string>()
+
+function logBlockReason(id: string, reason: string): void {
+  if (lastBlockReason.get(id) === reason) return
+  lastBlockReason.set(id, reason)
+  console.log(`[archiver] ${id} not archived — ${reason}`)
+}
+
 async function runArchiveSweep(): Promise<void> {
   if (sweepInFlight) return
   sweepInFlight = true
@@ -252,7 +280,10 @@ async function runArchiveSweep(): Promise<void> {
       sweepActivity(a, config, now)
       if (!settings.archiveInactiveSessions) continue
       if (!isEligible(s.id)) continue
-      if (evaluateGates(a, config, now).archivable) candidates.push(s.id)
+      const processStatus = readClaudeProcessStatus(s.process.pid, s.claudeSessionId)
+      const verdict = evaluateGates(a, config, now, processStatus)
+      if (verdict.archivable) candidates.push(s.id)
+      else logBlockReason(s.id, verdict.reason)
     }
     if (candidates.length === 0) return
 
@@ -266,9 +297,10 @@ async function runArchiveSweep(): Promise<void> {
       if (!session || !pid) continue
       const blockers = findBlockingDescendants(procs, pid, id)
       if (blockers.length > 0) {
-        console.log(`[archiver] ${id} not archived — live descendants:`, blockers.map((b) => b.slice(0, 80)))
+        logBlockReason(id, `live descendants: ${blockers.map((b) => b.slice(0, 80)).join(' | ')}`)
         continue
       }
+      lastBlockReason.delete(id)
       archiveSession(id)
     }
   } catch (err) {

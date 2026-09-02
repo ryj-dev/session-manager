@@ -59,6 +59,8 @@ The agent's **model** is configurable in Settings → GitHub auto-review (haiku/
 
 Per event kind — review requests / mentions / comments on my PRs — choose **Off** (manual buttons only, the default), **Draft** (auto-spawn, you approve the result), or **Auto** (auto-spawn and post directly). Safeguards: one active agent per item, self-echo suppression (activity authored by your own login never triggers a spawn), and only open/draft PRs qualify. Something with nothing to answer (an approval carrying no comments, a bot notice) is closed out as "⊘ no action needed" rather than generating a response.
 
+**Re-reviews require an actual re-request.** A review-request notification thread keeps its reason forever, so every author push or reply re-marks it unread — but once you've responded (or the item was closed out as "no action needed"), new activity alone does NOT respawn the agent. Only the author clicking **re-request review** (which puts you back in the PR's `requested_reviewers`) starts a new round; anything else just shows up as ordinary unread activity for you to triage. The manual "Start review" button is never gated — you can always re-review by hand.
+
 ### MCP tools (agent visibility)
 
 | Tool | Purpose |

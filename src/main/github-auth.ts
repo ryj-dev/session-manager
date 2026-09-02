@@ -192,6 +192,13 @@ export function getLastKnownStatus(): GithubAuthStatus | null {
   return lastStatus
 }
 
+/** The connected account's login, from the cached status when available
+ *  (revalidating only when it isn't). Null when not connected. */
+export async function getViewerLogin(): Promise<string | null> {
+  if (lastStatus?.connected) return lastStatus.login
+  return (await getAuthStatus()).login
+}
+
 /** Explicit connect with a pasted token (PAT). Validates before storing. */
 export async function connectWithToken(token: string): Promise<GithubAuthStatus> {
   const trimmed = token.trim()

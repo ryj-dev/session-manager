@@ -1,7 +1,7 @@
 import { BrowserWindow, Notification } from 'electron'
 import * as githubStore from './github-store'
 import type { GithubItem, GithubItemKind } from './github-store'
-import { getActiveToken, invalidateAuth, apiHeaders, GITHUB_API } from './github-auth'
+import { getActiveToken, getViewerLogin, invalidateAuth, apiHeaders, GITHUB_API } from './github-auth'
 
 // Polls the GitHub Notifications API and mirrors PR-relevant threads into
 // github-store. Honours GitHub's conditional-request contract: If-Modified-Since
@@ -48,6 +48,16 @@ function autoStartFresh(fresh: GithubItem[]): void {
     if (!item.unread) continue
     if ((item.prState !== 'open' && item.prState !== 'draft') || item.draft) continue
     if (autoModeFor(item.kind) === 'off') continue
+    // A review-request thread stays reason=review_requested forever, so ANY
+    // author activity (a fix commit, a reply) re-marks it unread. Once we've
+    // closed the item out, only an explicit re-request (login back in the PR's
+    // requested_reviewers) restarts the agent — otherwise review→fix→review
+    // ping-pongs on every push. reviewRequested undefined = unknown: fail open.
+    // Manual panel buttons bypass this entirely (they don't come through here).
+    if (item.kind === 'review-request' && item.reviewRequested === false && githubStore.getItem(item.id)?.respondedAt) {
+      console.log(`[github-poller] auto-start skipped for ${item.repo}#${item.prNumber}: already reviewed and not re-requested`)
+      continue
+    }
     autoSpawner(item.id, { skipSelfEcho: item.kind === 'my-pr-activity' })
       .then((r) => {
         const skipped = (r as { skipped?: string }).skipped
@@ -100,6 +110,7 @@ interface ApiPull {
   draft: boolean
   merged: boolean
   user: { login: string }
+  requested_reviewers?: { login: string }[]
 }
 
 function prState(pr: ApiPull): GithubItem['prState'] {
@@ -112,7 +123,7 @@ function prState(pr: ApiPull): GithubItem['prState'] {
 /** Hydrate one notification thread into a panel item via its PR API url.
  *  Null for anything that isn't a PR or fails to load (skipped, retried on a
  *  later poll because we only advance If-Modified-Since, not per-thread state). */
-async function hydrate(token: string, n: ApiNotification): Promise<GithubItem | null> {
+async function hydrate(token: string, n: ApiNotification, login: string | null): Promise<GithubItem | null> {
   const kind = REASON_TO_KIND[n.reason]
   if (!kind || n.subject.type !== 'PullRequest' || !n.subject.url) return null
   try {
@@ -131,6 +142,7 @@ async function hydrate(token: string, n: ApiNotification): Promise<GithubItem | 
       updatedAt: n.updated_at,
       unread: n.unread,
       latestCommentUrl: n.subject.latest_comment_url,
+      reviewRequested: login ? (pr.requested_reviewers ?? []).some((r) => r.login === login) : undefined,
     }
   } catch {
     return null
@@ -206,7 +218,10 @@ async function tick(): Promise<void> {
     const relevant = notifications.filter((n) => REASON_TO_KIND[n.reason] && n.subject.type === 'PullRequest')
     if (relevant.length === 0) return
 
-    const items = (await Promise.all(relevant.map((n) => hydrate(auth.token, n)))).filter(
+    // Login is needed to read requested_reviewers off each PR; cached after the
+    // first resolve, so this is free on subsequent ticks.
+    const login = await getViewerLogin().catch(() => null)
+    const items = (await Promise.all(relevant.map((n) => hydrate(auth.token, n, login)))).filter(
       (i): i is GithubItem => i !== null,
     )
     if (items.length === 0) return

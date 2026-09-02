@@ -106,6 +106,22 @@ function attachSessionListeners(
   })
 }
 
+/** True when the CLI has written a non-empty transcript for this conversation —
+ *  i.e. `claude --resume <claudeSessionId>` will actually find it. The
+ *  hook-captured path is authoritative (it survives /resume re-keying); the
+ *  cwd+id derivation is the fallback for sessions that haven't fired a hook yet. */
+function hasTranscript(projectPath: string, claudeSessionId: string, sessionId: string): boolean {
+  const candidates = [getTranscriptPath(sessionId), deriveTranscriptPath(projectPath, claudeSessionId)]
+  return candidates.some((p) => {
+    if (!p) return false
+    try {
+      return statSync(p).size > 0
+    } catch {
+      return false
+    }
+  })
+}
+
 export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
   // Real quit (renderer Cmd+Q fallback). app.quit() fires before-quit, which
   // runs the full saveAndCleanup teardown — never bypass it with window.close().
@@ -272,6 +288,11 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     archiver.setVisibleSessions(Array.isArray(ids) ? ids : [])
   })
 
+  // Archived sessions have no PTY, so pty:listActive can't see them. The
+  // renderer's crash-recovery reconnect (e.g. GPU death on screen lock) reads
+  // this alongside it and re-adds their nodes as 'archived'.
+  ipcMain.handle('archive:list', () => archiver.listArchivedSessions())
+
   // Saved sessions
   ipcMain.handle('sessions:loadSaved', () => {
     return loadSavedSessions()
@@ -376,8 +397,19 @@ export function registerIpcHandlers(opts: { reinstallMcp: () => void }): void {
     const session = getSession(id)
     if (!session) return null
     // A session is resumable if it has a real title (not null/empty/"Claude Code")
+    // AND the CLI has actually written its transcript to disk. The title alone is
+    // not enough: we pre-generate --session-id at spawn, so a brand-new session
+    // that has never taken a turn still carries a claudeSessionId with no file
+    // behind it. `claude --resume <that id>` then errors with "session not found"
+    // and exits immediately — which, on the skill-injection path, killed the old
+    // PTY and replaced it with a process that died on startup. Requiring the
+    // transcript to exist makes the caller fall back to a fresh spawn instead.
     const titleClean = session.terminalTitle?.replace(TITLE_INDICATOR_RE, '').trim() ?? ''
-    const isResumable = !!(session.claudeSessionId && !isDefaultTitle(titleClean))
+    const isResumable = !!(
+      session.claudeSessionId &&
+      !isDefaultTitle(titleClean) &&
+      hasTranscript(session.projectPath, session.claudeSessionId, id)
+    )
     return {
       claudeSessionId: session.claudeSessionId,
       isResumable
