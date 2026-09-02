@@ -59,7 +59,19 @@ The agent's **model** is configurable in Settings → GitHub auto-review (haiku/
 
 Per event kind — review requests / mentions / comments on my PRs — choose **Off** (manual buttons only, the default), **Draft** (auto-spawn, you approve the result), or **Auto** (auto-spawn and post directly). Safeguards: one active agent per item, self-echo suppression (activity authored by your own login never triggers a spawn), and only open/draft PRs qualify. Something with nothing to answer (an approval carrying no comments, a bot notice) is closed out as "⊘ no action needed" rather than generating a response.
 
-**Re-reviews require an actual re-request.** A review-request notification thread keeps its reason forever, so every author push or reply re-marks it unread — but once you've responded (or the item was closed out as "no action needed"), new activity alone does NOT respawn the agent. Only the author clicking **re-request review** (which puts you back in the PR's `requested_reviewers`) starts a new round; anything else just shows up as ordinary unread activity for you to triage. The manual "Start review" button is never gated — you can always re-review by hand.
+**Re-reviews need a real invitation.** Any activity on a PR re-marks its notification thread unread, so without gating a single review request produces a fresh review on every push. Each kind is gated by its own signal:
+
+| Kind | Auto-start when… |
+|------|------------------|
+| Review requests | your login is currently in the PR's `requested_reviewers` (GitHub clears it the moment you submit a review and re-adds it on an explicit **re-request review**) — plus a head-SHA backstop that refuses a second pass over a commit you already answered |
+| Mentions | somebody other than you has actually written `@your-login` on the PR since you last closed the item out. Pushes, other people's reviews and general chatter do not qualify; an explicit question does, even at a commit you already reviewed |
+| Comments on my PRs | always — every piece of feedback on your own PR deserves a reply (self-echo suppression aside) |
+
+The mention rule matters more than it looks: a notification's reason flips to `mention` the first time anyone @-mentions you and **never flips back**, so review-requested PRs permanently migrate into the mentions bucket. Gating mentions on an actual @-mention is what stops those from re-reviewing on every push.
+
+Every uncertain branch fails **open** — an unreachable API, an unresolvable login, a team mention (`@org/team` carries no login to match) all spawn rather than stay silent, on the grounds that a redundant review is recoverable and a dropped review request is not. Each decision is logged with its inputs (`kind`, reason, `reviewRequested`, head SHA, response stamps) so a fail-open is diagnosable after the fact.
+
+Anything gated off just shows up as ordinary unread activity for you to triage, and the manual "Start review" button is never gated — you can always re-review by hand.
 
 ### MCP tools (agent visibility)
 

@@ -2,6 +2,7 @@ import { BrowserWindow, Notification } from 'electron'
 import * as githubStore from './github-store'
 import type { GithubItem, GithubItemKind } from './github-store'
 import { getActiveToken, getViewerLogin, invalidateAuth, apiHeaders, GITHUB_API } from './github-auth'
+import { decideAutoStart, type GateDecision } from './github-gate'
 
 // Polls the GitHub Notifications API and mirrors PR-relevant threads into
 // github-store. Honours GitHub's conditional-request contract: If-Modified-Since
@@ -39,31 +40,79 @@ export function configureGithubAutoStart(spawner: GithubAutoSpawner, modeFor: Gi
   autoModeFor = modeFor
 }
 
+/** Everything since `since` on the PR that a human could have addressed to us:
+ *  issue comments, review comments and review bodies. GitHub's
+ *  `subject.latest_comment_url` is null on most active threads (verified
+ *  2026-09-02 across the live feed), so the mention gate cannot rely on it —
+ *  it reads the PR's own activity instead. Null = could not be determined;
+ *  callers fail open. */
+function activitySinceFor(token: string, item: GithubItem, selfLogin: string) {
+  return async (since: string): Promise<string[] | null> => {
+    const base = `${GITHUB_API}/repos/${item.repo}`
+    type Activity = { body?: string; user?: { login?: string }; submitted_at?: string }
+    const get = async (url: string): Promise<Activity[] | null> => {
+      try {
+        const res = await fetch(url, { headers: apiHeaders(token) })
+        if (!res.ok) return null
+        return (await res.json()) as Activity[]
+      } catch {
+        return null
+      }
+    }
+    const [issueComments, reviewComments, reviews] = await Promise.all([
+      get(`${base}/issues/${item.prNumber}/comments?per_page=100&since=${encodeURIComponent(since)}`),
+      get(`${base}/pulls/${item.prNumber}/comments?per_page=100&since=${encodeURIComponent(since)}`),
+      get(`${base}/pulls/${item.prNumber}/reviews?per_page=100`),
+    ])
+    if (issueComments === null || reviewComments === null || reviews === null) return null
+    // A full page of reviews means older ones fell off the front of the list —
+    // we cannot prove nothing was missed, so refuse to answer rather than
+    // answer wrong (the gate reads null as "fail open").
+    if (reviews.length >= 100) return null
+    const recent = [...issueComments, ...reviewComments, ...reviews.filter((r) => (r.submitted_at ?? '') > since)]
+    // Our own posts are not someone asking us for something.
+    return recent.filter((c) => c.user?.login !== selfLogin).map((c) => c.body ?? '')
+  }
+}
+
 /** Fire the review/fix agent for fresh unread items whose kind has auto-start
- *  enabled. Fire-and-forget: the spawner itself enforces the per-item session
- *  guard, self-echo suppression, and checkout resolution. */
-function autoStartFresh(fresh: GithubItem[]): void {
+ *  enabled. The spawner itself enforces the per-item session guard, self-echo
+ *  suppression, and checkout resolution. Every item logs its gate inputs and
+ *  the decision — a gate that silently fails open is otherwise undiagnosable
+ *  after the fact (the store only ever holds the latest values). */
+async function autoStartFresh(token: string, fresh: GithubItem[], login: string | null): Promise<void> {
   if (!autoSpawner || !autoModeFor) return
   for (const item of fresh) {
+    const at = `${item.repo}#${item.prNumber}`
     if (!item.unread) continue
     if ((item.prState !== 'open' && item.prState !== 'draft') || item.draft) continue
     if (autoModeFor(item.kind) === 'off') continue
-    // A review-request thread stays reason=review_requested forever, so ANY
-    // author activity (a fix commit, a reply) re-marks it unread. Once we've
-    // closed the item out, only an explicit re-request (login back in the PR's
-    // requested_reviewers) restarts the agent — otherwise review→fix→review
-    // ping-pongs on every push. reviewRequested undefined = unknown: fail open.
-    // Manual panel buttons bypass this entirely (they don't come through here).
-    if (item.kind === 'review-request' && item.reviewRequested === false && githubStore.getItem(item.id)?.respondedAt) {
-      console.log(`[github-poller] auto-start skipped for ${item.repo}#${item.prNumber}: already reviewed and not re-requested`)
-      continue
+
+    const stored = githubStore.getItem(item.id)
+    const inputs =
+      `kind=${item.kind} reason=${item.notificationReason ?? '?'} ` +
+      `reviewRequested=${item.reviewRequested ?? '?'} head=${item.headSha?.slice(0, 8) ?? '?'} ` +
+      `respondedAt=${stored?.respondedAt ?? '-'} respondedHead=${stored?.respondedHeadSha?.slice(0, 8) ?? '-'}`
+    let decision: GateDecision
+    try {
+      decision = await decideAutoStart(
+        item,
+        stored,
+        login,
+        activitySinceFor(token, item, login ?? ''),
+      )
+    } catch (err) {
+      decision = { start: true, why: `gate threw (${String(err)}) — failing open` }
     }
+    console.log(`[github-poller] auto-start ${decision.start ? 'ALLOW' : 'SKIP'} ${at}: ${decision.why} | ${inputs}`)
+    if (!decision.start) continue
+
     autoSpawner(item.id, { skipSelfEcho: item.kind === 'my-pr-activity' })
       .then((r) => {
         const skipped = (r as { skipped?: string }).skipped
-        if (skipped) console.log(`[github-poller] auto-start skipped for ${item.repo}#${item.prNumber}: ${skipped}`)
+        if (skipped) console.log(`[github-poller] auto-start skipped for ${at}: ${skipped}`)
       })
-      .catch((err) => console.warn(`[github-poller] auto-start failed for ${item.repo}#${item.prNumber}:`, err))
+      .catch((err) => console.warn(`[github-poller] auto-start failed for ${at}:`, err))
   }
 }
 
@@ -111,6 +160,7 @@ interface ApiPull {
   merged: boolean
   user: { login: string }
   requested_reviewers?: { login: string }[]
+  head: { sha: string }
 }
 
 function prState(pr: ApiPull): GithubItem['prState'] {
@@ -142,6 +192,8 @@ async function hydrate(token: string, n: ApiNotification, login: string | null):
       updatedAt: n.updated_at,
       unread: n.unread,
       latestCommentUrl: n.subject.latest_comment_url,
+      headSha: pr.head?.sha,
+      notificationReason: n.reason,
       reviewRequested: login ? (pr.requested_reviewers ?? []).some((r) => r.login === login) : undefined,
     }
   } catch {
@@ -229,7 +281,7 @@ async function tick(): Promise<void> {
     const fresh = githubStore.upsertItems(items)
     broadcastItems()
     notifyNewItems(fresh)
-    autoStartFresh(fresh)
+    await autoStartFresh(auth.token, fresh, login)
   } catch (err) {
     console.warn('[github-poller] tick failed:', err)
   } finally {

@@ -97,6 +97,23 @@ async function submitReplyWithFixes(token: string, item: GithubItem, draft: Gith
   return parts.join(', ')
 }
 
+/** The PR's head SHA right now. Read at close-out time (not from the last
+ *  poll) because that is the commit GitHub anchors the review to — the stamp
+ *  is what the auto-start gate later compares against to refuse a second pass
+ *  over the same commit. Null when unreadable; the store then falls back to
+ *  the last-polled headSha. */
+export async function fetchPrHeadSha(repo: string, prNumber: number): Promise<string | undefined> {
+  try {
+    const auth = await getActiveToken()
+    if (!auth) return undefined
+    const res = await fetch(`${GITHUB_API}/repos/${repo}/pulls/${prNumber}`, { headers: apiHeaders(auth.token) })
+    if (!res.ok) return undefined
+    return ((await res.json()) as { head?: { sha?: string } }).head?.sha
+  } catch {
+    return undefined
+  }
+}
+
 /** Submit an item's pending draft. Returns a one-line summary of what was
  *  posted. Throws with a human-readable message on any failure — the draft is
  *  kept so the user can retry or edit. */
@@ -113,7 +130,7 @@ export async function submitDraft(itemId: string): Promise<string> {
       ? await submitReview(auth.token, item, draft)
       : await submitReplyWithFixes(auth.token, item, draft)
 
-  githubStore.markResponded(itemId, summary)
+  githubStore.markResponded(itemId, summary, await fetchPrHeadSha(item.repo, item.prNumber))
   broadcastItems()
   // Responding means we've dealt with it — clear the unread flag on GitHub
   // (GitHub remains the source of truth; markThreadRead reads the state back).

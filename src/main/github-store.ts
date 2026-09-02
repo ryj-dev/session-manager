@@ -63,6 +63,14 @@ export interface GithubItem {
   /** API url of the newest comment/review on the thread, when GitHub provides
    *  one — gives "Address comments" a concrete starting point. */
   latestCommentUrl: string | null
+  /** PR head commit SHA at hydrate time. Paired with respondedHeadSha to make
+   *  "have I already reviewed this exact commit?" answerable without trusting
+   *  the notification's reason or read-state. */
+  headSha?: string
+  /** The RAW notification `reason` this item was mapped from. Kind collapses
+   *  mention/team_mention into one bucket, but the gates need to tell them
+   *  apart (a team mention carries @org/team, never the login). */
+  notificationReason?: string
   /** Whether the connected login is CURRENTLY in the PR's requested_reviewers,
    *  captured at hydrate time. GitHub removes you when you submit a review and
    *  re-adds you on an explicit re-request, so this distinguishes "review was
@@ -93,6 +101,11 @@ export interface GithubItem {
    *  type 'none'). Absent on items closed out before this field existed —
    *  treat missing as 'submitted'. */
   respondedKind?: 'submitted' | 'dismissed'
+  /** PR head SHA at the moment the item was closed out. The auto-start gate
+   *  refuses to re-review a commit this stamp already covers — a backstop that
+   *  holds even when the reason/requested_reviewers signals fail open. Absent
+   *  on items closed out before this field existed (treated as unknown). */
+  respondedHeadSha?: string
 }
 
 interface GithubData {
@@ -150,6 +163,7 @@ export function upsertItems(incoming: GithubItem[]): GithubItem[] {
             respondedAt: prev.respondedAt,
             respondedSummary: prev.respondedSummary,
             respondedKind: prev.respondedKind,
+            respondedHeadSha: prev.respondedHeadSha,
             agentClaudeSessionId: prev.agentClaudeSessionId,
             agentCwd: prev.agentCwd,
             agentSessionId: prev.agentSessionId,
@@ -193,11 +207,21 @@ export function setAgentSession(id: string, claudeSessionId: string | null, cwd:
   )
 }
 
-export function markResponded(id: string, summary: string): GithubItem[] {
+/** `headSha` is the PR head at the moment of submission — what GitHub anchors
+ *  the review to. Callers pass a freshly-read SHA; falling back to the item's
+ *  last-polled headSha keeps the stamp useful when that read fails. */
+export function markResponded(id: string, summary: string, headSha?: string): GithubItem[] {
   return persist(
     getItems().map((i) =>
       i.id === id
-        ? { ...i, draft: null, respondedAt: new Date().toISOString(), respondedSummary: summary, respondedKind: 'submitted' as const }
+        ? {
+            ...i,
+            draft: null,
+            respondedAt: new Date().toISOString(),
+            respondedSummary: summary,
+            respondedKind: 'submitted' as const,
+            respondedHeadSha: headSha ?? i.headSha,
+          }
         : i,
     ),
   )
@@ -208,11 +232,18 @@ export function markResponded(id: string, summary: string): GithubItem[] {
  *  panel and every respondedAt consumer keep working — but recorded as
  *  'dismissed' so the UI can say "no action needed" rather than "responded".
  *  Nothing is posted to GitHub. */
-export function markDismissed(id: string, reason: string): GithubItem[] {
+export function markDismissed(id: string, reason: string, headSha?: string): GithubItem[] {
   return persist(
     getItems().map((i) =>
       i.id === id
-        ? { ...i, draft: null, respondedAt: new Date().toISOString(), respondedSummary: reason, respondedKind: 'dismissed' as const }
+        ? {
+            ...i,
+            draft: null,
+            respondedAt: new Date().toISOString(),
+            respondedSummary: reason,
+            respondedKind: 'dismissed' as const,
+            respondedHeadSha: headSha ?? i.headSha,
+          }
         : i,
     ),
   )

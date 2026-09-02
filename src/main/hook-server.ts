@@ -25,7 +25,12 @@ import {
 import { MODEL_IDS, resolveModelId, defaultModelForRole, defaultEnvForRole } from './model-tiers'
 import { buildMemoryInjection } from './memory-injection'
 import * as githubStore from './github-store'
-import { submitDraft as githubSubmitDraft, putDraft as githubPutDraft, resolveRepoPath as githubResolveRepoPath } from './github-actions'
+import {
+  submitDraft as githubSubmitDraft,
+  putDraft as githubPutDraft,
+  resolveRepoPath as githubResolveRepoPath,
+  fetchPrHeadSha as githubFetchPrHeadSha,
+} from './github-actions'
 import { markThreadRead as githubMarkThreadRead } from './github-poller'
 import { getAuthStatus as githubAuthStatus, getActiveToken as githubActiveToken, apiHeaders as githubApiHeaders } from './github-auth'
 import type { GithubAutoMode } from './settings-store'
@@ -1122,7 +1127,9 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
     // it can neither finish nor re-trigger. Nothing is posted to GitHub.
     if (payload.type === 'none') {
       const reason = payload.body?.trim() || 'No response needed'
-      githubStore.markDismissed(payload.itemId, reason)
+      // Stamp the head SHA the dismissal covers, exactly as a submission does —
+      // "nothing to do here" must gate the next poll the same way a review does.
+      githubStore.markDismissed(payload.itemId, reason, await githubFetchPrHeadSha(item.repo, item.prNumber))
       broadcastGithubItems()
       void githubMarkThreadRead(payload.itemId)
       res.writeHead(200, { 'Content-Type': 'application/json' })
