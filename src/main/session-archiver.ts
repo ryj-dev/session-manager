@@ -249,13 +249,23 @@ function readClaudeProcessStatus(pid: number | undefined, claudeSessionId: strin
   }
 }
 
+/** Block reasons are debug-only: on a busy machine every live session reports
+ *  one every sweep, which drowns out the lines you actually read the log for
+ *  (renderer crashes, spawns, poller decisions). Opt in with SM_DEBUG_ARCHIVER=1. */
+const DEBUG_ARCHIVER = process.env.SM_DEBUG_ARCHIVER === '1'
+
 /** Last logged block reason per session, so the sweep can report WHY a session
- *  isn't archiving without spamming the log every 30s while nothing changes. */
+ *  isn't archiving without spamming the log every 30s while nothing changes.
+ *  Keyed on the reason with numbers stripped — reasons embed a live measurement
+ *  ("only quiet for 196ms"), so comparing the raw string never matches and the
+ *  de-dupe would never fire. */
 const lastBlockReason = new Map<string, string>()
 
 function logBlockReason(id: string, reason: string): void {
-  if (lastBlockReason.get(id) === reason) return
-  lastBlockReason.set(id, reason)
+  if (!DEBUG_ARCHIVER) return
+  const key = reason.replace(/\d+/g, '#')
+  if (lastBlockReason.get(id) === key) return
+  lastBlockReason.set(id, key)
   console.log(`[archiver] ${id} not archived — ${reason}`)
 }
 
