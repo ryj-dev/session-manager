@@ -1,33 +1,22 @@
-import {
-  forceSimulation,
-  forceManyBody,
-  forceCollide,
-  type Simulation,
-  type SimulationNodeDatum
-} from 'd3-force'
 import type { TreeNode } from './spawn-tree'
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export interface HubNode extends SimulationNodeDatum {
+/**
+ * A project hub. Its position is animated toward `targetX`/`targetY` by the
+ * same spring integrator the session thumbnails use (see stepSprings); the
+ * targets themselves come from computeHubTargets.
+ */
+export interface HubNode extends SpringNode {
   id: string // projectPath used as id
   projectName: string
   color: string
   sessionCount: number
   /**
-   * Soft anchor: the position this hub settled at last time. Anchored hubs are
-   * pulled back toward it (instead of being hard-pinned via fx/fy) so the
-   * collision force can still shove them just far enough to clear an overlap.
-   * Cleared to let a hub participate in a fresh layout / compaction pass.
+   * The space this cluster's pill + thumbnails occupy, relative to the hub
+   * (see clusterBox). Falls back to a worst-case square when unset.
    */
-  anchorX?: number
-  anchorY?: number
-  /**
-   * Actual footprint radius from the spokes currently laid out around this
-   * hub (see clusterExtent). Falls back to clusterRadius(sessionCount), the
-   * worst-case estimate, when unset.
-   */
-  radius?: number
+  box?: Box
 }
 
 export interface SpokeTarget {
@@ -169,8 +158,8 @@ function ringRadius(ring: number, sessionCount: number): number {
 // sideways (pill half-width + thumb half-width ≈ the whole radius) while
 // wasting space when it runs up or down. Enforce the gap between the two
 // rectangles' perimeters along the spoke direction instead.
-const HUB_PILL_HALF_W = 120 // generous: long project names render ~240px wide
-const HUB_PILL_HALF_H = 16
+export const HUB_PILL_HALF_W = 120 // generous: long project names render ~240px wide
+export const HUB_PILL_HALF_H = 16
 const MIN_EDGE_GAP = 56 // visible edge length between pill and thumbnail
 
 /** Smallest hub→thumbnail centre distance at `angle` that keeps MIN_EDGE_GAP of visible edge. */
@@ -203,144 +192,278 @@ export function stableHash(str: string): number {
   return h >>> 0
 }
 
-// ── Hub simulation (repulsion + collision to keep clusters apart) ──────
-
-/** Compute the outermost ring radius for a given number of sessions */
-export function clusterRadius(sessionCount: number): number {
-  if (sessionCount === 0) return 0
-  let placed = 0
-  let ring = 0
-  while (placed < sessionCount) {
-    placed += spokeCapacity(ringRadius(ring, sessionCount))
-    ring++
-  }
-  // Outermost ring radius (or the sideways edge-gap floor, whichever is
-  // larger) + half a thumbnail for the node extent
-  const outerRing = Math.max(ringRadius(ring - 1, sessionCount), MAX_MIN_SPOKE_DISTANCE)
-  return outerRing + Math.max(THUMB_WIDTH, THUMB_HEIGHT) / 2
-}
+// ── Cluster footprint ──────────────────────────────────────────────────
 
 /**
- * Footprint radius of a laid-out cluster: the farthest spoke centre plus half a
- * thumbnail. Tighter than clusterRadius() because it uses the real angles —
- * a lone thumbnail hanging below its hub needs far less room than one beside it.
- */
-export function clusterExtent(targets: SpokeTarget[]): number {
-  let max = 0
-  for (const t of targets) {
-    max = Math.max(max, Math.hypot(t.offsetX, t.offsetY))
-  }
-  return max + Math.max(THUMB_WIDTH, THUMB_HEIGHT) / 2
-}
-
-// Anchor pull for settled hubs. Strong enough to hold a hub where the user
-// last saw it against the residual many-body repulsion, weak enough that the
-// collision force (which ignores alpha) wins when two clusters overlap.
-const ANCHOR_STRENGTH = 0.3
-// Centering pull for hubs that have no anchor yet (new / relayout / compaction).
-const CENTER_STRENGTH = 0.08
-
-interface LayoutForce {
-  (alpha: number): void
-  initialize?: (nodes: HubNode[]) => void
-  setCenter: (width: number, height: number) => void
-}
-
-/**
- * Combined anchor + centering force.
+ * The space a laid-out cluster actually occupies, relative to its hub.
  *
- * - Anchored hubs are pulled toward their anchor and feel NO centering pull.
- *   (Centering an anchored hub would ratchet it toward the middle a little on
- *   every reheat, since each settle re-anchors at the drifted position.)
- * - Unanchored hubs are pulled toward the viewport center. The pull is
- *   aspect-aware: weaker along the long axis of the viewport, so the
- *   equilibrium stretches to fill a wide window instead of forming a blob
- *   (which, with a handful of hubs, tends to line up vertically).
+ * A box rather than a radius, because a cluster is rarely round: a project with
+ * one session is a pill with a single thumbnail off to one side, and enclosing
+ * that in a circle reserves roughly four times the room it needs. With real
+ * bounds, a screenful of one-session projects packs into a screenful instead of
+ * spilling off the edges.
  */
-function forceLayout(width: number, height: number): LayoutForce {
-  let nodes: HubNode[] = []
-  let cx = width / 2
-  let cy = height / 2
-  let sx = CENTER_STRENGTH
-  let sy = CENTER_STRENGTH
+export interface Box {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
 
-  const force = ((alpha: number): void => {
-    for (const n of nodes) {
-      const x = n.x ?? 0
-      const y = n.y ?? 0
-      if (n.anchorX != null && n.anchorY != null) {
-        n.vx = (n.vx ?? 0) + (n.anchorX - x) * ANCHOR_STRENGTH * alpha
-        n.vy = (n.vy ?? 0) + (n.anchorY - y) * ANCHOR_STRENGTH * alpha
-      } else {
-        n.vx = (n.vx ?? 0) + (cx - x) * sx * alpha
-        n.vy = (n.vy ?? 0) + (cy - y) * sy * alpha
-      }
+// ── Box helpers ────────────────────────────────────────────────────────
+// One rectangle representation for the whole layout. Min/max rather than
+// centre + half-extents because the interesting rectangles here are lopsided:
+// a cluster's footprint sits off to one side of the hub it belongs to.
+
+/** A box translated by (x, y). */
+export function boxAt(b: Box, x: number, y: number): Box {
+  return { minX: b.minX + x, maxX: b.maxX + x, minY: b.minY + y, maxY: b.maxY + y }
+}
+
+/** A box of the given half-extents, centred on (x, y). */
+export function boxFromCenter(x: number, y: number, halfW: number, halfH: number): Box {
+  return { minX: x - halfW, maxX: x + halfW, minY: y - halfH, maxY: y + halfH }
+}
+
+/** Grow a box on all sides — used to keep clearance between clusters. */
+export function padBox(b: Box, pad: number): Box {
+  return { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad }
+}
+
+export function boxesOverlap(a: Box, b: Box): boolean {
+  return a.minX < b.maxX && b.minX < a.maxX && a.minY < b.maxY && b.minY < a.maxY
+}
+
+/**
+ * Smallest translation that separates `a` from `b`, or null if they already
+ * clear each other. Along the axis of least overlap, so a box slides out the
+ * near side rather than being flung across its neighbour.
+ */
+export function boxSeparation(a: Box, b: Box): { x: number; y: number } | null {
+  if (!boxesOverlap(a, b)) return null
+  const overlapLeft = a.maxX - b.minX // push a in -x
+  const overlapRight = b.maxX - a.minX // push a in +x
+  const overlapUp = a.maxY - b.minY // push a in -y
+  const overlapDown = b.maxY - a.minY // push a in +y
+  const dx = overlapLeft < overlapRight ? -overlapLeft : overlapRight
+  const dy = overlapUp < overlapDown ? -overlapUp : overlapDown
+  return Math.abs(dx) < Math.abs(dy) ? { x: dx, y: 0 } : { x: 0, y: dy }
+}
+
+/** Footprint of `targets` (hub-relative), including the hub pill itself. */
+export function clusterBox(targets: readonly SpokeTarget[]): Box {
+  // The pill is always there, even for a project whose sessions are all hidden
+  // inside a split group.
+  let minX = -HUB_PILL_HALF_W
+  let maxX = HUB_PILL_HALF_W
+  let minY = -HUB_PILL_HALF_H
+  let maxY = HUB_PILL_HALF_H
+  for (const t of targets) {
+    minX = Math.min(minX, t.offsetX - THUMB_WIDTH / 2)
+    maxX = Math.max(maxX, t.offsetX + THUMB_WIDTH / 2)
+    minY = Math.min(minY, t.offsetY - THUMB_HEIGHT / 2)
+    maxY = Math.max(maxY, t.offsetY + THUMB_HEIGHT / 2)
+  }
+  return { minX, minY, maxX, maxY }
+}
+
+/** Worst-case footprint for a hub whose spokes haven't been laid out yet. */
+function fallbackBox(sessionCount: number): Box {
+  const r = MAX_MIN_SPOKE_DISTANCE + Math.max(THUMB_WIDTH, THUMB_HEIGHT) / 2
+  const n = Math.max(sessionCount, 1)
+  const scale = n <= 2 ? 1 : Math.sqrt(n / 2)
+  return { minX: -r * scale, minY: -r * scale, maxX: r * scale, maxY: r * scale }
+}
+
+// Gap kept between two cluster footprints. This is the whole of what separates
+// one project from the next now that footprints are tight bounding boxes rather
+// than circles, so it has to carry real visual weight — the old circular
+// footprint reserved ~370px around a hub and got its separation for free as a
+// side effect of being wasteful. Sized so a handful of projects still fills a
+// 1900x1080 window rather than huddling in the middle of it.
+const HUB_CLEARANCE = 200
+
+/**
+ * The gap an ALREADY-PLACED hub is allowed to fall to before it is made to move.
+ *
+ * HUB_CLEARANCE is what the pack aims for, and a fresh pack leaves every hub
+ * sitting flush against it — so if the same figure also decided when a hub had
+ * to give way, the very first session added to a neighbouring project would
+ * breach it and shove an established hub aside. Every spawn would nudge
+ * somebody, which is the behaviour this design is trying to remove.
+ *
+ * So the two are separated: the pack still reserves a generous, readable gap
+ * for a hub it is placing, and a hub already in place keeps its position while
+ * its neighbour's cluster grows into that slack — yielding only when the gap
+ * gets genuinely too tight to read as two groups.
+ */
+const HUB_KEEP_CLEARANCE = 64
+
+// Candidate lattice for the pack: rings this far apart, this many angles each.
+// Deliberately CONSTANT rather than derived from the hubs being packed — a
+// lattice that depended on the set would shift under every hub already placed
+// the moment a project opened, and "an established project keeps its slot"
+// would quietly stop being true.
+const PACK_STEP = 24
+const PACK_ANGLES = 64
+
+/**
+ * A hub's placement in the packing frame. Not screen coordinates: the frame is
+ * centred on the origin and never re-centred, so a slot means the same place
+ * for as long as the project exists (see computeHubTargets).
+ */
+export interface HubSlot {
+  x: number
+  y: number
+}
+
+/**
+ * Where each hub sits.
+ *
+ * This replaced a d3-force annealing simulation (charge + collide + centering,
+ * with soft anchors, reheats and a compaction pass). For 2-10 nodes that was
+ * both overkill and actively fragile: because each settle re-anchored a hub
+ * wherever it happened to stop, any residual force became a permanent
+ * per-reheat increment, and the layout walked itself apart during ordinary use.
+ *
+ * Determinism alone did not fix that, because a deterministic layout is not a
+ * STABLE one. The pack's inputs include every cluster's footprint, and a
+ * footprint grows the moment its project gains a session — so a pure function
+ * of those inputs faithfully returns a different arrangement after every spawn,
+ * and a hub two slots down the order could find its old spot taken and land on
+ * the far side of the graph. That defeats the point of the view: the user
+ * navigates by remembering that a session is *over there*.
+ *
+ * So placement is sticky rather than merely reproducible:
+ *
+ *   1. Hubs with a remembered slot keep it, in `hubs` order, as long as the
+ *      cluster still clears every hub kept before it. An established project
+ *      is only ever displaced by a genuine collision — and when two collide,
+ *      the one earlier in the order (the longer-established one) is the one
+ *      that stays.
+ *   2. Everything else — new projects, and the rare evicted hub — takes the
+ *      free position closest to the frame's centre, measured in
+ *      viewport-normalised space so a wide window packs wide and a tall one
+ *      packs tall instead of always forming a circular blob.
+ *
+ * The result is expressed in a frame centred on the origin and is NOT shifted
+ * to the middle of the viewport. Centring here would undo all of the above:
+ * the shift derives from the union of every footprint, so one project growing a
+ * ring would slide every other hub sideways. Centring is the camera's job, and
+ * it only has to happen once.
+ */
+export function computeHubTargets(
+  hubs: readonly HubNode[],
+  width: number,
+  height: number,
+  pinned?: ReadonlyMap<string, HubSlot>
+): Map<string, HubSlot> {
+  const out = new Map<string, HubSlot>()
+  if (hubs.length === 0) return out
+
+  // Half the clearance on each cluster, so any two end up a full gap apart.
+  const raw = hubs.map((h) => h.box ?? fallbackBox(h.sessionCount))
+  const boxes = raw.map((b) => padBox(b, HUB_CLEARANCE / 2))
+  const keepBoxes = raw.map((b) => padBox(b, HUB_KEEP_CLEARANCE / 2))
+
+  // Candidate rings are ELLIPSES with the viewport's aspect, not circles, so
+  // "the nearest free spot" means nearest in screen terms: a wide window fills
+  // sideways before it grows tall, and a tall one the other way round. Doing
+  // this by weighting a circular ring instead only breaks ties within the ring,
+  // which is far too weak to shape the result.
+  const halfW = Math.max(width, 1) / 2
+  const halfH = Math.max(height, 1) / 2
+  const aspectX = halfW / Math.min(halfW, halfH)
+  const aspectY = halfH / Math.min(halfW, halfH)
+
+  // Only bounds the search — every hub is placed long before this.
+  const longest = Math.max(...boxes.map((b) => Math.max(b.maxX - b.minX, b.maxY - b.minY)))
+  const maxRing = Math.ceil(((hubs.length + 1) * longest) / PACK_STEP) + 2 // search bound only
+
+  // Two views of the same occupied space, kept in step: `placed` carries the
+  // full-clearance boxes a hub being packed has to respect, `placedKeep` the
+  // tighter ones that decide whether a hub already in position may stay put.
+  const placed: Box[] = []
+  const placedKeep: Box[] = []
+
+  const occupy = (i: number, x: number, y: number): void => {
+    placed.push(boxAt(boxes[i], x, y))
+    placedKeep.push(boxAt(keepBoxes[i], x, y))
+  }
+
+  // Pass 1: honour remembered slots. Order matters twice over — it decides who
+  // is tested against whom, and so which of two overlapping hubs is the one
+  // that keeps its place.
+  const needsPacking: number[] = []
+  hubs.forEach((hub, i) => {
+    const slot = pinned?.get(hub.id)
+    if (!slot || !Number.isFinite(slot.x) || !Number.isFinite(slot.y)) {
+      needsPacking.push(i)
+      return
     }
-  }) as LayoutForce
+    const candidate = boxAt(keepBoxes[i], slot.x, slot.y)
+    if (placedKeep.some((q) => boxesOverlap(candidate, q))) {
+      needsPacking.push(i)
+      return
+    }
+    occupy(i, slot.x, slot.y)
+    out.set(hub.id, { x: slot.x, y: slot.y })
+  })
 
-  force.initialize = (ns: HubNode[]): void => {
-    nodes = ns
+  // Pass 2: place whoever is left on the nearest free lattice position.
+  //
+  // "Nearest" is measured from a different origin depending on why the hub is
+  // here. A project the user has never seen has no place to be attached to, so
+  // it belongs as close to the middle of the arrangement as it can get. An
+  // EVICTED hub does have one — the user knows where it was — so it searches
+  // outward from its old slot and takes the closest position that clears its
+  // grown neighbour. Sending it back to the centre instead would satisfy the
+  // collision just as well while producing exactly the teleport this design
+  // exists to avoid.
+  for (const i of needsPacking) {
+    const box = boxes[i]
+    const from = pinned?.get(hubs[i].id)
+    const originX = from && Number.isFinite(from.x) ? from.x : 0
+    const originY = from && Number.isFinite(from.y) ? from.y : 0
+    // Centre of area, not the hub: a cluster with one thumbnail off to one side
+    // is not centred on its pill.
+    const boxCx = (box.minX + box.maxX) / 2
+    const boxCy = (box.minY + box.maxY) / 2
+
+    let best: HubSlot | null = null
+    let bestCost = Infinity
+
+    for (let ring = 0; ring <= maxRing; ring++) {
+      const dist = ring * PACK_STEP
+      // Ring 0 is the single candidate at the search origin.
+      const steps = ring === 0 ? 1 : PACK_ANGLES
+      for (let a = 0; a < steps; a++) {
+        // Walk the ellipse in a fixed order, starting at 0 rad, for determinism.
+        const angle = (a / steps) * Math.PI * 2
+        const x = originX + Math.cos(angle) * dist * aspectX
+        const y = originY + Math.sin(angle) * dist * aspectY
+        const candidate = boxAt(box, x, y)
+        if (placed.some((q) => boxesOverlap(candidate, q))) continue
+        const cost = Math.hypot(
+          (x + boxCx - originX) / aspectX,
+          (y + boxCy - originY) / aspectY
+        )
+        if (cost < bestCost) { bestCost = cost; best = { x, y } }
+      }
+      // Once a ring has yielded a position, no larger ring can beat it: cost
+      // grows with distance, so every candidate further out is worse.
+      if (best) break
+    }
+
+    // Unreachable for any sane hub count, but never drop a hub off the graph.
+    const spot = best ?? { x: originX, y: originY + (placed.length + 1) * longest }
+    occupy(i, spot.x, spot.y)
+    out.set(hubs[i].id, spot)
   }
-  force.setCenter = (w: number, h: number): void => {
-    cx = w / 2
-    cy = h / 2
-    // Long axis gets the weaker pull, short axis the stronger, both scaled by
-    // the aspect ratio. The contrast has to be large: with a few hubs the
-    // layout is a collision packing, and only a clear energy difference
-    // between "row along the long axis" and "diamond" breaks the symmetry.
-    const aspect = w > 0 && h > 0 ? w / h : 1
-    const clamp = (v: number): number => Math.max(CENTER_STRENGTH * 0.3, Math.min(CENTER_STRENGTH * 3, v))
-    sx = clamp(CENTER_STRENGTH / aspect)
-    sy = clamp(CENTER_STRENGTH * aspect)
-  }
-  force.setCenter(width, height)
-  return force
+
+  return out
 }
 
-export function createHubSimulation(
-  width: number,
-  height: number
-): Simulation<HubNode, never> {
-  return forceSimulation<HubNode>()
-    .force('charge', forceManyBody<HubNode>().strength(-2000).distanceMax(2000))
-    .force(
-      'collide',
-      forceCollide<HubNode>()
-        .radius((d) => (d.radius ?? clusterRadius(d.sessionCount)) + 20)
-        .strength(1)
-        .iterations(2)
-    )
-    .force('layout', forceLayout(width, height))
-    .alphaDecay(0.04)
-    .velocityDecay(0.5)
-    .alphaMin(0.001)
-}
-
-/** Re-target the centering pull after a viewport resize, without rebuilding the sim. */
-export function setSimulationCenter(
-  sim: Simulation<HubNode, never>,
-  width: number,
-  height: number
-): void {
-  const f = sim.force('layout') as LayoutForce | undefined
-  f?.setCenter(width, height)
-}
-
-/** Anchor every hub at its current position (call once the sim has settled). */
-export function anchorHubs(nodes: HubNode[]): void {
-  for (const n of nodes) {
-    n.anchorX = n.x
-    n.anchorY = n.y
-  }
-}
-
-/** Release every hub so it takes part in the next layout pass. */
-export function releaseHubs(nodes: HubNode[]): void {
-  for (const n of nodes) {
-    n.anchorX = undefined
-    n.anchorY = undefined
-  }
-}
 
 // ── Spoke layout (deterministic ring positions) ────────────────────────
 

@@ -1,11 +1,12 @@
 import { useRef, useEffect, useState, useMemo } from 'react'
-import type { Simulation } from 'd3-force'
 import {
-  createHubSimulation,
-  setSimulationCenter,
-  anchorHubs,
-  releaseHubs,
-  clusterExtent,
+  computeHubTargets,
+  clusterBox,
+  boxAt,
+  boxFromCenter,
+  boxSeparation,
+  HUB_PILL_HALF_W,
+  HUB_PILL_HALF_H,
   computeSpokeOffsets,
   stepSprings,
   projectColor,
@@ -15,7 +16,10 @@ import {
   RING_GAP,
   THUMB_WIDTH,
   THUMB_HEIGHT,
+  type Box,
   type HubNode,
+  type HubSlot,
+  type SpokeTarget,
   type SpringNode
 } from '../lib/simulation'
 import { buildSpawnForest, recordLineage, type TreeNode } from '../lib/spawn-tree'
@@ -89,37 +93,147 @@ interface SimulationResult {
   nudge: (sessionId: string, mouseX: number, mouseY: number) => void
 }
 
-// ── Layout passes ──────────────────────────────────────────────────────
+// ── Hub layout ─────────────────────────────────────────────────────────
 //
-// Hubs are soft-anchored where they settled (see HubNode.anchorX). Three
-// things move them:
-//   - overlap: collision runs every reheat and wins against the anchor pull,
-//     so a growing cluster shoves its neighbours just far enough to clear;
-//   - compaction: after sessions/projects close, anchors are released for one
-//     gentle low-alpha pass so hubs drift inward and re-fill the vacated
-//     space, keeping their relative arrangement (neighbours stay neighbours);
-//   - relayout: an explicit user action (Settings) that drops every anchor
-//     and solves from a high alpha for a fresh, dense layout.
+// computeHubTargets packs the clusters and the hubs spring to those targets
+// with the same integrator the thumbnails use. There is no annealing, no
+// anchoring and no reheating, so the layout has no history to accumulate into.
 //
-// Compaction is deferred a beat so the user sees the close first, then a
-// smooth slide — never a jump. If the graph is unmounted before it fires
-// (user focused a session), the request is kept and runs when the graph
-// remounts, before they've built a mental map of the stale layout.
+// Two pieces of state make the arrangement STABLE, which is a stronger promise
+// than reproducible and the one the view actually needs — the user navigates by
+// remembering that a session is over there:
+//
+//   * hubOrder — first-seen order of projects. Decides pack order, and so who
+//     keeps their place when two clusters collide (the longer-established one).
+//   * hubSlots — the position each hub was last given. Passed back in as the
+//     pinned set, so an existing hub reuses its own coordinates and only ever
+//     moves when its cluster has grown into a neighbour it must yield to.
+//
+// Persisting coordinates was tried before and removed, because back then they
+// were the ANNEALER's output: reloading them re-anchored the simulation to
+// wherever it had last drifted to, and the drift compounded every reheat. A
+// pack slot carries no such feedback — nothing reads it but the collision test
+// that decides whether to keep it — so there is no loop to accumulate.
+//
+// Re-layout (Settings) drops both, so the arrangement is rebuilt from the
+// current project list in its canonical, densest form.
 
-const COMPACT_DELAY_MS = 1200
-const COMPACT_ALPHA = 0.6
-const RELAYOUT_ALPHA = 1
+const HUB_ORDER_KEY = 'graph.hubOrder.v1'
+const HUB_SLOTS_KEY = 'graph.hubSlots.v1'
 const RELAYOUT_EVENT = 'graph:relayout'
 
-let pendingPass: 'compact' | 'relayout' | null = null
+/** First-seen order of project paths. Index = pack order in computeHubTargets. */
+function loadHubOrder(): string[] {
+  try {
+    const raw = localStorage.getItem(HUB_ORDER_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function saveHubOrder(order: string[]): void {
+  try {
+    localStorage.setItem(HUB_ORDER_KEY, JSON.stringify(order))
+  } catch {
+    /* quota or unavailable — ignore */
+  }
+}
+
+let hubOrder = loadHubOrder()
+
+/** Last position given to each project's hub, in the packing frame. */
+function loadHubSlots(): Map<string, HubSlot> {
+  const out = new Map<string, HubSlot>()
+  try {
+    const raw = localStorage.getItem(HUB_SLOTS_KEY)
+    if (!raw) return out
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object') return out
+    for (const [id, slot] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!slot || typeof slot !== 'object') continue
+      const { x, y } = slot as { x?: unknown; y?: unknown }
+      if (typeof x !== 'number' || typeof y !== 'number') continue
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+      out.set(id, { x, y })
+    }
+  } catch {
+    /* malformed or unavailable — pack from scratch */
+  }
+  return out
+}
+
+function saveHubSlots(slots: ReadonlyMap<string, HubSlot>): void {
+  try {
+    localStorage.setItem(HUB_SLOTS_KEY, JSON.stringify(Object.fromEntries(slots)))
+  } catch {
+    /* quota or unavailable — ignore */
+  }
+}
+
+let hubSlots = loadHubSlots()
 
 /**
- * Ask the graph to re-solve its layout from scratch (drops every hub anchor).
- * Safe to call from anywhere in the renderer — if the graph isn't mounted the
- * request is applied when it next mounts.
+ * Remember where the pack put each hub, so the next recompute can hand the same
+ * positions back as pins. Only the projects currently on the graph are kept: a
+ * slot held by a project that has gone away would keep reserving space in the
+ * collision test forever, and the point of releasing it is that the hubs behind
+ * it can slide inward to fill the gap.
+ */
+function rememberHubSlots(slots: ReadonlyMap<string, HubSlot>): void {
+  const next = new Map(slots)
+  let changed = next.size !== hubSlots.size
+  if (!changed) {
+    for (const [id, slot] of next) {
+      const prev = hubSlots.get(id)
+      if (!prev || prev.x !== slot.x || prev.y !== slot.y) { changed = true; break }
+    }
+  }
+  if (!changed) return
+  hubSlots = next
+  saveHubSlots(hubSlots)
+}
+
+// Positions used to be persisted (hub x/y, spoke x/y) back when the layout was
+// annealed and could not be reproduced. Both are derived now, so the old keys
+// are dead weight in the user's storage — and the hub one holds the drifted
+// coordinates the old simulation left behind. Clear them once.
+try {
+  localStorage.removeItem('graph.hubPositions.v1')
+  localStorage.removeItem('graph.spokePositions.v1')
+} catch {
+  /* unavailable — nothing to clean up */
+}
+
+/**
+ * Pack order for the current hub set: known projects in first-seen order, then
+ * any newcomers appended. Prunes projects that are no longer around, so a slot
+ * freed by a closed project is reused instead of leaving a permanent hole.
+ */
+function orderHubs<T extends { id: string }>(hubs: T[]): T[] {
+  const byId = new Map(hubs.map((h) => [h.id, h]))
+  const known = hubOrder.filter((id) => byId.has(id))
+  const fresh = hubs.filter((h) => !hubOrder.includes(h.id)).map((h) => h.id).sort()
+  const next = [...known, ...fresh]
+  if (next.length !== hubOrder.length || next.some((id, i) => hubOrder[i] !== id)) {
+    hubOrder = next
+    saveHubOrder(hubOrder)
+  }
+  return next.map((id) => byId.get(id)!)
+}
+
+/**
+ * Rebuild the layout in its canonical form, forgetting which project arrived
+ * when. Safe to call from anywhere in the renderer — if the graph isn't
+ * mounted, the next mount picks up the cleared order anyway.
  */
 export function requestGraphRelayout(): void {
-  pendingPass = 'relayout'
+  hubOrder = []
+  saveHubOrder(hubOrder)
+  hubSlots = new Map()
+  saveHubSlots(hubSlots)
   window.dispatchEvent(new Event(RELAYOUT_EVENT))
 }
 
@@ -212,65 +326,79 @@ function singleHubOffsetFor(groupId: string): { x: number; y: number } {
   return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }
 }
 
-// ── Persistent position cache ──────────────────────────────────────────
-// Hub positions are persisted to localStorage so they survive renderer
-// reloads (which happen on GPU crashes — notably during screen lock).
-// Without this, the d3 simulation re-solves from scratch after wake and
-// the whole graph reshuffles.
+// ── Composite target resolution ────────────────────────────────────────
 
-const HUB_CACHE_KEY = 'graph.hubPositions.v1'
-const SPOKE_CACHE_KEY = 'graph.spokePositions.v1'
+const RESOLVE_PAD = 18
+const RESOLVE_ITERATIONS = 8
 
-function loadHubCache(): Map<string, { x: number; y: number }> {
-  try {
-    const raw = localStorage.getItem(HUB_CACHE_KEY)
-    if (!raw) return new Map()
-    const obj = JSON.parse(raw) as Record<string, { x: number; y: number }>
-    return new Map(Object.entries(obj))
-  } catch {
-    return new Map()
+/**
+ * Move composite targets so they don't overlap spoke slots, hub pills, or one
+ * another. Spokes and hubs are fixed obstacles (their positions are the stable
+ * frame the user navigates by); composites take the whole correction, split
+ * evenly between two composites. Iterative separation along the least-overlap
+ * axis — a few passes are enough for the handful of composites a graph ever has.
+ */
+function resolveCompositeTargets(
+  composites: CompositeSpring[],
+  spokes: SpokeSpring[],
+  hubs: HubNode[]
+): void {
+  const cHW = COMPOSITE_WIDTH / 2 + RESOLVE_PAD
+  const cHH = COMPOSITE_HEIGHT / 2 + RESOLVE_PAD
+  const obstacles: Box[] = []
+  for (const s of spokes) {
+    obstacles.push(boxFromCenter(s.targetX, s.targetY, THUMB_WIDTH / 2, THUMB_HEIGHT / 2))
+  }
+  for (const h of hubs) {
+    obstacles.push(boxFromCenter(h.x, h.y, HUB_PILL_HALF_W, HUB_PILL_HALF_H))
+  }
+
+  for (let iter = 0; iter < RESOLVE_ITERATIONS; iter++) {
+    let moved = false
+    for (let i = 0; i < composites.length; i++) {
+      const c = composites[i]
+      let rc = boxFromCenter(c.targetX, c.targetY, cHW, cHH)
+      for (const o of obstacles) {
+        const mtv = boxSeparation(rc, o)
+        if (mtv) { rc = boxAt(rc, mtv.x, mtv.y); moved = true }
+      }
+      for (let j = i + 1; j < composites.length; j++) {
+        const d = composites[j]
+        const rd = boxFromCenter(d.targetX, d.targetY, cHW, cHH)
+        const mtv = boxSeparation(rc, rd)
+        if (mtv) {
+          rc = boxAt(rc, mtv.x / 2, mtv.y / 2)
+          d.targetX -= mtv.x / 2
+          d.targetY -= mtv.y / 2
+          moved = true
+        }
+      }
+      c.targetX = (rc.minX + rc.maxX) / 2
+      c.targetY = (rc.minY + rc.maxY) / 2
+    }
+    if (!moved) break
   }
 }
 
-function saveHubCache(cache: Map<string, { x: number; y: number }>): void {
-  try {
-    const obj: Record<string, { x: number; y: number }> = {}
-    for (const [k, v] of cache) obj[k] = v
-    localStorage.setItem(HUB_CACHE_KEY, JSON.stringify(obj))
-  } catch {
-    /* quota or unavailable — ignore */
-  }
-}
+// ── Spoke position cache ───────────────────────────────────────────────
+// Where each thumbnail currently is, so a remount picks up from where the user
+// last saw it instead of every node re-springing out of its hub. In memory
+// only: positions are derived (hub target + deterministic spoke offset), so
+// there is nothing worth writing to disk — after a renderer reload the first
+// sync seeds every spoke straight at its target, which is where the cache
+// would have put it anyway.
 
-// Subset of SpokeSpring sufficient to restore visual position on next load.
-// Targets/offsets are recomputed from current sessions+projectPath, so we
-// only need x/y (and vx/vy for a tiny bit of liveness on restore).
-type SpokeCacheEntry = { x: number; y: number; vx: number; vy: number }
-
-function loadSpokeCache(): Map<string, SpokeCacheEntry> {
-  try {
-    const raw = localStorage.getItem(SPOKE_CACHE_KEY)
-    if (!raw) return new Map()
-    const obj = JSON.parse(raw) as Record<string, SpokeCacheEntry>
-    return new Map(Object.entries(obj))
-  } catch {
-    return new Map()
-  }
-}
-
-function saveSpokeCache(cache: Map<string, SpokeSpring>): void {
-  try {
-    const obj: Record<string, SpokeCacheEntry> = {}
-    for (const [k, v] of cache) obj[k] = { x: v.x, y: v.y, vx: v.vx, vy: v.vy }
-    localStorage.setItem(SPOKE_CACHE_KEY, JSON.stringify(obj))
-  } catch {
-    /* quota or unavailable — ignore */
-  }
-}
-
-const hubPositionCache = loadHubCache()
-const spokePositionCache = loadSpokeCache()
 const spokeSpringCache = new Map<string, SpokeSpring>()
+
+/**
+ * True until the first sessions sync of this renderer has run. A brand new
+ * session springs out of its hub, which is the right animation for something
+ * that just appeared — but on a cold start *every* session is new, and a
+ * screenful of thumbnails flying outward is not an entrance, it's a mess
+ * (renderer reloads happen on their own, notably on GPU crashes during screen
+ * lock). On that first sync only, spokes start where they belong.
+ */
+let awaitingFirstSync = true
 
 /**
  * Every spawn link seen this run (child id → spawner id), including sessions
@@ -280,36 +408,7 @@ const spokeSpringCache = new Map<string, SpokeSpring>()
  */
 const spawnLineage = new Map<string, string>()
 
-// Seed the in-memory spring cache from persisted positions so the very first
-// sync after a renderer reload restores spokes instead of re-springing them
-// from the hub center. We don't have targetX/targetY/offsets yet — the sync
-// effect overwrites those — we just need x/y/vx/vy to be honoured.
-for (const [id, p] of spokePositionCache) {
-  spokeSpringCache.set(id, {
-    id,
-    hubId: '',
-    offsetX: 0, offsetY: 0,
-    anchorOffsetX: 0, anchorOffsetY: 0,
-    x: p.x, y: p.y,
-    vx: p.vx, vy: p.vy,
-    targetX: p.x, targetY: p.y,
-  })
-}
 
-// Persist on tab hide / unload as well as at settle time. Screen lock often
-// causes a renderer GPU crash + reload before the simulation has time to
-// settle, so settle-time persistence alone loses the latest positions.
-if (typeof window !== 'undefined') {
-  const flush = (): void => {
-    saveHubCache(hubPositionCache)
-    saveSpokeCache(spokeSpringCache)
-  }
-  window.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flush()
-  })
-  window.addEventListener('beforeunload', flush)
-  window.addEventListener('pagehide', flush)
-}
 
 // ── Hook ───────────────────────────────────────────────────────────────
 
@@ -321,7 +420,6 @@ export function useSimulation(width: number, height: number): SimulationResult {
   const allSessions = useStore((s) => s.sessions)
   const sessions = useMemo(() => allSessions.filter((x) => !x.isAttached && !x.isPipeline && !x.isScheduled && !x.isGithub), [allSessions])
   const splitGroups = useStore((s) => s.splitGroups)
-  const hubSimRef = useRef<Simulation<HubNode, never> | null>(null)
   const hubNodesRef = useRef<HubNode[]>([])
   const hubMapRef = useRef<Map<string, HubNode>>(new Map())
   const spokeSpringsRef = useRef<Map<string, SpokeSpring>>(new Map())
@@ -331,7 +429,6 @@ export function useSimulation(width: number, height: number): SimulationResult {
   // the composite's final location instead of snapping to their cached spoke.
   const compositePositionHistoryRef = useRef<Map<string, { x: number; y: number; memberIds: string[] }>>(new Map())
   const rafRef = useRef<number>(0)
-  const prevSessionCountRef = useRef(0)
   const animatingRef = useRef(false)
 
   // State setters accessed via refs so the tick function never goes stale
@@ -379,19 +476,13 @@ export function useSimulation(width: number, height: number): SimulationResult {
 
   const tickRef = useRef<() => void>(() => {})
   tickRef.current = (): void => {
-    const sim = hubSimRef.current
     const hubNodes = hubNodesRef.current
     const hubMap = hubMapRef.current
     const springs = spokeSpringsRef.current
     const composites = compositeSpringsRef.current
 
-    if (!sim) {
-      animatingRef.current = false
-      return
-    }
-
-    // Tick hub simulation
-    sim.tick()
+    // Hubs spring toward the targets computed by the sessions effect.
+    const hubsSettled = stepSprings(hubNodes)
 
     // Update spoke targets from current hub positions
     for (const spring of springs.values()) {
@@ -425,37 +516,24 @@ export function useSimulation(width: number, height: number): SimulationResult {
       }
     }
 
-    // Step both spring sets
     const springArray = [...springs.values()]
     const compositeArray = [...composites.values()]
+
+    // Composites live outside the d3 hub collision: a multi-hub composite
+    // wants the centroid of its hubs (which can be anywhere, including on top
+    // of another cluster) and a single-hub one wants a hashed satellite slot.
+    // Resolve their TARGETS against spoke slots, hub pills and each other
+    // before the springs run — a velocity nudge can't hold more than ~40px
+    // against the spring, so overlap has to be fixed where the node is going,
+    // not where it is. Recomputed every tick from the same inputs, so the
+    // resolved targets are stable and the springs settle normally.
+    if (compositeArray.length > 0) {
+      resolveCompositeTargets(compositeArray, springArray, hubNodes)
+    }
+
+    // Step both spring sets
     const spokesSettled = stepSprings(springArray)
     const compositesSettled = stepSprings(compositeArray)
-
-    // Soft repulsion: composites push spokes out of their bounding box (with padding).
-    // This keeps the layout from overlapping when a composite forms over existing
-    // spoke positions; the spokes drift around it and re-settle nearby.
-    const C_HALF_W_PAD = COMPOSITE_WIDTH / 2 + 18
-    const C_HALF_H_PAD = COMPOSITE_HEIGHT / 2 + 18
-    const S_HALF_W = THUMB_WIDTH / 2 + 8
-    const S_HALF_H = THUMB_HEIGHT / 2 + 8
-    for (const c of compositeArray) {
-      for (const s of springArray) {
-        const dx = s.x - c.x
-        const dy = s.y - c.y
-        const overlapX = (C_HALF_W_PAD + S_HALF_W) - Math.abs(dx)
-        const overlapY = (C_HALF_H_PAD + S_HALF_H) - Math.abs(dy)
-        if (overlapX > 0 && overlapY > 0) {
-          // Push along the axis of least overlap (cheap MTV-style separation)
-          if (overlapX < overlapY) {
-            const sign = dx < 0 ? -1 : 1
-            s.vx += sign * Math.min(overlapX * 0.08, 1.6)
-          } else {
-            const sign = dy < 0 ? -1 : 1
-            s.vy += sign * Math.min(overlapY * 0.08, 1.6)
-          }
-        }
-      }
-    }
 
     // Record composite positions for elastic-restore on dissolve.
     for (const c of compositeArray) {
@@ -518,9 +596,6 @@ export function useSimulation(width: number, height: number): SimulationResult {
     }
 
     // Save positions to cache (survives unmount)
-    for (const h of hubPositions) {
-      hubPositionCache.set(h.id, { x: h.x, y: h.y })
-    }
     for (const s of springArray) {
       spokeSpringCache.set(s.id, { ...s })
     }
@@ -561,28 +636,13 @@ export function useSimulation(width: number, height: number): SimulationResult {
     setEdgesRef.current(edgeData)
 
     // Continue only if still animating
-    const hubActive = sim.alpha() > 0.002
-    if (!spokesSettled || !compositesSettled || hubActive) {
+    if (!spokesSettled || !compositesSettled || !hubsSettled) {
       rafRef.current = requestAnimationFrame(() => tickRef.current())
     } else {
-      // Anchor hubs at their settled positions so future low-alpha ticks
-      // (triggered by unrelated sessions-array mutations) can't drift them.
-      // Released again only by a compaction or relayout pass.
-      anchorHubs(hubNodes)
-      // Persist the settled positions so they survive renderer reloads
-      // (e.g. GPU crashes during screen lock). Drop cached entries for
-      // projects that no longer have a hub — otherwise the cache grows
-      // forever as the user works in new projects.
-      const liveIds = new Set(hubNodes.map((h) => h.id))
-      for (const key of hubPositionCache.keys()) {
-        if (!liveIds.has(key)) hubPositionCache.delete(key)
-      }
-      saveHubCache(hubPositionCache)
       const liveSpokeIds = new Set(springArray.map((s) => s.id))
       for (const key of spokeSpringCache.keys()) {
         if (!liveSpokeIds.has(key)) spokeSpringCache.delete(key)
       }
-      saveSpokeCache(spokeSpringCache)
       animatingRef.current = false
     }
   }
@@ -595,96 +655,29 @@ export function useSimulation(width: number, height: number): SimulationResult {
     rafRef.current = requestAnimationFrame(() => tickRef.current())
   }
 
-  // ── Initialize hub simulation (once) ───────────────────────────────
+  // ── Relayout (Settings button) ─────────────────────────────────────
+  //
+  // requestGraphRelayout has already cleared the saved order; all this has to
+  // do is recompute targets from it. Bumping a counter re-runs the sessions
+  // effect, which is the single place hub targets are assigned.
+
+  const [relayoutNonce, setRelayoutNonce] = useState(0)
 
   useEffect(() => {
-    if (width === 0 || height === 0) return
-    if (hubSimRef.current) return
-
-    const sim = createHubSimulation(width, height)
-    hubSimRef.current = sim
-    sim.stop()
-
-    return () => {
-      sim.stop()
-      hubSimRef.current = null
-      animatingRef.current = false
-      cancelAnimationFrame(rafRef.current)
-    }
-  }, [width, height])
-
-  // ── Update centering forces when size changes, without rebuilding the
-  // simulation (which would re-jiggle hub positions).
-  useEffect(() => {
-    const sim = hubSimRef.current
-    if (!sim || width === 0 || height === 0) return
-    setSimulationCenter(sim, width, height)
-  }, [width, height])
-
-  // ── Layout passes (compaction / relayout) ──────────────────────────
-
-  const compactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  function runLayoutPass(kind: 'compact' | 'relayout'): void {
-    const sim = hubSimRef.current
-    if (!sim) {
-      // Graph not mounted — remember the request for the next mount.
-      pendingPass = kind
-      return
-    }
-    if (compactTimerRef.current) {
-      clearTimeout(compactTimerRef.current)
-      compactTimerRef.current = null
-    }
-    pendingPass = null
-    releaseHubs(hubNodesRef.current)
-    if (kind === 'relayout') {
-      // Forget where things were: the point is a fresh, dense solve.
-      hubPositionCache.clear()
-      sim.alpha(RELAYOUT_ALPHA)
-    } else {
-      sim.alpha(COMPACT_ALPHA)
-    }
-    startAnimation()
-  }
-
-  function scheduleCompaction(): void {
-    if (pendingPass === 'relayout') return // stronger pass already queued
-    pendingPass = 'compact'
-    if (compactTimerRef.current) clearTimeout(compactTimerRef.current)
-    compactTimerRef.current = setTimeout(() => {
-      compactTimerRef.current = null
-      if (pendingPass === 'compact') runLayoutPass('compact')
-    }, COMPACT_DELAY_MS)
-  }
-
-  // Explicit relayout requests (Settings button) + any pass left over from a
-  // previous mount. Runs after the sessions sync effect below on mount, so
-  // the hub nodes exist by the time it fires.
-  useEffect(() => {
-    const onRelayout = (): void => runLayoutPass('relayout')
+    const onRelayout = (): void => setRelayoutNonce((n) => n + 1)
     window.addEventListener(RELAYOUT_EVENT, onRelayout)
-    if (pendingPass) {
-      const kind = pendingPass
-      const t = setTimeout(() => runLayoutPass(kind), 50)
-      return () => {
-        clearTimeout(t)
-        window.removeEventListener(RELAYOUT_EVENT, onRelayout)
-      }
-    }
     return () => window.removeEventListener(RELAYOUT_EVENT, onRelayout)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [width, height])
+  }, [])
 
   useEffect(() => () => {
-    if (compactTimerRef.current) clearTimeout(compactTimerRef.current)
+    animatingRef.current = false
+    cancelAnimationFrame(rafRef.current)
   }, [])
 
   // ── Sync sessions → hub nodes + spoke springs ─────────────────────
 
   useEffect(() => {
-    const sim = hubSimRef.current
-    if (!sim || width === 0 || height === 0) return
+    if (width === 0 || height === 0) return
 
     // Group sessions by project. Sort session ids deterministically so their
     // spoke slot assignment doesn't shift if the sessions array order changes
@@ -707,10 +700,6 @@ export function useSimulation(width: number, height: number): SimulationResult {
     const newHubNodes: HubNode[] = []
     const newHubMap = new Map<string, HubNode>()
 
-    // Did any surviving cluster's footprint shrink? (A 5→4 close within the
-    // same ring frees no space, so it shouldn't trigger a compaction pass.)
-    let clusterShrank = false
-
     for (const [projectPath, group] of groups) {
       const existing = existingHubMap.get(projectPath)
       if (existing) {
@@ -719,21 +708,20 @@ export function useSimulation(width: number, height: number): SimulationResult {
         newHubNodes.push(existing)
         newHubMap.set(projectPath, existing)
       } else {
-        // Restore from cache if available, otherwise random position.
-        // Cached hubs are anchored immediately so initial centering forces
-        // can't drift them from their previous settled position.
-        const cached = hubPositionCache.get(projectPath)
+        // Position is assigned below, once every footprint is known. A brand
+        // new hub starts life at its target rather than flying in from
+        // nowhere — only hubs that already have a position animate.
         const node: HubNode = {
           id: projectPath,
           projectName: group.projectName,
           color: projectColor(projectPath),
           sessionCount: group.sessionIds.length,
-          x: cached?.x ?? width / 2 + (Math.random() - 0.5) * 100,
-          y: cached?.y ?? height / 2 + (Math.random() - 0.5) * 100
-        }
-        if (cached) {
-          node.anchorX = cached.x
-          node.anchorY = cached.y
+          x: NaN,
+          y: NaN,
+          vx: 0,
+          vy: 0,
+          targetX: 0,
+          targetY: 0,
         }
         newHubNodes.push(node)
         newHubMap.set(projectPath, node)
@@ -775,6 +763,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
     recordLineage(spawnLineage, spawnInput)
     const forest = buildSpawnForest(spawnInput.filter((x) => !memberIdSet.has(x.id)), spawnLineage)
 
+    // Pass 1: lay out each cluster's spokes and record its footprint. The hub
+    // positions depend on these footprints, and the spoke targets depend on the
+    // hub positions, so the two have to be worked out in that order.
+    const offsetsByProject = new Map<string, SpokeTarget[]>()
     for (const [projectPath, group] of groups) {
       const visibleIds = group.sessionIds.filter((id) => !memberIdSet.has(id))
       if (visibleIds.length === 0) continue
@@ -787,20 +779,52 @@ export function useSimulation(width: number, height: number): SimulationResult {
         console.warn('[graph] spawn forest dropped sessions — falling back to the ring layout')
         offsets = computeSpokeOffsets(visibleIds.map((id) => ({ id, children: [] })), projectPath)
       }
-      const hub = newHubMap.get(projectPath)!
-      const hubX = hub.x ?? width / 2
-      const hubY = hub.y ?? height / 2
+      offsetsByProject.set(projectPath, offsets)
 
-      // Real footprint for collision. A single-hub composite sits outside the
-      // spoke ring, so it widens the footprint when present.
-      let extent = clusterExtent(offsets)
-      for (const c of activeComposites) {
-        if (c.hubIds.length === 1 && c.hubIds[0] === projectPath) {
-          extent = Math.max(extent, BASE_RADIUS + RING_GAP * 0.85 + COMPOSITE_WIDTH / 2)
-        }
+      const hub = newHubMap.get(projectPath)!
+      const box = clusterBox(offsets)
+      // A single-hub composite sits outside the spoke ring, so it widens the
+      // footprint when present. Its slot is at a hashed angle, so reserve room
+      // for it in every direction rather than guessing which one.
+      const hasComposite = activeComposites.some(
+        (c) => c.hubIds.length === 1 && c.hubIds[0] === projectPath
+      )
+      if (hasComposite) {
+        const reach = BASE_RADIUS + RING_GAP * 0.85 + COMPOSITE_WIDTH / 2
+        box.minX = Math.min(box.minX, -reach)
+        box.maxX = Math.max(box.maxX, reach)
+        box.minY = Math.min(box.minY, -reach)
+        box.maxY = Math.max(box.maxY, reach)
       }
-      if (hub.radius != null && extent < hub.radius - 1) clusterShrank = true
-      hub.radius = extent
+      hub.box = box
+    }
+
+    // Pass 2: place the hubs. Established projects are pinned to the slot they
+    // already hold; only newcomers, and the rare hub whose cluster has grown
+    // into a neighbour, are packed afresh.
+    const hubTargets = computeHubTargets(orderHubs(newHubNodes), width, height, hubSlots)
+    rememberHubSlots(hubTargets)
+    for (const hub of newHubNodes) {
+      const t = hubTargets.get(hub.id)
+      if (!t) continue
+      hub.targetX = t.x
+      hub.targetY = t.y
+      // A hub with no position yet (new project) starts at its target; one that
+      // already has a position springs there, which is what animates the slide
+      // inward when a neighbouring project closes.
+      if (!Number.isFinite(hub.x) || !Number.isFinite(hub.y)) {
+        hub.x = t.x
+        hub.y = t.y
+        hub.vx = 0
+        hub.vy = 0
+      }
+    }
+
+    // Pass 3: attach the spoke springs to their hubs.
+    for (const [projectPath, offsets] of offsetsByProject) {
+      const hub = newHubMap.get(projectPath)!
+      const hubX = hub.x
+      const hubY = hub.y
 
       for (const offset of offsets) {
         const existing = existingSprings.get(offset.id)
@@ -815,11 +839,12 @@ export function useSimulation(width: number, height: number): SimulationResult {
           existing.targetY = hubY + offset.offsetY
           newSprings.set(offset.id, existing)
         } else {
-          // Three sources for initial position, in priority order:
+          // Four sources for initial position, in priority order:
           //   1. Just-dissolved composite — start at its last position with
           //      a velocity impulse toward the spoke target (elastic feel).
           //   2. Spring cache — restore previous on-graph position.
-          //   3. Hub center — first time we've seen this session.
+          //   3. First sync of this renderer — start settled at the target.
+          //   4. Hub center — a session that has genuinely just appeared.
           const dissolved = dissolvedMemberStarts.get(offset.id)
           const cached = spokeSpringCache.get(offset.id)
           const targetX = hubX + offset.offsetX
@@ -834,11 +859,21 @@ export function useSimulation(width: number, height: number): SimulationResult {
             vx = (targetX - startX) * 0.18
             vy = (targetY - startY) * 0.18
           } else if (cached) {
+            // Exactly where it was, at rest. This used to get a small random
+            // velocity for "re-entry liveness", which made sense when the hub
+            // simulation reheated on every mount and everything was moving
+            // anyway. Now the layout is identical across mounts, so the nudge
+            // is the *only* motion: every thumbnail jittering for a second on
+            // every return to the graph, for no reason.
             startX = cached.x
             startY = cached.y
-            // Tiny random nudge for re-entry liveness
-            vx = (Math.random() - 0.5) * 1.5
-            vy = (Math.random() - 0.5) * 1.5
+            vx = 0
+            vy = 0
+          } else if (awaitingFirstSync) {
+            startX = targetX
+            startY = targetY
+            vx = 0
+            vy = 0
           } else {
             startX = hubX
             startY = hubY
@@ -866,10 +901,7 @@ export function useSimulation(width: number, height: number): SimulationResult {
     }
 
     spokeSpringsRef.current = newSprings
-
-    // Hand the hub set to d3 now that each hub's footprint radius is known
-    // (forceCollide samples its radius accessor when nodes are assigned).
-    sim.nodes(newHubNodes)
+    awaitingFirstSync = false
 
     // Sync composite springs (one per active group)
     const existingComposites = compositeSpringsRef.current
@@ -887,12 +919,15 @@ export function useSimulation(width: number, height: number): SimulationResult {
         // Initial position: targets vary by hub-count
         //   - single-hub: hub center + satellite offset
         //   - multi-hub: centroid of hubs
-        let cx = width / 2, cy = height / 2
+        // Fallbacks are the ORIGIN, not the viewport centre: hub coordinates
+        // live in the pack's own frame, which is centred on 0,0 and left for
+        // the camera to place (see computeHubTargets).
+        let cx = 0, cy = 0
         if (c.hubIds.length === 1) {
           const hub = newHubMap.get(c.hubIds[0])
           if (hub) {
-            cx = (hub.x ?? width / 2) + offset.x
-            cy = (hub.y ?? height / 2) + offset.y
+            cx = (hub.x ?? 0) + offset.x
+            cy = (hub.y ?? 0) + offset.y
           }
         } else {
           let sumX = 0, sumY = 0, count = 0
@@ -916,40 +951,8 @@ export function useSimulation(width: number, height: number): SimulationResult {
     }
     compositeSpringsRef.current = newComposites
 
-    // Reheat hub sim
-    const countChanged = sessions.length !== prevSessionCountRef.current
-    const hubCountChanged = newHubNodes.length !== existingHubMap.size
-    const hadCachedPositions = newHubNodes.some((h) => hubPositionCache.has(h.id))
-    prevSessionCountRef.current = sessions.length
-
-    const hubRemoved = existingHubMap.size > 0 && newHubNodes.length < existingHubMap.size
-
-    if (hubCountChanged) {
-      // Hub set changed (added/removed project, OR first sync after a
-      // renderer reload when existingHubMap was empty). Anchored (cached)
-      // hubs stay where the user last saw them; new hubs without a cached
-      // position have no anchor and participate in the d3 layout to find a
-      // spot. Collision still applies to everyone, so a new cluster can't
-      // land on top of an existing one.
-      const hasUncachedNew = newHubNodes.some((h) => h.anchorX == null)
-      if (hasUncachedNew) {
-        sim.alpha(hadCachedPositions ? 0.1 : 0.3)
-      } else if (!hubRemoved) {
-        sim.alpha(0.05)
-      }
-    } else if (countChanged) {
-      // Same projects, different spoke counts. Collision radii changed, so
-      // let collision (alpha-independent) resolve any new overlap while the
-      // anchors keep everything else put.
-      sim.alpha(0.05)
-    }
-
-    // Space was vacated — re-fill it with a deferred, gentle compaction.
-    if (hubRemoved || clusterShrank) scheduleCompaction()
-
-    // If composites changed (formed/dissolved), kick the spring system into life
-    // even if d3-force hasn't reheated. The repulsion + elastic-restore needs at
-    // least one frame to kick in.
+    // If composites changed (formed/dissolved), kick the springs into life. The
+    // repulsion + elastic-restore needs at least one frame to take effect.
     if (activeComposites.length !== existingComposites.size || dissolvedMemberStarts.size > 0) {
       // Bump every spring's velocity slightly so animation continues until settled.
       for (const s of newSprings.values()) {
@@ -1025,7 +1028,10 @@ export function useSimulation(width: number, height: number): SimulationResult {
     }
 
     startAnimation()
-  }, [sessions, width, height, activeComposites, memberIdSet])
+    // relayoutNonce is a deliberate trigger: Settings → Re-layout clears the
+    // saved hub order, and bumping it re-runs this effect so the pack is
+    // recomputed. Hubs then spring from where they are to their new slots.
+  }, [sessions, width, height, activeComposites, memberIdSet, relayoutNonce])
 
   // ── Nudge a spoke (gentle push away from mouse point) ──────────────
 

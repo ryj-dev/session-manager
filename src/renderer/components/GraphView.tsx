@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useMemo, useState } from 'react'
+import { useRef, useEffect, useLayoutEffect, useCallback, useMemo, useState } from 'react'
 import { useStore } from '../store'
 import { formatHotkey } from '../lib/hotkeys'
 import { useSimulation, type EdgeData, type ViewportTransform } from '../hooks/useSimulation'
@@ -120,12 +120,22 @@ export function GraphView(): JSX.Element {
   // Track container size so the simulation re-centers on window resize.
   // Reading clientWidth directly during render would go stale (React doesn't
   // re-render just because the window resized), so we subscribe explicitly.
+  // Measured in a LAYOUT effect, before the browser paints: hub positions are a
+  // pure function of the viewport, so laying out against a placeholder size and
+  // correcting afterwards is not a harmless approximation — it is a complete
+  // throwaway layout followed by every node springing to the real one, on every
+  // single mount. Zero is passed through as zero for the same reason; the
+  // simulation no-ops until it knows the real size.
   const [size, setSize] = useState({ width: 0, height: 0 })
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) return
     const update = (): void => {
-      setSize({ width: el.clientWidth, height: el.clientHeight })
+      setSize((prev) =>
+        prev.width === el.clientWidth && prev.height === el.clientHeight
+          ? prev // same size — don't re-run the layout for nothing
+          : { width: el.clientWidth, height: el.clientHeight }
+      )
     }
     update()
     const observer = new ResizeObserver(update)
@@ -134,8 +144,8 @@ export function GraphView(): JSX.Element {
   }, [])
 
   const { hubs, spokes, composites, edges, contentBounds, nudge } = useSimulation(
-    size.width || 800,
-    size.height || 600
+    size.width,
+    size.height
   )
 
   // Member sessions are rendered inside their composite — hide them from the graph.
@@ -148,10 +158,23 @@ export function GraphView(): JSX.Element {
   // ── Viewport: auto-fit from content bounds, overridable by wheel zoom ──
 
   const [viewport, setViewport] = useState<ViewportTransform>({ scale: 1, translateX: 0, translateY: 0 })
+  const viewportRef = useRef(viewport)
+  viewportRef.current = viewport
   const userZoomedRef = useRef(false)
-  const sessionCountRef = useRef(0)
+  const hasFittedRef = useRef(false)
 
-  // Auto-fit when content bounds change and user hasn't zoomed (or session count changed)
+  // Frame the graph on first paint, and afterwards only when something has
+  // actually left the frame.
+  //
+  // Re-fitting on every change of contentBounds looks like the tidy thing to do
+  // and is the single biggest reason the graph felt unstable: bounds move
+  // whenever any cluster grows, so one spawn re-centred AND re-scaled the whole
+  // world, sliding every node the user had learnt the position of. Session count
+  // also used to clear userZoomedRef, which threw away a manual zoom on top.
+  //
+  // Nothing is gained by re-framing content that is already comfortably on
+  // screen, so the test is exactly that: leave the camera alone while every
+  // corner of the content still lands inside the viewport.
   useEffect(() => {
     if (!contentBounds) return
     const el = containerRef.current
@@ -160,13 +183,20 @@ export function GraphView(): JSX.Element {
     const h = el.clientHeight
     if (w === 0 || h === 0) return
 
-    // Reset user zoom when session count changes
-    if (sessions.length !== sessionCountRef.current) {
-      userZoomedRef.current = false
-      sessionCountRef.current = sessions.length
+    if (hasFittedRef.current) {
+      // The user has taken the camera over; a new project appearing off-screen
+      // is theirs to pan to, not ours to yank them away for.
+      if (userZoomedRef.current) return
+      const vp = viewportRef.current
+      const SLACK = 8 // ignore sub-pixel/animation jitter at the edges
+      const inFrame =
+        contentBounds.minX * vp.scale + vp.translateX >= -SLACK &&
+        contentBounds.minY * vp.scale + vp.translateY >= -SLACK &&
+        contentBounds.maxX * vp.scale + vp.translateX <= w + SLACK &&
+        contentBounds.maxY * vp.scale + vp.translateY <= h + SLACK
+      if (inFrame) return
     }
-
-    if (userZoomedRef.current) return
+    hasFittedRef.current = true
 
     const PADDING = 80
     const contentW = contentBounds.maxX - contentBounds.minX + PADDING * 2
@@ -181,12 +211,9 @@ export function GraphView(): JSX.Element {
     const translateY = h / 2 - contentCenterY * scale
 
     setViewport({ scale, translateX, translateY })
-  }, [contentBounds, sessions.length])
+  }, [contentBounds])
 
   // ── Momentum wheel zoom toward cursor (same approach as tc-sql-atlas) ──
-
-  const viewportRef = useRef(viewport)
-  viewportRef.current = viewport
 
   useEffect(() => {
     const el = containerRef.current
