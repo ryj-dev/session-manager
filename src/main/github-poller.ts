@@ -180,9 +180,17 @@ async function hydrate(token: string, n: ApiNotification, login: string | null):
     const res = await fetch(n.subject.url, { headers: apiHeaders(token) })
     if (!res.ok) return null
     const pr = (await res.json()) as ApiPull
+    const reviewRequested = login ? (pr.requested_reviewers ?? []).some((r) => r.login === login) : undefined
     return {
       id: n.id,
-      kind,
+      // An OPEN review request outranks the notification reason. GitHub's
+      // `reason` flips to `mention` the first time anyone @s you on a thread
+      // and never flips back, so a later explicit re-review request arrives
+      // labelled `mention` — routing it to the mention rule, where a user who
+      // turned mentions off loses review requests on that PR entirely. The
+      // requested_reviewers bit is the trustworthy signal: GitHub sets it only
+      // on an explicit request and clears it when you submit a review.
+      kind: reviewRequested ? 'review-request' : kind,
       repo: n.repository.full_name,
       prNumber: pr.number,
       title: pr.title,
@@ -194,7 +202,7 @@ async function hydrate(token: string, n: ApiNotification, login: string | null):
       latestCommentUrl: n.subject.latest_comment_url,
       headSha: pr.head?.sha,
       notificationReason: n.reason,
-      reviewRequested: login ? (pr.requested_reviewers ?? []).some((r) => r.login === login) : undefined,
+      reviewRequested,
     }
   } catch {
     return null

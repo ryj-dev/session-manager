@@ -1028,8 +1028,14 @@ export async function runGithubAgent(
   githubItemSessions.set(itemId, id)
   githubAgentBySession.set(id, itemId)
   githubInitialPromptPending.add(id)
-  // Live marker → the panel card shows "Watch live" while it runs.
-  githubStore.setAgentLive(itemId, id)
+  // Live marker → the panel card shows "Watch live" while it runs. The mode is
+  // stamped HERE, not re-read when the agent responds: GitHub rewrites a
+  // thread's notification reason underneath us (a review-requested PR becomes
+  // `mention` forever once anyone @s you) and the item's kind is re-derived
+  // from it on every poll, so a review authorised under reviewRequest='auto'
+  // would otherwise land as a draft because mention='off' by the time it
+  // finished.
+  githubStore.setAgentLive(itemId, id, githubAutoModeFor(item.kind))
   broadcastGithubItems()
   // Spawning the agent means the item is being handled — clear unread on
   // GitHub (read back, GitHub stays the source of truth).
@@ -1168,7 +1174,10 @@ async function handleGithubRespond(body: string, res: ServerResponse): Promise<v
     // 'auto' → submit right now; 'draft' and 'off' → stored, user approves.
     // No native notifications here — the amber drafts pill on the graph (and
     // the panel itself) is the surfacing mechanism.
-    const mode = githubAutoModeFor(item.kind)
+    // Prefer the mode captured when this agent was spawned; item.kind can have
+    // drifted since (see runGithubAgent). Fall back for runs that predate the
+    // stamp.
+    const mode = item.agentAutoMode ?? githubAutoModeFor(item.kind)
     if (mode === 'auto') {
       const summary = await githubSubmitDraft(payload.itemId)
       res.writeHead(200, { 'Content-Type': 'application/json' })

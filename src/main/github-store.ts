@@ -90,6 +90,15 @@ export interface GithubItem {
    *  open because the user is watching it) — powers the panel's "Watch live"
    *  button. Cleared when the PTY is finally torn down. */
   agentSessionId?: string | null
+  /** The auto-review mode that was in force for THIS item's kind at the moment
+   *  its agent was spawned. GitHub rewrites a thread's `reason` underneath us
+   *  (a review-requested PR permanently becomes `mention` the first time
+   *  someone @s you), and `kind` is re-derived from it on every poll — so
+   *  looking the mode up again when the agent finally responds can resolve
+   *  against a DIFFERENT rule than the one that authorised the run, silently
+   *  turning an auto-post into a draft. Stamped at spawn, consumed at respond
+   *  time. */
+  agentAutoMode?: 'off' | 'draft' | 'auto'
   /** ISO timestamp of the last time this item was BROUGHT TO A CLOSE, with a
    *  one-line summary. Either a response was submitted (github-actions, on
    *  success) or an agent explicitly determined none was warranted — see
@@ -167,6 +176,7 @@ export function upsertItems(incoming: GithubItem[]): GithubItem[] {
             agentClaudeSessionId: prev.agentClaudeSessionId,
             agentCwd: prev.agentCwd,
             agentSessionId: prev.agentSessionId,
+            agentAutoMode: prev.agentAutoMode,
           }
         : item,
     )
@@ -197,8 +207,16 @@ export function clearDraft(id: string): GithubItem[] {
   return persist(getItems().map((i) => (i.id === id ? { ...i, draft: null } : i)))
 }
 
-export function setAgentLive(id: string, agentSessionId: string | null): GithubItem[] {
-  return persist(getItems().map((i) => (i.id === id ? { ...i, agentSessionId } : i)))
+export function setAgentLive(
+  id: string,
+  agentSessionId: string | null,
+  agentAutoMode?: GithubItem['agentAutoMode'],
+): GithubItem[] {
+  return persist(
+    getItems().map((i) =>
+      i.id === id ? { ...i, agentSessionId, ...(agentAutoMode ? { agentAutoMode } : {}) } : i,
+    ),
+  )
 }
 
 export function setAgentSession(id: string, claudeSessionId: string | null, cwd: string | undefined): GithubItem[] {
@@ -221,6 +239,9 @@ export function markResponded(id: string, summary: string, headSha?: string): Gi
             respondedSummary: summary,
             respondedKind: 'submitted' as const,
             respondedHeadSha: headSha ?? i.headSha,
+            // The run is over — drop its spawn-time mode stamp so it can never
+            // be applied to a later run started under a different trigger.
+            agentAutoMode: undefined,
           }
         : i,
     ),
@@ -243,6 +264,7 @@ export function markDismissed(id: string, reason: string, headSha?: string): Git
             respondedSummary: reason,
             respondedKind: 'dismissed' as const,
             respondedHeadSha: headSha ?? i.headSha,
+            agentAutoMode: undefined,
           }
         : i,
     ),

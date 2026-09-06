@@ -69,6 +69,10 @@ Per event kind — review requests / mentions / comments on my PRs — choose **
 
 The mention rule matters more than it looks: a notification's reason flips to `mention` the first time anyone @-mentions you and **never flips back**, so review-requested PRs permanently migrate into the mentions bucket. Gating mentions on an actual @-mention is what stops those from re-reviewing on every push.
 
+Because that migration is one-way, **an open review request outranks the notification reason**: while your login sits in `requested_reviewers`, the item is classified as a review request no matter what GitHub calls the thread. Otherwise a later "re-request review" on a PR you were once @-mentioned on would be judged by the *mentions* rule — and would silently never start for anyone who has mentions switched off.
+
+**Draft vs. auto is decided at spawn, not at respond.** The rule in force when the agent is launched is stamped on the item and used when `github-respond` lands, so a review authorised under *review requests = Auto* still posts even if GitHub relabelled the thread `mention` while the agent was working.
+
 Every uncertain branch fails **open** — an unreachable API, an unresolvable login, a team mention (`@org/team` carries no login to match) all spawn rather than stay silent, on the grounds that a redundant review is recoverable and a dropped review request is not. Each decision is logged with its inputs (`kind`, reason, `reviewRequested`, head SHA, response stamps) so a fail-open is diagnosable after the fact.
 
 Anything gated off just shows up as ordinary unread activity for you to triage, and the manual "Start review" button is never gated — you can always re-review by hand.
