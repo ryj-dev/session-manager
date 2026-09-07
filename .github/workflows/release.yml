@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual dry run: builds the app and uploads to a DRAFT release, so the whole
+  # pipeline can be exercised without publishing anything. Delete the draft after.
+  workflow_dispatch:
 
 jobs:
   build:
@@ -30,8 +33,11 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('ci-dryrun-{0}', github.run_id) }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || format('CI dry run {0}', github.run_id) }}
+          draft: ${{ github.ref_type != 'tag' }}
+          generate_release_notes: ${{ github.ref_type == 'tag' }}
           files: |
             release/*.dmg
             release/*.zip
-          generate_release_notes: true
           fail_on_unmatched_files: true
